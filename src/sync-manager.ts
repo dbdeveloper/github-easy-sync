@@ -510,6 +510,33 @@ export default class SyncManager {
       decodeBase64String(blob.content),
     );
 
+    // Reconcile manifest against the actual tree. The manifest only records
+    // what the *previous* commit chose to track — files that were filtered
+    // out at the time (e.g. because syncConfigDir was off, or rules differed)
+    // remain in the tree but are absent from the manifest. Without this step
+    // determineSyncActions never proposes downloading them, so toggling
+    // syncConfigDir on or relaxing a rule wouldn't pull anything new from
+    // the remote. Synthesize manifest entries for those files so they enter
+    // the action pipeline; isSyncable still filters at the end.
+    let reconciled = 0;
+    for (const filePath of Object.keys(files)) {
+      if (filePath in remoteMetadata.files) continue;
+      remoteMetadata.files[filePath] = {
+        path: filePath,
+        sha: files[filePath].sha,
+        dirty: false,
+        justDownloaded: false,
+        lastModified: Date.now(),
+      };
+      reconciled++;
+    }
+    if (reconciled > 0) {
+      await this.logger.info("Reconciled tree files into manifest view", {
+        added: reconciled,
+        manifestSize: Object.keys(remoteMetadata.files).length,
+      });
+    }
+
     const conflicts = await this.findConflicts(remoteMetadata.files);
 
     // We treat every resolved conflict as an upload SyncAction, mainly cause
