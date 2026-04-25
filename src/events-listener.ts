@@ -1,8 +1,9 @@
 import { Vault, TAbstractFile, TFolder } from "obsidian";
-import MetadataStore, { MANIFEST_FILE_NAME } from "./metadata-store";
+import MetadataStore from "./metadata-store";
 import { GitHubSyncSettings } from "./settings/settings";
-import Logger, { LOG_FILE_NAME } from "./logger";
+import Logger from "./logger";
 import GitHubSyncPlugin from "./main";
+import { isSyncable } from "./utils";
 
 /**
  * Tracks changes to local sync directory and updates files metadata.
@@ -136,27 +137,10 @@ export default class EventsListener {
   }
 
   private isSyncable(filePath: string) {
-    if (filePath === `${this.vault.configDir}/${MANIFEST_FILE_NAME}`) {
-      // Manifest file must always be synced
-      return true;
-    } else if (
-      filePath === `${this.vault.configDir}/workspace.json` ||
-      filePath === `${this.vault.configDir}/workspace-mobile.json`
-    ) {
-      // Obsidian recommends not syncing the workspace files
-      return false;
-    } else if (filePath === `${this.vault.configDir}/${LOG_FILE_NAME}`) {
-      // Don't sync the log file, doesn't make sense
-      return false;
-    } else if (
-      this.settings.syncConfigDir &&
-      filePath.startsWith(this.vault.configDir)
-    ) {
-      // Sync configs only if the user explicitly wants to
-      return true;
-    } else {
-      // All other files can be synced
-      return true;
-    }
+    return isSyncable(
+      filePath,
+      this.vault.configDir,
+      this.settings.syncConfigDir,
+    );
   }
 }

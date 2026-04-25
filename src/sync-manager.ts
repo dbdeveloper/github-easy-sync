@@ -18,7 +18,7 @@ import MetadataStore, {
 import EventsListener from "./events-listener";
 import { GitHubSyncSettings } from "./settings/settings";
 import Logger, { LOG_FILE_NAME } from "./logger";
-import { decodeBase64String, hasTextExtension } from "./utils";
+import { decodeBase64String, hasTextExtension, isSyncable } from "./utils";
 import GitHubSyncPlugin from "./main";
 
 interface SyncAction {
@@ -230,21 +230,13 @@ export default class SyncManager {
     files: { [key: string]: GetTreeResponseItem },
     resuming: boolean,
   ) {
-    const filePaths = Object.keys(files).filter((filePath: string) => {
-      if (filePath === `${this.vault.configDir}/${LOG_FILE_NAME}`) return false;
-      if (filePath.split("/").last()?.startsWith(".")) return false;
-      // NOTE: this rule looks inverted vs. determineSyncActions and the
-      // events-listener — kept for parity with the original ZIP path while
-      // the broader init logic gets rewritten in step 2.
-      if (
-        this.settings.syncConfigDir &&
-        filePath.startsWith(this.vault.configDir) &&
-        filePath !== `${this.vault.configDir}/${MANIFEST_FILE_NAME}`
-      ) {
-        return false;
-      }
-      return true;
-    });
+    const filePaths = Object.keys(files).filter((filePath: string) =>
+      isSyncable(
+        filePath,
+        this.vault.configDir,
+        this.settings.syncConfigDir,
+      ),
+    );
 
     await this.logger.info("Downloading files via API", {
       count: filePaths.length,
@@ -421,7 +413,15 @@ export default class SyncManager {
           // We should not try to sync deleted files, this can happen when
           // the user renames or deletes files after enabling the plugin but
           // before syncing for the first time
-          return !this.metadataStore.data.files[filePath].deleted;
+          if (this.metadataStore.data.files[filePath].deleted) return false;
+          // Apply the unified sync rules so files left over in metadata from
+          // before the rules tightened (e.g. plugin source, .DS_Store, log
+          // file) don't get pushed up.
+          return isSyncable(
+            filePath,
+            this.vault.configDir,
+            this.settings.syncConfigDir,
+          );
         })
         .map(async (filePath: string) => {
           const normalizedPath = normalizePath(filePath);
@@ -620,9 +620,20 @@ export default class SyncManager {
             // If the file was conflicting we need to read the content from the
             // conflict resolution instead of reading it from file since at this point
             // we still have not updated the local file.
-            const content =
-              resolution?.content ||
-              (await this.vault.adapter.read(normalizedPath));
+            let content: string;
+            if (resolution) {
+              content = resolution.content;
+            } else if (await this.vault.adapter.exists(normalizedPath)) {
+              content = await this.vault.adapter.read(normalizedPath);
+            } else {
+              // Stale metadata: file is in our tracking but not on disk. Skip
+              // rather than crash; the sync continues for the remaining actions.
+              await this.logger.warn(
+                "Skip upload: local file missing",
+                { filePath: action.filePath },
+              );
+              return;
+            }
             newTreeFiles[action.filePath] = {
               path: action.filePath,
               mode: "100644",
@@ -632,6 +643,16 @@ export default class SyncManager {
             break;
           }
           case "delete_remote": {
+            // Same defensive check: if the path isn't in the current tree
+            // there's nothing to delete remotely. Either it was already gone
+            // or our metadata is out of step with reality.
+            if (!newTreeFiles[action.filePath]) {
+              await this.logger.warn(
+                "Skip delete_remote: file not in remote tree",
+                { filePath: action.filePath },
+              );
+              break;
+            }
             newTreeFiles[action.filePath].sha = null;
             break;
           }
@@ -648,9 +669,20 @@ export default class SyncManager {
       ...actions
         .filter((action) => action.type === "download")
         .map(async (action: SyncAction) => {
+          const remoteFile = files[action.filePath];
+          if (!remoteFile) {
+            // Path is in metadata but absent from the current remote tree —
+            // happens when rules tightened and a previously-tracked file is
+            // no longer being uploaded. Skip the download silently.
+            await this.logger.warn(
+              "Skip download: file not in remote tree",
+              { filePath: action.filePath },
+            );
+            return;
+          }
           await this.downloadFile(
-            files[action.filePath],
-            remoteMetadata.files[action.filePath].lastModified,
+            remoteFile,
+            remoteMetadata.files[action.filePath]?.lastModified ?? Date.now(),
           );
         }),
       ...actions
@@ -860,18 +892,16 @@ export default class SyncManager {
       }
     });
 
-    if (!this.settings.syncConfigDir) {
-      // Remove all actions that involve the config directory if the user doesn't want to sync it.
-      // The manifest file is always synced.
-      return actions.filter((action: SyncAction) => {
-        return (
-          !action.filePath.startsWith(this.vault.configDir) ||
-          action.filePath === `${this.vault.configDir}/${MANIFEST_FILE_NAME}`
-        );
-      });
-    }
-
-    return actions;
+    // Apply the unified sync rules: drops actions for the log file,
+    // workspace.json, junk like .DS_Store, plugin-folder noise, and the
+    // configDir-when-disabled case all in one place.
+    return actions.filter((action: SyncAction) =>
+      isSyncable(
+        action.filePath,
+        this.vault.configDir,
+        this.settings.syncConfigDir,
+      ),
+    );
   }
 
   /**
@@ -1056,6 +1086,9 @@ export default class SyncManager {
     await this.metadataStore.load();
     if (Object.keys(this.metadataStore.data.files).length === 0) {
       await this.logger.info("Metadata was empty, loading all files");
+      // Walk the whole vault. isSyncable handles the configDir gating —
+      // when syncConfigDir is off it drops everything inside configDir
+      // except the manifest, so we don't need to special-case the walk.
       let files = [];
       let folders = [this.vault.getRoot().path];
       while (folders.length > 0) {
@@ -1063,21 +1096,20 @@ export default class SyncManager {
         if (folder === undefined) {
           continue;
         }
-        if (!this.settings.syncConfigDir && folder === this.vault.configDir) {
-          await this.logger.info("Skipping config dir");
-          // Skip the config dir if the user doesn't want to sync it
-          continue;
-        }
         const res = await this.vault.adapter.list(folder);
         files.push(...res.files);
         folders.push(...res.folders);
       }
       files.forEach((filePath: string) => {
-        if (filePath === `${this.vault.configDir}/workspace.json`) {
-          // Obsidian recommends not syncing the workspace file
+        if (
+          !isSyncable(
+            filePath,
+            this.vault.configDir,
+            this.settings.syncConfigDir,
+          )
+        ) {
           return;
         }
-
         this.metadataStore.data.files[filePath] = {
           path: filePath,
           sha: null,
@@ -1087,8 +1119,10 @@ export default class SyncManager {
         };
       });
 
-      // Must be the first time we run, initialize the metadata store
-      // with itself and all files in the vault.
+      // Manifest is always tracked even if isSyncable would otherwise gate
+      // it through the configDir rule — initialize it explicitly. This is
+      // also what makes a freshly-loaded plugin runnable on a vault where
+      // syncConfigDir is off: we still need the manifest entry to coordinate.
       this.metadataStore.data.files[
         `${this.vault.configDir}/${MANIFEST_FILE_NAME}`
       ] = {
@@ -1110,8 +1144,8 @@ export default class SyncManager {
    */
   async addConfigDirToMetadata() {
     await this.logger.info("Adding config dir to metadata");
-    // Get all the files in the config dir
-    let files = [];
+    // Walk every file under configDir on disk.
+    let files: string[] = [];
     let folders = [this.vault.configDir];
     while (folders.length > 0) {
       const folder = folders.pop();
@@ -1122,15 +1156,49 @@ export default class SyncManager {
       files.push(...res.files);
       folders.push(...res.folders);
     }
-    // Add them to the metadata store
-    files.forEach((filePath: string) => {
-      this.metadataStore.data.files[filePath] = {
-        path: filePath,
-        sha: null,
-        dirty: false,
-        justDownloaded: false,
-        lastModified: Date.now(),
-      };
+
+    const onDiskSyncable = new Set<string>();
+    for (const filePath of files) {
+      if (
+        !isSyncable(
+          filePath,
+          this.vault.configDir,
+          this.settings.syncConfigDir,
+        )
+      ) {
+        continue;
+      }
+      onDiskSyncable.add(filePath);
+      // Preserve existing metadata (sha, lastModified, deleted state) — the
+      // previous implementation overwrote entries with sha=null, which made
+      // the very next sync re-upload everything from scratch.
+      if (!this.metadataStore.data.files[filePath]) {
+        this.metadataStore.data.files[filePath] = {
+          path: filePath,
+          sha: null,
+          dirty: false,
+          justDownloaded: false,
+          lastModified: Date.now(),
+        };
+      }
+    }
+
+    // Drop stale entries: anything inside configDir that's either missing
+    // from disk or no longer passes isSyncable (rules tightened, plugin
+    // source got cleaned out, etc.). The manifest is exempt.
+    const manifestPath = `${this.vault.configDir}/${MANIFEST_FILE_NAME}`;
+    let removed = 0;
+    for (const filePath of Object.keys(this.metadataStore.data.files)) {
+      if (filePath === manifestPath) continue;
+      if (!filePath.startsWith(`${this.vault.configDir}/`)) continue;
+      if (onDiskSyncable.has(filePath)) continue;
+      delete this.metadataStore.data.files[filePath];
+      removed++;
+    }
+
+    await this.logger.info("Config dir metadata updated", {
+      added: onDiskSyncable.size,
+      removedStale: removed,
     });
     this.metadataStore.save();
   }
