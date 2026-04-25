@@ -255,6 +255,24 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           });
       });
 
+    new Setting(containerEl)
+      .setName("Keep plugin conflict copies")
+      .setDesc(
+        "When a plugin .js file conflicts (auto-resolved by manifest version), " +
+          "also save the loser side as <name>.conflict-(local|remote)-<timestamp>.js " +
+          "next to the winner. Off by default to keep plugin folders tidy. " +
+          "Binary files (images, PDFs, …) always keep a backup — this setting " +
+          "only affects plugin .js files.",
+      )
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.keepPluginConflictCopy)
+          .onChange(async (value) => {
+            this.plugin.settings.keepPluginConflictCopy = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
     new Setting(containerEl).setName("Extra").setHeading();
 
     new Setting(containerEl)

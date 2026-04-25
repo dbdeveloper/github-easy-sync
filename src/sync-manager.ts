@@ -18,7 +18,16 @@ import MetadataStore, {
 import EventsListener from "./events-listener";
 import { GitHubSyncSettings } from "./settings/settings";
 import Logger, { LOG_FILE_NAME } from "./logger";
-import { decodeBase64String, hasTextExtension, isSyncable } from "./utils";
+import {
+  ConflictCategory,
+  classifyForConflict,
+  compareSemver,
+  conflictBackupPath,
+  decodeBase64String,
+  hasTextExtension,
+  isSyncable,
+  pluginIdFromPath,
+} from "./utils";
 import GitHubSyncPlugin from "./main";
 
 interface SyncAction {
@@ -462,23 +471,27 @@ export default class SyncManager {
       return;
     }
 
-    const notice = new Notice("Syncing...");
     this.syncing = true;
+    // Pass 0 so the notice stays until we hide it explicitly. Without this
+    // a long sync (lots of files / slow link) silently lost the toast after
+    // ~5 s and the user saw nothing happening until "Sync successful" at
+    // the end.
+    this.progressNotice = new Notice("Preparing sync...", 0);
     try {
       await this.syncImpl();
-      // Shown only if sync doesn't fail
       new Notice("Sync successful", 5000);
     } catch (err) {
-      // Show the error to the user, it's not automatically dismissed to make sure
-      // the user sees it.
       new Notice(`Error syncing. ${err}`);
+    } finally {
+      this.syncing = false;
+      this.progressNotice?.hide();
+      this.progressNotice = null;
     }
-    this.syncing = false;
-    notice.hide();
   }
 
   private async syncImpl() {
     await this.logger.info("Starting sync");
+    this.updateProgress("Analyzing repository state...");
     const { files, sha: treeSha } = await this.client.getRepoContent({
       retry: true,
     });
@@ -537,54 +550,72 @@ export default class SyncManager {
       });
     }
 
-    const conflicts = await this.findConflicts(remoteMetadata.files);
+    // Find diverged files, classified into atomic (binary, plugin .js, or
+    // text-with-undiffable-content) vs text (small text files where a side-
+    // by-side merge actually makes sense).
+    const diverged = await this.findDivergedPaths(remoteMetadata.files);
+    const atomicDiverged = diverged.filter((d) => d.category !== "text");
+    const textDiverged = diverged.filter((d) => d.category === "text");
 
-    // We treat every resolved conflict as an upload SyncAction, mainly cause
-    // the user has complete freedom on the edits they can apply to the conflicting files.
-    // So when a conflict is resolved we change the file locally and upload it.
-    // That solves the conflict.
-    let conflictActions: SyncAction[] = [];
-    // We keep track of the conflict resolutions cause we want to update the file
-    // locally only when we're sure the sync was successul. That happens after we
-    // commit the sync.
-    let conflictResolutions: ConflictResolution[] = [];
-
-    if (conflicts.length > 0) {
-      // Log just paths — each conflict carries full remoteContent and
-      // localContent, which can be tens of MB combined on big files.
+    if (diverged.length > 0) {
       await this.logger.warn("Found conflicts", {
-        total: conflicts.length,
-        paths: conflicts.map((c) => c.filePath),
+        total: diverged.length,
+        atomic: atomicDiverged.length,
+        text: textDiverged.length,
+        paths: diverged.map((d) => `${d.category}:${d.filePath}`),
       });
+    }
+
+    // Atomic conflicts auto-resolve here — no user UI, no prompt. Each
+    // emits a sync action and (for binary / opt-in plugin .js) a local
+    // backup of the loser side.
+    let conflictActions: SyncAction[] = [];
+    if (atomicDiverged.length > 0) {
+      this.updateProgress(
+        `Resolving conflicts: ${atomicDiverged.length} file(s)...`,
+      );
+      conflictActions = await this.resolveAtomicConflicts(
+        atomicDiverged,
+        files,
+        remoteMetadata,
+      );
+    }
+
+    // Text conflicts go through whichever resolution mode the user picked.
+    // We keep ConflictResolution records for "ask" mode so commitSync can
+    // upload exactly what the user merged, even though the local file isn't
+    // updated until after the remote commit succeeds.
+    let conflictResolutions: ConflictResolution[] = [];
+    if (textDiverged.length > 0) {
+      const textPaths = textDiverged.map((d) => d.filePath);
       if (this.settings.conflictHandling === "ask") {
-        // Here we block the sync process until the user has resolved all the conflicts
-        conflictResolutions = await this.onConflicts(conflicts);
-        conflictActions = conflictResolutions.map(
-          (resolution: ConflictResolution) => {
-            return { type: "upload", filePath: resolution.filePath };
-          },
+        this.updateProgress(
+          `Waiting for you to resolve ${textPaths.length} conflict(s)...`,
+        );
+        const textConflicts = await this.loadTextConflictContents(
+          textPaths,
+          remoteMetadata.files,
+        );
+        conflictResolutions = await this.onConflicts(textConflicts);
+        conflictActions.push(
+          ...conflictResolutions.map(
+            (r: ConflictResolution): SyncAction => ({
+              type: "upload",
+              filePath: r.filePath,
+            }),
+          ),
         );
       } else if (this.settings.conflictHandling === "overwriteLocal") {
-        // The user explicitly wants to always overwrite the local file
-        // in case of conflicts so we just download the remote file to solve it
-
-        // It's not necessary to set conflict resolutions as the content the
-        // user expect must be the content of the remote file with no changes.
-        conflictActions = conflictResolutions.map(
-          (resolution: ConflictResolution) => {
-            return { type: "download", filePath: resolution.filePath };
-          },
+        conflictActions.push(
+          ...textPaths.map(
+            (p): SyncAction => ({ type: "download", filePath: p }),
+          ),
         );
       } else if (this.settings.conflictHandling === "overwriteRemote") {
-        // The user explicitly wants to always overwrite the remote file
-        // in case of conflicts so we just upload the remote file to solve it.
-
-        // It's not necessary to set conflict resolutions as the content the
-        // user expect must be the content of the local file with no changes.
-        conflictActions = conflictResolutions.map(
-          (resolution: ConflictResolution) => {
-            return { type: "upload", filePath: resolution.filePath };
-          },
+        conflictActions.push(
+          ...textPaths.map(
+            (p): SyncAction => ({ type: "upload", filePath: p }),
+          ),
         );
       }
     }
@@ -618,7 +649,6 @@ export default class SyncManager {
       byType: actionsByType,
       sample: actions.slice(0, 10),
     });
-
     const newTreeFiles: { [key: string]: NewTreeRequestItem } = Object.keys(
       files,
     )
@@ -692,44 +722,64 @@ export default class SyncManager {
     );
 
     // Download files and delete local files
+    const downloadActions = actions.filter((a) => a.type === "download");
+    const deleteLocalActions = actions.filter(
+      (a) => a.type === "delete_local",
+    );
+    if (downloadActions.length > 0) {
+      this.updateProgress(
+        `Downloading from GitHub: 0/${downloadActions.length}`,
+      );
+    }
+    let downloaded = 0;
     await Promise.all([
-      ...actions
-        .filter((action) => action.type === "download")
-        .map(async (action: SyncAction) => {
-          const remoteFile = files[action.filePath];
-          if (!remoteFile) {
-            // Path is in metadata but absent from the current remote tree —
-            // happens when rules tightened and a previously-tracked file is
-            // no longer being uploaded. Skip the download silently.
-            await this.logger.warn(
-              "Skip download: file not in remote tree",
-              { filePath: action.filePath },
-            );
-            return;
-          }
-          await this.downloadFile(
-            remoteFile,
-            remoteMetadata.files[action.filePath]?.lastModified ?? Date.now(),
+      ...downloadActions.map(async (action: SyncAction) => {
+        const remoteFile = files[action.filePath];
+        if (!remoteFile) {
+          // Path is in metadata but absent from the current remote tree —
+          // happens when rules tightened and a previously-tracked file is
+          // no longer being uploaded. Skip the download silently.
+          await this.logger.warn(
+            "Skip download: file not in remote tree",
+            { filePath: action.filePath },
           );
-        }),
-      ...actions
-        .filter((action) => action.type === "delete_local")
-        .map(async (action: SyncAction) => {
-          await this.deleteLocalFile(action.filePath);
-        }),
+          return;
+        }
+        await this.downloadFile(
+          remoteFile,
+          remoteMetadata.files[action.filePath]?.lastModified ?? Date.now(),
+        );
+        downloaded++;
+        if (
+          downloaded % 5 === 0 ||
+          downloaded === downloadActions.length
+        ) {
+          this.updateProgress(
+            `Downloading from GitHub: ${downloaded}/${downloadActions.length}`,
+          );
+        }
+      }),
+      ...deleteLocalActions.map(async (action: SyncAction) => {
+        await this.deleteLocalFile(action.filePath);
+      }),
     ]);
 
-    await this.commitSync(newTreeFiles, treeSha, conflictResolutions);
+    this.updateProgress("Committing sync to GitHub...");
+    await this.commitSync(newTreeFiles, treeSha, conflictResolutions, {
+      showProgress: true,
+    });
   }
 
   /**
-   * Finds conflicts between local and remote files.
-   * @param filesMetadata Remote files metadata
-   * @returns List of object containing file path, remote and local content of conflicting files
+   * Finds files where local and remote diverged since the last sync,
+   * and classifies each one. Local content is read once per file (for SHA
+   * + classification), so the categorization is content-aware: a file with
+   * a .json extension but a 5 MB single-line dump comes back as "binary"
+   * and bypasses the manual diff UI.
    */
-  async findConflicts(filesMetadata: {
+  async findDivergedPaths(filesMetadata: {
     [key: string]: FileMetadata;
-  }): Promise<ConflictFile[]> {
+  }): Promise<{ filePath: string; category: ConflictCategory }[]> {
     const commonFiles = Object.keys(filesMetadata).filter(
       (key) => key in this.metadataStore.data.files,
     );
@@ -737,11 +787,11 @@ export default class SyncManager {
       return [];
     }
 
-    const conflicts = await Promise.all(
+    const results = await Promise.all(
       commonFiles.map(async (filePath: string) => {
         if (filePath === `${this.vault.configDir}/${MANIFEST_FILE_NAME}`) {
           // The manifest file is only internal, the user must not
-          // handle conflicts for this
+          // handle conflicts for this.
           return null;
         }
         const remoteFile = filesMetadata[filePath];
@@ -749,52 +799,260 @@ export default class SyncManager {
         if (remoteFile.deleted && localFile.deleted) {
           return null;
         }
-        const actualLocalSHA = await this.calculateSHA(filePath);
+
+        const normalizedPath = normalizePath(filePath);
+        const localExists = await this.vault.adapter.exists(normalizedPath);
+        let localBuffer: ArrayBuffer | null = null;
+        let actualLocalSHA: string | null = null;
+        if (localExists) {
+          localBuffer = await this.vault.adapter.readBinary(normalizedPath);
+          const bytes = new Uint8Array(localBuffer);
+          const header = new TextEncoder().encode(`blob ${bytes.length}\0`);
+          const store = new Uint8Array([...header, ...bytes]);
+          const hash = await crypto.subtle.digest("SHA-1", store);
+          actualLocalSHA = Array.from(new Uint8Array(hash))
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join("");
+        }
+
         const remoteFileHasBeenModifiedSinceLastSync =
           remoteFile.sha !== localFile.sha;
         const localFileHasBeenModifiedSinceLastSync =
           actualLocalSHA !== localFile.sha;
-        // This is an unlikely case. If the user manually edits
-        // the local file so that's identical to the remote one,
-        // but the local metadata SHA is different we don't want
-        // to show a conflict.
-        // Since that would show two identical files.
-        // Checking for this prevents showing a non conflict to the user.
+        // Identical content with a stale local SHA isn't a real conflict.
         const actualFilesAreDifferent = remoteFile.sha !== actualLocalSHA;
         if (
-          remoteFileHasBeenModifiedSinceLastSync &&
-          localFileHasBeenModifiedSinceLastSync &&
-          actualFilesAreDifferent
+          !(
+            remoteFileHasBeenModifiedSinceLastSync &&
+            localFileHasBeenModifiedSinceLastSync &&
+            actualFilesAreDifferent
+          )
         ) {
-          return filePath;
+          return null;
         }
-        return null;
+
+        const category = classifyForConflict(
+          filePath,
+          this.vault.configDir,
+          localBuffer,
+        );
+        return { filePath, category };
       }),
     );
-
-    return await Promise.all(
-      conflicts
-        .filter((filePath): filePath is string => filePath !== null)
-        .map(async (filePath: string) => {
-          // Load contents in parallel
-          const [remoteContent, localContent] = await Promise.all([
-            await (async () => {
-              const res = await this.client.getBlob({
-                sha: filesMetadata[filePath].sha!,
-                retry: true,
-                maxRetries: 1,
-              });
-              return decodeBase64String(res.content);
-            })(),
-            await this.vault.adapter.read(normalizePath(filePath)),
-          ]);
-          return {
-            filePath,
-            remoteContent,
-            localContent,
-          };
-        }),
+    return results.filter(
+      (r): r is { filePath: string; category: ConflictCategory } => r !== null,
     );
+  }
+
+  /**
+   * Loads side-by-side text contents for files that need a manual merge.
+   * Only call for `category === "text"` paths — binary / huge files would
+   * be garbled by the text decoder and the side-by-side editor.
+   */
+  async loadTextConflictContents(
+    paths: string[],
+    filesMetadata: { [key: string]: FileMetadata },
+  ): Promise<ConflictFile[]> {
+    return await Promise.all(
+      paths.map(async (filePath: string) => {
+        const [remoteContent, localContent] = await Promise.all([
+          (async () => {
+            const res = await this.client.getBlob({
+              sha: filesMetadata[filePath].sha!,
+              retry: true,
+              maxRetries: 1,
+            });
+            return decodeBase64String(res.content);
+          })(),
+          this.vault.adapter.read(normalizePath(filePath)),
+        ]);
+        return { filePath, remoteContent, localContent };
+      }),
+    );
+  }
+
+  /**
+   * Auto-resolve atomic conflicts (plugin .js bundles + binary files) without
+   * showing the conflict UI. Returns sync actions that the main pipeline can
+   * apply, and writes loser-side backups to disk where appropriate.
+   */
+  async resolveAtomicConflicts(
+    paths: { filePath: string; category: ConflictCategory }[],
+    treeFiles: { [key: string]: GetTreeResponseItem },
+    remoteMetadata: Metadata,
+  ): Promise<SyncAction[]> {
+    const actions: SyncAction[] = [];
+    for (const { filePath, category } of paths) {
+      if (category === "text") continue;
+
+      const decision = await this.decideAtomicWinner(
+        filePath,
+        category,
+        treeFiles,
+        remoteMetadata,
+      );
+
+      // Decide whether to keep a loser-side backup. Binary files always do —
+      // losing a screenshot or a PDF silently is worse than a tidy folder.
+      // Plugin .js opt-in via setting; keeps plugin folders clean by default.
+      const keepBackup =
+        category === "binary" ||
+        (category === "plugin-js" && this.settings.keepPluginConflictCopy);
+
+      if (keepBackup) {
+        await this.writeAtomicConflictBackup(
+          filePath,
+          decision.winner === "local" ? "remote" : "local",
+          treeFiles,
+        );
+      }
+
+      actions.push({
+        type: decision.winner === "local" ? "upload" : "download",
+        filePath,
+      });
+
+      await this.logger.info("Atomic conflict resolved", {
+        filePath,
+        category,
+        winner: decision.winner,
+        reason: decision.reason,
+        backupKept: keepBackup,
+      });
+    }
+    return actions;
+  }
+
+  private async decideAtomicWinner(
+    filePath: string,
+    category: ConflictCategory,
+    treeFiles: { [key: string]: GetTreeResponseItem },
+    remoteMetadata: Metadata,
+  ): Promise<{ winner: "local" | "remote"; reason: string }> {
+    if (category === "plugin-js") {
+      const versionDecision = await this.compareByPluginVersion(
+        filePath,
+        treeFiles,
+      );
+      if (versionDecision) return versionDecision;
+    }
+    // Tie or non-plugin-js → fall back to timestamps, then local-wins.
+    const localFile = this.metadataStore.data.files[filePath];
+    const remoteFile = remoteMetadata.files[filePath];
+    const localTs = localFile?.lastModified ?? 0;
+    const remoteTs = remoteFile?.lastModified ?? 0;
+    if (localTs > remoteTs) {
+      return {
+        winner: "local",
+        reason: `local newer by timestamp (${localTs} > ${remoteTs})`,
+      };
+    }
+    if (remoteTs > localTs) {
+      return {
+        winner: "remote",
+        reason: `remote newer by timestamp (${remoteTs} > ${localTs})`,
+      };
+    }
+    return { winner: "local", reason: "tie, default to local" };
+  }
+
+  private async compareByPluginVersion(
+    filePath: string,
+    treeFiles: { [key: string]: GetTreeResponseItem },
+  ): Promise<{ winner: "local" | "remote"; reason: string } | null> {
+    const pluginId = pluginIdFromPath(filePath, this.vault.configDir);
+    if (!pluginId) return null;
+    const manifestPath = `${this.vault.configDir}/plugins/${pluginId}/manifest.json`;
+
+    let localVersion: string | null = null;
+    let remoteVersion: string | null = null;
+
+    if (await this.vault.adapter.exists(normalizePath(manifestPath))) {
+      try {
+        const text = await this.vault.adapter.read(normalizePath(manifestPath));
+        localVersion = JSON.parse(text)?.version ?? null;
+      } catch {
+        // ignore — fall through to timestamp comparison
+      }
+    }
+
+    const remoteManifestItem = treeFiles[manifestPath];
+    if (remoteManifestItem) {
+      try {
+        const blob = await this.client.getBlob({
+          sha: remoteManifestItem.sha,
+          retry: true,
+          maxRetries: 1,
+        });
+        remoteVersion =
+          JSON.parse(decodeBase64String(blob.content))?.version ?? null;
+      } catch {
+        // ignore — fall through to timestamp comparison
+      }
+    }
+
+    if (!localVersion || !remoteVersion) return null;
+
+    const cmp = compareSemver(localVersion, remoteVersion);
+    if (cmp > 0) {
+      return {
+        winner: "local",
+        reason: `local v${localVersion} > remote v${remoteVersion}`,
+      };
+    }
+    if (cmp < 0) {
+      return {
+        winner: "remote",
+        reason: `remote v${remoteVersion} > local v${localVersion}`,
+      };
+    }
+    return null; // equal — caller falls back to timestamp
+  }
+
+  /**
+   * Writes the loser side of an atomic conflict next to the winner, named
+   * `<base>.conflict-(local|remote)-<isoTimestamp>.<ext>`. The backup pattern
+   * is excluded by isSyncable, so these copies stay strictly local.
+   */
+  private async writeAtomicConflictBackup(
+    filePath: string,
+    loserSide: "local" | "remote",
+    treeFiles: { [key: string]: GetTreeResponseItem },
+  ): Promise<void> {
+    const backupPath = normalizePath(conflictBackupPath(filePath, loserSide));
+
+    let loserContent: ArrayBuffer;
+    if (loserSide === "remote") {
+      const remoteItem = treeFiles[filePath];
+      if (!remoteItem) {
+        await this.logger.warn(
+          "Skip backup: file not in remote tree",
+          { filePath, loserSide },
+        );
+        return;
+      }
+      const blob = await this.client.getBlob({
+        sha: remoteItem.sha,
+        retry: true,
+      });
+      loserContent = base64ToArrayBuffer(blob.content);
+    } else {
+      const normalizedPath = normalizePath(filePath);
+      if (!(await this.vault.adapter.exists(normalizedPath))) {
+        await this.logger.warn(
+          "Skip backup: file missing locally",
+          { filePath, loserSide },
+        );
+        return;
+      }
+      loserContent = await this.vault.adapter.readBinary(normalizedPath);
+    }
+
+    await this.vault.adapter.writeBinary(backupPath, loserContent);
+    await this.logger.info("Wrote conflict backup", {
+      backupPath,
+      loserSide,
+    });
   }
 
   /**
@@ -965,6 +1223,7 @@ export default class SyncManager {
     treeFiles: { [key: string]: NewTreeRequestItem },
     baseTreeSha: string,
     conflictResolutions: ConflictResolution[] = [],
+    options: { showProgress?: boolean } = {},
   ) {
     // Update local sync time
     const syncTime = Date.now();
@@ -995,34 +1254,58 @@ export default class SyncManager {
     // also get back its SHA, so we can set it together with other files.
     // We also do that right before creating the new tree because we need the SHAs of those blob to
     // correctly create it.
+    const filesToUpload = Object.keys(treeFiles).filter(
+      (filePath: string) => treeFiles[filePath].content,
+    );
+    const binariesToUpload = filesToUpload.filter(
+      (p) => !hasTextExtension(p),
+    );
+    // Progress updates are opt-in via options.showProgress so the firstSync
+    // pathways (which set their own dedicated phase messages) stay quiet
+    // here and don't get the "Uploading binaries" counter overwriting them.
+    if (options.showProgress && binariesToUpload.length > 0) {
+      this.updateProgress(
+        `Uploading binaries to GitHub: 0/${binariesToUpload.length}`,
+      );
+    }
+    let binariesUploaded = 0;
     await Promise.all(
-      Object.keys(treeFiles)
-        .filter((filePath: string) => treeFiles[filePath].content)
-        .map(async (filePath: string) => {
-          // I don't fully trust file extensions as they're not completely reliable
-          // to determine the file type, though I feel it's ok to compromise and rely
-          // on them if it makes the plugin handle upload better on certain devices.
-          if (hasTextExtension(filePath)) {
-            const sha = await this.calculateSHA(filePath);
-            this.metadataStore.data.files[filePath].sha = sha;
-            return;
-          }
-
-          // We can't upload binary files by setting the content of a tree item,
-          // we first need to create a Git blob by uploading the file, then
-          // we must update the tree item to point the SHA to the blob we just created.
-          const buffer = await this.vault.adapter.readBinary(filePath);
-          const { sha } = await this.client.createBlob({
-            content: arrayBufferToBase64(buffer),
-            retry: true,
-            maxRetries: 3,
-          });
-          await this.logger.info("Created blob", filePath);
-          treeFiles[filePath].sha = sha;
-          // Can't have both sha and content set, so we delete it
-          delete treeFiles[filePath].content;
+      filesToUpload.map(async (filePath: string) => {
+        // I don't fully trust file extensions as they're not completely reliable
+        // to determine the file type, though I feel it's ok to compromise and rely
+        // on them if it makes the plugin handle upload better on certain devices.
+        if (hasTextExtension(filePath)) {
+          const sha = await this.calculateSHA(filePath);
           this.metadataStore.data.files[filePath].sha = sha;
-        }),
+          return;
+        }
+
+        // We can't upload binary files by setting the content of a tree item,
+        // we first need to create a Git blob by uploading the file, then
+        // we must update the tree item to point the SHA to the blob we just created.
+        const buffer = await this.vault.adapter.readBinary(filePath);
+        const { sha } = await this.client.createBlob({
+          content: arrayBufferToBase64(buffer),
+          retry: true,
+          maxRetries: 3,
+        });
+        await this.logger.info("Created blob", filePath);
+        treeFiles[filePath].sha = sha;
+        // Can't have both sha and content set, so we delete it
+        delete treeFiles[filePath].content;
+        this.metadataStore.data.files[filePath].sha = sha;
+
+        binariesUploaded++;
+        if (
+          options.showProgress &&
+          (binariesUploaded % 5 === 0 ||
+            binariesUploaded === binariesToUpload.length)
+        ) {
+          this.updateProgress(
+            `Uploading binaries to GitHub: ${binariesUploaded}/${binariesToUpload.length}`,
+          );
+        }
+      }),
     );
 
     // Update manifest in list of new tree items
