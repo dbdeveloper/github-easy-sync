@@ -1,5 +1,7 @@
 import esbuild from "esbuild";
 import process from "process";
+import fs from "fs/promises";
+import path from "path";
 import builtins from "builtin-modules";
 
 const banner = `/*
@@ -9,6 +11,35 @@ if you want to view the source, please visit the github repository of this plugi
 `;
 
 const prod = process.argv[2] === "production";
+
+// Optional: after each successful build, mirror the plugin outputs into a
+// vault's plugin folder so Obsidian picks them up immediately. Set
+// OBSIDIAN_PLUGIN_DIR to <Vault>/.obsidian/plugins/github-gitless-sync.
+// data.json is intentionally not mirrored — that file is vault-specific
+// state owned by Obsidian, not a build output.
+const mirrorTarget = process.env.OBSIDIAN_PLUGIN_DIR;
+const mirroredFiles = ["main.js", "manifest.json", "styles.css"];
+
+const mirrorPlugin = {
+  name: "mirror-to-vault",
+  setup(build) {
+    build.onEnd(async (result) => {
+      if (!mirrorTarget) return;
+      if (result.errors.length > 0) return;
+      try {
+        await fs.mkdir(mirrorTarget, { recursive: true });
+        await Promise.all(
+          mirroredFiles.map((file) =>
+            fs.copyFile(file, path.join(mirrorTarget, file)),
+          ),
+        );
+        console.log(`[mirror] copied to ${mirrorTarget}`);
+      } catch (err) {
+        console.error(`[mirror] failed: ${err.message}`);
+      }
+    });
+  },
+};
 
 const context = await esbuild.context({
   banner: {
@@ -39,6 +70,7 @@ const context = await esbuild.context({
   treeShaking: true,
   outfile: "main.js",
   minify: prod,
+  plugins: [mirrorPlugin],
 });
 
 if (prod) {
