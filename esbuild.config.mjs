@@ -2,6 +2,7 @@ import esbuild from "esbuild";
 import process from "process";
 import fs from "fs/promises";
 import path from "path";
+import os from "os";
 import builtins from "builtin-modules";
 
 const banner = `/*
@@ -17,7 +18,18 @@ const prod = process.argv[2] === "production";
 // OBSIDIAN_PLUGIN_DIR to <Vault>/.obsidian/plugins/github-gitless-sync.
 // data.json is intentionally not mirrored — that file is vault-specific
 // state owned by Obsidian, not a build output.
-const mirrorTarget = process.env.OBSIDIAN_PLUGIN_DIR;
+//
+// We expand a leading "~/" ourselves so the value works whether the env var
+// is set inline in a shell (where the shell would expand it) or via an IDE
+// run config (which passes it through literally — fs.mkdir would otherwise
+// create a "~" folder under the project root).
+function expandHome(p) {
+  if (!p) return p;
+  if (p === "~") return os.homedir();
+  if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+const mirrorTarget = expandHome(process.env.OBSIDIAN_PLUGIN_DIR);
 const mirroredFiles = ["main.js", "manifest.json", "styles.css"];
 
 const mirrorPlugin = {
