@@ -413,37 +413,4 @@ export default class GithubClient {
     }
   }
 
-  /**
-   * Downloads the repository as a ZIP archive from GitHub.
-   *
-   * @param retry Whether to retry the request on failure (default: false)
-   * @param maxRetries Maximum number of retry attempts (default: 5)
-   * @returns The archive contents as an ArrayBuffer
-   */
-  async downloadRepositoryArchive({
-    retry = false,
-    maxRetries = 5,
-  } = {}): Promise<ArrayBuffer> {
-    const response = await retryUntil(
-      async () => {
-        return requestUrl({
-          url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/zipball/${this.settings.githubBranch}`,
-          headers: this.headers(),
-          method: "GET",
-          throw: false,
-        });
-      },
-      (res) => res.status !== 422,
-      retry ? maxRetries : 0,
-    );
-
-    if (response.status < 200 || response.status >= 400) {
-      await this.logger.error("Failed to download zip archive", response);
-      throw new GithubAPIError(
-        response.status,
-        `Failed to download zip archive, status ${response.status}`,
-      );
-    }
-    return response.arrayBuffer;
-  }
 }

@@ -20,7 +20,6 @@ import { GitHubSyncSettings } from "./settings/settings";
 import Logger, { LOG_FILE_NAME } from "./logger";
 import { decodeBase64String, hasTextExtension } from "./utils";
 import GitHubSyncPlugin from "./main";
-import { BlobReader, Entry, Uint8ArrayWriter, ZipReader } from "@zip.js/zip.js";
 
 interface SyncAction {
   type: "upload" | "download" | "delete_local" | "delete_remote";
@@ -52,6 +51,15 @@ export default class SyncManager {
   // prevents multiple syncs at the same time and creation
   // of messy conflicts.
   private syncing: boolean = false;
+
+  // Persistent toast updated as sync progresses through phases. Owned by
+  // firstSync()/sync(): created at the start, updated via updateProgress(),
+  // hidden in finally. Null when no sync is running.
+  private progressNotice: Notice | null = null;
+
+  private updateProgress(message: string) {
+    this.progressNotice?.setMessage(message);
+  }
 
   constructor(
     private vault: Vault,
@@ -96,17 +104,25 @@ export default class SyncManager {
     }
 
     this.syncing = true;
+    // Pass 0 so the notice stays until we hide it explicitly — first sync can
+    // take minutes on a large repo or slow mobile connection.
+    this.progressNotice = new Notice("Preparing first sync...", 0);
     try {
       await this.firstSyncImpl();
+      new Notice("Sync successful", 5000);
     } catch (err) {
-      this.syncing = false;
+      new Notice(`Error syncing. ${err}`);
       throw err;
+    } finally {
+      this.syncing = false;
+      this.progressNotice?.hide();
+      this.progressNotice = null;
     }
-    this.syncing = false;
   }
 
   private async firstSyncImpl() {
     await this.logger.info("Starting first sync");
+    this.updateProgress("Analyzing repository state...");
     let repositoryIsEmpty = false;
     let res: RepoContent;
     let files: {
@@ -154,8 +170,10 @@ export default class SyncManager {
     }
 
     const vaultIsEmpty = await this.vaultIsEmpty();
+    const resumingFromRemote =
+      !!this.metadataStore.data.firstSyncFromRemoteInProgress;
 
-    if (!repositoryIsEmpty && !vaultIsEmpty) {
+    if (!repositoryIsEmpty && !vaultIsEmpty && !resumingFromRemote) {
       // Both have files, we can't sync, show error
       await this.logger.error("Both remote and local have files, can't sync");
       throw new Error("Both remote and local have files, can't sync");
@@ -169,6 +187,9 @@ export default class SyncManager {
       // Let's download whatever we have in the remote repo.
       // This is fine even if the remote repo is empty.
       // In this case too the important step is that the remote manifest is created.
+      // If resumingFromRemote is true, the local vault may already contain
+      // partially-downloaded files from a previous interrupted attempt;
+      // downloadAllFilesViaAPI is idempotent and will skip those.
       await this.firstSyncFromRemote(files, treeSha);
     }
   }
@@ -185,99 +206,135 @@ export default class SyncManager {
     files: { [key: string]: GetTreeResponseItem },
     treeSha: string,
   ) {
-    await this.logger.info("Starting first sync from remote files");
-
-    // We want to avoid getting throttled by GitHub, so instead of making a request for each
-    // file we download the whole repository as a ZIP file and extract it in the vault.
-    // We exclude config dir files if the user doesn't want to sync those.
-    const zipBuffer = await this.client.downloadRepositoryArchive();
-    const zipBlob = new Blob([zipBuffer]);
-    const reader = new ZipReader(new BlobReader(zipBlob));
-    const entries = await reader.getEntries();
-
-    await this.logger.info("Extracting files from ZIP", {
-      length: entries.length,
+    const resuming = !!this.metadataStore.data.firstSyncFromRemoteInProgress;
+    await this.logger.info("Starting first sync from remote files", {
+      resume: resuming,
     });
 
-    await Promise.all(
-      entries.map(async (entry: Entry) => {
-        // All repo ZIPs contain a root directory that contains all the content
-        // of that repo, we need to ignore that directory so we strip the first
-        // folder segment from the path
-        const pathParts = entry.filename.split("/");
-        const targetPath =
-          pathParts.length > 1 ? pathParts.slice(1).join("/") : entry.filename;
+    // Mark the operation as in progress so a crash mid-download lets us
+    // resume on the next attempt instead of bailing on "vault not empty".
+    this.metadataStore.data.firstSyncFromRemoteInProgress = true;
+    await this.metadataStore.save();
 
-        if (targetPath === "") {
-          // Must be the root folder, skip it.
-          // This is really important as that would lead us to try and
-          // create the folder "/" and crash Obsidian
-          return;
-        }
+    await this.downloadAllFilesViaAPI(files, resuming);
+    await this.commitFirstSyncFromRemote(files, treeSha);
+  }
 
-        if (
-          this.settings.syncConfigDir &&
-          targetPath.startsWith(this.vault.configDir) &&
-          targetPath !== `${this.vault.configDir}/${MANIFEST_FILE_NAME}`
-        ) {
-          await this.logger.info("Skipped config", { targetPath });
-          return;
-        }
+  /**
+   * Downloads files one by one via the GitHub blob API. Holds at most a
+   * single blob in memory at a time, so memory stays low on every platform —
+   * including Android WebView, where buffering a multi-MB archive OOMs.
+   * Resumable: files already on disk with the matching SHA are skipped.
+   */
+  private async downloadAllFilesViaAPI(
+    files: { [key: string]: GetTreeResponseItem },
+    resuming: boolean,
+  ) {
+    const filePaths = Object.keys(files).filter((filePath: string) => {
+      if (filePath === `${this.vault.configDir}/${LOG_FILE_NAME}`) return false;
+      if (filePath.split("/").last()?.startsWith(".")) return false;
+      // NOTE: this rule looks inverted vs. determineSyncActions and the
+      // events-listener — kept for parity with the original ZIP path while
+      // the broader init logic gets rewritten in step 2.
+      if (
+        this.settings.syncConfigDir &&
+        filePath.startsWith(this.vault.configDir) &&
+        filePath !== `${this.vault.configDir}/${MANIFEST_FILE_NAME}`
+      ) {
+        return false;
+      }
+      return true;
+    });
 
-        if (entry.directory) {
-          const normalizedPath = normalizePath(targetPath);
-          await this.vault.adapter.mkdir(normalizedPath);
-          await this.logger.info("Created directory", {
+    await this.logger.info("Downloading files via API", {
+      count: filePaths.length,
+      resume: resuming,
+    });
+
+    const phaseLabel = resuming
+      ? "Resuming vault initialization from GitHub"
+      : "Initializing vault from GitHub";
+    this.updateProgress(`${phaseLabel}: 0/${filePaths.length}`);
+
+    const BATCH_SIZE = 5;
+    let downloaded = 0;
+    let skipped = 0;
+
+    for (let i = 0; i < filePaths.length; i += BATCH_SIZE) {
+      const batch = filePaths.slice(i, i + BATCH_SIZE);
+      await Promise.all(
+        batch.map(async (filePath: string) => {
+          const fileItem = files[filePath];
+          const normalizedPath = normalizePath(filePath);
+
+          // Resume support: if a previous attempt already wrote this file
+          // with the same SHA, skip the network round-trip.
+          const existing = this.metadataStore.data.files[normalizedPath];
+          if (
+            existing?.sha === fileItem.sha &&
+            (await this.vault.adapter.exists(normalizedPath))
+          ) {
+            skipped++;
+            return;
+          }
+
+          const blob = await this.client.getBlob({
+            sha: fileItem.sha,
+            retry: true,
+          });
+          const dir = normalizedPath.split("/").slice(0, -1).join("/");
+          if (dir !== "" && !(await this.vault.adapter.exists(dir))) {
+            await this.vault.adapter.mkdir(dir);
+          }
+          await this.vault.adapter.writeBinary(
             normalizedPath,
-          });
-          return;
-        }
+            base64ToArrayBuffer(blob.content),
+          );
+          this.metadataStore.data.files[normalizedPath] = {
+            path: normalizedPath,
+            sha: fileItem.sha,
+            dirty: false,
+            justDownloaded: true,
+            lastModified: Date.now(),
+          };
+          downloaded++;
+        }),
+      );
+      // Persist after each batch so a crash mid-sync preserves progress.
+      await this.metadataStore.save();
 
-        if (targetPath === `${this.vault.configDir}/${LOG_FILE_NAME}`) {
-          // We don't want to download the log file if the user synced it in the past.
-          // This is necessary because in the past we forgot to ignore the log file
-          // from syncing if the user enabled configs sync.
-          // To avoid downloading it we ignore it if still present in the remote repo.
-          return;
-        }
-
-        if (targetPath.split("/").last()?.startsWith(".")) {
-          // We must skip hidden files as that creates issues with syncing.
-          // This is fine as users can't edit hidden files in Obsidian anyway.
-          await this.logger.info("Skipping hidden file", targetPath);
-          return;
-        }
-
-        const writer = new Uint8ArrayWriter();
-        await entry.getData!(writer);
-        const data = await writer.getData();
-        const dir = targetPath.split("/").splice(0, -1).join("/");
-        if (dir !== "") {
-          const normalizedDir = normalizePath(dir);
-          await this.vault.adapter.mkdir(normalizedDir);
-          await this.logger.info("Created directory", {
-            normalizedDir,
-          });
-        }
-
-        const normalizedPath = normalizePath(targetPath);
-        await this.vault.adapter.writeBinary(normalizedPath, data);
-        await this.logger.info("Written file", {
-          normalizedPath,
+      const processed = Math.min(i + BATCH_SIZE, filePaths.length);
+      const skipSuffix = skipped > 0 ? ` (skipped ${skipped})` : "";
+      this.updateProgress(
+        `${phaseLabel}: ${processed}/${filePaths.length}${skipSuffix}`,
+      );
+      if ((i / BATCH_SIZE) % 5 === 0 || processed >= filePaths.length) {
+        await this.logger.info("Download progress", {
+          processed,
+          total: filePaths.length,
+          downloaded,
+          skipped,
         });
-        this.metadataStore.data.files[normalizedPath] = {
-          path: normalizedPath,
-          sha: files[normalizedPath].sha,
-          dirty: false,
-          justDownloaded: true,
-          lastModified: Date.now(),
-        };
-        await this.metadataStore.save();
-      }),
-    );
+      }
+    }
 
-    await this.logger.info("Extracted zip");
+    await this.logger.info("Downloaded all files via API", {
+      downloaded,
+      skipped,
+      total: filePaths.length,
+    });
+  }
 
+  /**
+   * After all remote files have been written locally, build the new tree,
+   * include any locally-only files, clear the in-progress flag, and push the
+   * commit that establishes the manifest on the remote.
+   */
+  private async commitFirstSyncFromRemote(
+    files: { [key: string]: GetTreeResponseItem },
+    treeSha: string,
+  ) {
+    this.updateProgress("Committing initial sync to GitHub...");
     const newTreeFiles = Object.keys(files)
       .map((filePath: string) => ({
         path: files[filePath].path,
@@ -322,6 +379,11 @@ export default class SyncManager {
           };
         }),
     );
+
+    // Clear the resume flag before commit; commitSync writes the in-memory
+    // metadata into the new tree manifest, so the remote will reflect the
+    // completed state.
+    this.metadataStore.data.firstSyncFromRemoteInProgress = false;
     await this.commitSync(newTreeFiles, treeSha);
   }
 
@@ -338,6 +400,7 @@ export default class SyncManager {
     treeSha: string,
   ) {
     await this.logger.info("Starting first sync from local files");
+    this.updateProgress("Initializing GitHub from vault: preparing files...");
     const newTreeFiles = Object.keys(files)
       .map((filePath: string) => ({
         path: files[filePath].path,
@@ -384,6 +447,7 @@ export default class SyncManager {
           };
         }),
     );
+    this.updateProgress("Initializing GitHub from vault: uploading...");
     await this.commitSync(newTreeFiles, treeSha);
   }
 
@@ -421,7 +485,13 @@ export default class SyncManager {
     const manifest = files[`${this.vault.configDir}/${MANIFEST_FILE_NAME}`];
 
     if (manifest === undefined) {
-      await this.logger.error("Remote manifest is missing", { files, treeSha });
+      // Log only counts and a few sample paths — the full files map can be
+      // megabytes on a large repo.
+      await this.logger.error("Remote manifest is missing", {
+        treeSha,
+        fileCount: Object.keys(files).length,
+        samplePaths: Object.keys(files).slice(0, 10),
+      });
       throw new Error("Remote manifest is missing");
     }
 
@@ -453,7 +523,12 @@ export default class SyncManager {
     let conflictResolutions: ConflictResolution[] = [];
 
     if (conflicts.length > 0) {
-      await this.logger.warn("Found conflicts", conflicts);
+      // Log just paths — each conflict carries full remoteContent and
+      // localContent, which can be tens of MB combined on big files.
+      await this.logger.warn("Found conflicts", {
+        total: conflicts.length,
+        paths: conflicts.map((c) => c.filePath),
+      });
       if (this.settings.conflictHandling === "ask") {
         // Here we block the sync process until the user has resolved all the conflicts
         conflictResolutions = await this.onConflicts(conflicts);
@@ -501,7 +576,21 @@ export default class SyncManager {
       await this.logger.info("Nothing to sync");
       return;
     }
-    await this.logger.info("Actions to sync", actions);
+    // Summarize: full action arrays can be tens of thousands of entries
+    // (esp. with syncConfigDir on) and previously bloated logs to hundreds
+    // of MB per sync. Counts + a small sample preserves diagnostic value.
+    const actionsByType = actions.reduce(
+      (acc: { [key: string]: number }, a) => {
+        acc[a.type] = (acc[a.type] ?? 0) + 1;
+        return acc;
+      },
+      {},
+    );
+    await this.logger.info("Actions to sync", {
+      total: actions.length,
+      byType: actionsByType,
+      sample: actions.slice(0, 10),
+    });
 
     const newTreeFiles: { [key: string]: NewTreeRequestItem } = Object.keys(
       files,

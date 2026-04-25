@@ -35,6 +35,10 @@ export interface FileMetadata {
 export interface Metadata {
   lastSync: number;
   files: { [key: string]: FileMetadata };
+  // Set true when firstSyncFromRemote starts and cleared just before
+  // committing the result. If a crash interrupts the download, this stays
+  // true and the next attempt resumes instead of failing on "vault not empty".
+  firstSyncFromRemoteInProgress?: boolean;
 }
 
 /**
@@ -61,7 +65,7 @@ export default class MetadataStore {
       const content = await this.vault.adapter.read(this.metadataFile);
       this.data = JSON.parse(content);
     } else {
-      this.data = { lastSync: 0, files: {} };
+      this.data = { lastSync: 0, files: {}, firstSyncFromRemoteInProgress: false };
     }
   }
 
@@ -79,6 +83,6 @@ export default class MetadataStore {
   }
 
   reset() {
-    this.data = { lastSync: 0, files: {} };
+    this.data = { lastSync: 0, files: {}, firstSyncFromRemoteInProgress: false };
   }
 }

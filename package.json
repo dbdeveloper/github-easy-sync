@@ -34,7 +34,6 @@
     "@codemirror/state": "^6.5.2",
     "@codemirror/view": "^6.36.2",
     "@uiw/react-codemirror": "^4.23.8",
-    "@zip.js/zip.js": "^2.7.60",
     "codemirror": "^6.0.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
