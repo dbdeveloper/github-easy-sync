@@ -21,6 +21,7 @@ import Logger, { LOG_FILE_NAME } from "./logger";
 import { GitignoreCache } from "./gitignore-cache";
 import {
   ConflictCategory,
+  calculateGitBlobSHA,
   classifyForConflict,
   compareSemver,
   conflictBackupPath,
@@ -34,6 +35,7 @@ import {
   InitAction,
   LocalState,
   RemoteState,
+  ResumeKind,
   analyzeLocalState,
   analyzeRemoteState,
   compareForAdoption,
@@ -160,7 +162,16 @@ export default class SyncManager {
     await this.logger.info("Starting first sync");
     this.updateProgress("Analyzing repository state...");
 
-    const isResume = !!this.metadataStore.data.firstSyncFromRemoteInProgress;
+    // Two independent resume markers — each set by the corresponding
+    // first-sync path before its first risky operation. "from-local"
+    // takes precedence: in the rare case both are set, finishing the
+    // upload is what the user was last trying to do.
+    const resume: ResumeKind = this.metadataStore.data
+      .firstSyncFromLocalInProgress
+      ? "from-local"
+      : this.metadataStore.data.firstSyncFromRemoteInProgress
+        ? "from-remote"
+        : null;
     const [localState, remoteState] = await Promise.all([
       analyzeLocalState(this.vault, this.settings.syncConfigDir),
       analyzeRemoteState(this.client, this.vault.configDir),
@@ -168,10 +179,10 @@ export default class SyncManager {
     await this.logger.info("State analysis", {
       local: localState.kind,
       remote: remoteState.kind,
-      isResume,
+      resume,
     });
 
-    let action = decideInitAction(localState, remoteState, isResume);
+    let action = decideInitAction(localState, remoteState, resume);
 
     // Resolve adoption-analysis cases by hashing local files and comparing
     // against remote SHAs. Silent if no real conflicts; modal otherwise.
@@ -649,8 +660,21 @@ export default class SyncManager {
     files: { [key: string]: GetTreeResponseItem },
     treeSha: string,
   ) {
-    await this.logger.info("Starting first sync from local files");
-    this.updateProgress("Initializing GitHub from vault: preparing files...");
+    const resuming = !!this.metadataStore.data.firstSyncFromLocalInProgress;
+    await this.logger.info("Starting first sync from local files", {
+      resume: resuming,
+    });
+    // Mark in-progress and persist before the first risky operation. A
+    // crash mid-upload leaves this true on disk; the next plugin load
+    // sees it via the resume marker and re-enters this path.
+    this.metadataStore.data.firstSyncFromLocalInProgress = true;
+    await this.metadataStore.save();
+
+    this.updateProgress(
+      resuming
+        ? "Resuming GitHub init from vault: preparing files..."
+        : "Initializing GitHub from vault: preparing files...",
+    );
     const newTreeFiles = Object.keys(files)
       .map((filePath: string) => ({
         path: files[filePath].path,
@@ -706,8 +730,17 @@ export default class SyncManager {
           };
         }),
     );
-    this.updateProgress("Initializing GitHub from vault: uploading...");
-    await this.commitSync(newTreeFiles, treeSha);
+    this.updateProgress(
+      resuming
+        ? "Resuming GitHub init from vault: uploading..."
+        : "Initializing GitHub from vault: uploading...",
+    );
+    // Clear the resume marker before commit. commitSync writes the
+    // in-memory metadata to disk at the end, so a successful commit
+    // persists flag=false. A crash before then leaves the on-disk
+    // value untouched (still true), so resume detection still kicks in.
+    this.metadataStore.data.firstSyncFromLocalInProgress = false;
+    await this.commitSync(newTreeFiles, treeSha, [], { showProgress: true });
   }
 
   /**
@@ -1547,6 +1580,7 @@ export default class SyncManager {
       );
     }
     let binariesUploaded = 0;
+    let binariesSkipped = 0;
     await Promise.all(
       filesToUpload.map(async (filePath: string) => {
         // I don't fully trust file extensions as they're not completely reliable
@@ -1558,10 +1592,22 @@ export default class SyncManager {
           return;
         }
 
-        // We can't upload binary files by setting the content of a tree item,
-        // we first need to create a Git blob by uploading the file, then
-        // we must update the tree item to point the SHA to the blob we just created.
+        // Resume optimization: a previous (possibly interrupted) sync
+        // already pushed this binary to GitHub, and the local file
+        // hasn't changed since. The Git blob SHA is content-addressed,
+        // so a match means the upload is still valid — reuse the SHA
+        // and skip the createBlob round-trip.
         const buffer = await this.vault.adapter.readBinary(filePath);
+        const currentSha = await calculateGitBlobSHA(buffer);
+        const previousSha = this.metadataStore.data.files[filePath]?.sha;
+        if (previousSha && previousSha === currentSha) {
+          treeFiles[filePath].sha = previousSha;
+          delete treeFiles[filePath].content;
+          binariesSkipped++;
+          return;
+        }
+
+        // Upload via createBlob.
         const { sha } = await this.client.createBlob({
           content: arrayBufferToBase64(buffer),
           retry: true,
@@ -1569,9 +1615,11 @@ export default class SyncManager {
         });
         await this.logger.info("Created blob", filePath);
         treeFiles[filePath].sha = sha;
-        // Can't have both sha and content set, so we delete it
         delete treeFiles[filePath].content;
         this.metadataStore.data.files[filePath].sha = sha;
+        // Persist progress so the next attempt (after a crash here) can
+        // skip what we already finished.
+        await this.metadataStore.save();
 
         binariesUploaded++;
         if (
@@ -1579,22 +1627,36 @@ export default class SyncManager {
           (binariesUploaded % 5 === 0 ||
             binariesUploaded === binariesToUpload.length)
         ) {
+          const skipNote = binariesSkipped > 0 ? ` (skipped ${binariesSkipped})` : "";
           this.updateProgress(
-            `Uploading binaries to GitHub: ${binariesUploaded}/${binariesToUpload.length}`,
+            `Uploading binaries to GitHub: ${binariesUploaded}/${binariesToUpload.length}${skipNote}`,
           );
         }
       }),
     );
+    if (binariesSkipped > 0) {
+      await this.logger.info("Resume: skipped binaries already uploaded", {
+        skipped: binariesSkipped,
+        uploaded: binariesUploaded,
+        total: binariesToUpload.length,
+      });
+    }
 
     // Always set the manifest entry from the current in-memory metadata.
     // commitSync owns this: callers no longer have to remember to populate
     // it (and used to crash with TypeError when the entry was missing).
+    // We strip the per-device resume markers — they're local progress
+    // state, not shared between machines, so the remote manifest must
+    // never carry them.
     const manifestPath = `${this.vault.configDir}/${MANIFEST_FILE_NAME}`;
+    const manifestForRemote = { ...this.metadataStore.data };
+    delete manifestForRemote.firstSyncFromRemoteInProgress;
+    delete manifestForRemote.firstSyncFromLocalInProgress;
     treeFiles[manifestPath] = {
       path: manifestPath,
       mode: "100644",
       type: "blob",
-      content: JSON.stringify(this.metadataStore.data),
+      content: JSON.stringify(manifestForRemote),
     };
 
     // Create the new tree

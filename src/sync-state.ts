@@ -201,6 +201,9 @@ export async function analyzeRemoteState(
   };
 }
 
+/** Which (if any) interrupted first-sync attempt we're resuming. */
+export type ResumeKind = null | "from-remote" | "from-local";
+
 /**
  * The decision table. Pure function — given snapshots, returns what to do.
  *
@@ -209,16 +212,26 @@ export async function analyzeRemoteState(
  * to learn whether the divergence is recoverable (silent adopt) or needs
  * the user to pick a side.
  *
- * `isResume` short-circuits to first-sync-from-remote: a previous download
- * attempt was interrupted, so local now looks "has-content" without a
- * manifest, but we *want* to resume — not treat it as a fresh ambiguity.
+ * `resume` short-circuits to the matching first-sync path: a previous
+ * download/upload attempt was interrupted, so local state may now look
+ * ambiguous, but we want to keep going on the same path rather than
+ * re-analyse it. "from-local" wins if both flags are set (shouldn't
+ * happen in practice — only one path runs at a time).
  */
 export function decideInitAction(
   local: LocalState,
   remote: RemoteState,
-  isResume: boolean,
+  resume: ResumeKind,
 ): InitAction {
-  if (isResume) {
+  if (resume === "from-local") {
+    if (remote.kind === "bare") {
+      // Remote went bare while we were uploading. Bootstrap will be
+      // re-done, then the resume marker still triggers the upload path.
+      return { kind: "first-sync-from-local", remote };
+    }
+    return { kind: "first-sync-from-local", remote };
+  }
+  if (resume === "from-remote") {
     if (remote.kind === "bare") {
       // Remote went bare while we were resuming. Best we can do is start
       // over by writing an empty manifest there.

@@ -39,6 +39,13 @@ export interface Metadata {
   // committing the result. If a crash interrupts the download, this stays
   // true and the next attempt resumes instead of failing on "vault not empty".
   firstSyncFromRemoteInProgress?: boolean;
+  // Set true at the start of firstSyncFromLocal and cleared after the
+  // remote commit succeeds. A crash mid-upload leaves this true so the
+  // next sync can re-enter the from-local path and reuse blobs that
+  // already made it across (matched by SHA in commitSync).
+  // Both *_InProgress flags are stripped from the manifest content sent
+  // to remote — they're per-device resume markers, not shared state.
+  firstSyncFromLocalInProgress?: boolean;
 }
 
 /**
@@ -74,6 +81,7 @@ export default class MetadataStore {
         lastSync: 0,
         files: {},
         firstSyncFromRemoteInProgress: false,
+        firstSyncFromLocalInProgress: false,
       };
     }
     if (!this.data.files) {
@@ -107,6 +115,11 @@ export default class MetadataStore {
   }
 
   reset() {
-    this.data = { lastSync: 0, files: {}, firstSyncFromRemoteInProgress: false };
+    this.data = {
+        lastSync: 0,
+        files: {},
+        firstSyncFromRemoteInProgress: false,
+        firstSyncFromLocalInProgress: false,
+      };
   }
 }
