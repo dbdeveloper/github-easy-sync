@@ -117,6 +117,7 @@ export type InitAction =
 export async function analyzeLocalState(
   vault: Vault,
   syncConfigDir: boolean,
+  gitignoreMatcher?: { isIgnored(path: string): boolean },
 ): Promise<LocalState> {
   const manifestPath = `${vault.configDir}/${MANIFEST_FILE_NAME}`;
   const manifestExists = await vault.adapter.exists(manifestPath);
@@ -134,7 +135,9 @@ export async function analyzeLocalState(
   // Manifest doesn't count as "user content" — we're tracking whether the
   // vault has anything *we'd ship to GitHub on a first push*.
   const syncableFiles = files.filter(
-    (p) => p !== manifestPath && isSyncable(p, vault.configDir, syncConfigDir),
+    (p) =>
+      p !== manifestPath &&
+      isSyncable(p, vault.configDir, syncConfigDir, gitignoreMatcher),
   );
 
   if (manifestExists) {
@@ -259,6 +262,7 @@ export async function compareForAdoption(
   configDir: string,
   syncConfigDir: boolean,
   remoteFiles: { [key: string]: GetTreeResponseItem },
+  gitignoreMatcher?: { isIgnored(path: string): boolean },
 ): Promise<AdoptionAnalysis> {
   const manifestPath = `${configDir}/${MANIFEST_FILE_NAME}`;
 
@@ -273,7 +277,9 @@ export async function compareForAdoption(
     folders.push(...res.folders);
   }
   const localSyncableFiles = allLocalFiles.filter(
-    (p) => p !== manifestPath && isSyncable(p, configDir, syncConfigDir),
+    (p) =>
+      p !== manifestPath &&
+      isSyncable(p, configDir, syncConfigDir, gitignoreMatcher),
   );
 
   // Hash each local file in parallel. (Vault adapter cache makes the second

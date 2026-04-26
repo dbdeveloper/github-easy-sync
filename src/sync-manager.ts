@@ -18,6 +18,7 @@ import MetadataStore, {
 import EventsListener from "./events-listener";
 import { GitHubSyncSettings } from "./settings/settings";
 import Logger, { LOG_FILE_NAME } from "./logger";
+import { GitignoreCache } from "./gitignore-cache";
 import {
   ConflictCategory,
   classifyForConflict,
@@ -75,6 +76,7 @@ export default class SyncManager {
   private metadataStore: MetadataStore;
   private client: GithubClient;
   private eventsListener: EventsListener;
+  private gitignoreCache: GitignoreCache;
   private syncIntervalId: number | null = null;
 
   // Use to track if syncing is in progress, this ideally
@@ -100,11 +102,13 @@ export default class SyncManager {
   ) {
     this.metadataStore = new MetadataStore(this.vault);
     this.client = new GithubClient(this.settings, this.logger);
+    this.gitignoreCache = new GitignoreCache(this.vault);
     this.eventsListener = new EventsListener(
       this.vault,
       this.metadataStore,
       this.settings,
       this.logger,
+      this.gitignoreCache,
     );
   }
 
@@ -139,6 +143,7 @@ export default class SyncManager {
     // take minutes on a large repo or slow mobile connection.
     this.progressNotice = new Notice("Preparing first sync...", 0);
     try {
+      await this.gitignoreCache.refreshIfChanged();
       await this.firstSyncImpl();
       new Notice("Sync successful", 5000);
     } catch (err) {
@@ -433,6 +438,7 @@ export default class SyncManager {
         filePath,
         this.vault.configDir,
         this.settings.syncConfigDir,
+        this.gitignoreCache,
       ),
     );
 
@@ -619,6 +625,7 @@ export default class SyncManager {
             filePath,
             this.vault.configDir,
             this.settings.syncConfigDir,
+            this.gitignoreCache,
           );
         })
         .map(async (filePath: string) => {
@@ -667,6 +674,7 @@ export default class SyncManager {
     // the end.
     this.progressNotice = new Notice("Preparing sync...", 0);
     try {
+      await this.gitignoreCache.refreshIfChanged();
       await this.syncImpl();
       new Notice("Sync successful", 5000);
     } catch (err) {
@@ -982,6 +990,7 @@ export default class SyncManager {
           filePath,
           this.vault.configDir,
           this.settings.syncConfigDir,
+          this.gitignoreCache,
         ),
       );
     if (commonFiles.length === 0) {
@@ -1399,6 +1408,7 @@ export default class SyncManager {
         action.filePath,
         this.vault.configDir,
         this.settings.syncConfigDir,
+        this.gitignoreCache,
       ),
     );
   }
@@ -1607,6 +1617,11 @@ export default class SyncManager {
 
   async loadMetadata() {
     await this.logger.info("Loading metadata");
+    // The gitignore cache must be ready before any isSyncable check fires —
+    // the file walk below filters via that, and so do all subsequent sync
+    // operations. initialize() also writes the canonical/strict files if
+    // missing, which is something we want to happen exactly once at startup.
+    await this.gitignoreCache.initialize();
     await this.metadataStore.load();
     if (Object.keys(this.metadataStore.data.files).length === 0) {
       await this.logger.info("Metadata was empty, loading all files");
@@ -1630,6 +1645,7 @@ export default class SyncManager {
             filePath,
             this.vault.configDir,
             this.settings.syncConfigDir,
+            this.gitignoreCache,
           )
         ) {
           return;
@@ -1688,6 +1704,7 @@ export default class SyncManager {
           filePath,
           this.vault.configDir,
           this.settings.syncConfigDir,
+          this.gitignoreCache,
         )
       ) {
         continue;

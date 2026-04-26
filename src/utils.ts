@@ -1,6 +1,5 @@
 import { base64ToArrayBuffer } from "obsidian";
 import { MANIFEST_FILE_NAME } from "./metadata-store";
-import { LOG_FILE_NAME } from "./logger";
 import manifest from "../manifest.json";
 
 // Pull our own plugin id straight from manifest.json so any rename of the
@@ -41,12 +40,6 @@ const TEXT_EXTENSIONS = [
   ".jsx",
 ] as const;
 
-// Matches conflict-backup files we drop next to a winner during atomic
-// conflict resolution: `<base>.conflict-(local|remote)-<isoTimestamp>.<ext>`.
-// These are local-only diagnostics; they must never be uploaded or moved
-// between machines, otherwise they'd multiply on every sync.
-const CONFLICT_BACKUP_PATTERN = /\.conflict-(local|remote)-[\dT.\-Z:]+\.[^./]+$/;
-
 // Threshold for "diff is sensible by a human". Files with a known text
 // extension but exceeding either of these go through the atomic path —
 // dumping a 2 MB minified JSON or a single-line 5 MB CSS bundle into a
@@ -54,36 +47,6 @@ const CONFLICT_BACKUP_PATTERN = /\.conflict-(local|remote)-[\dT.\-Z:]+\.[^./]+$/
 const MAX_DIFFABLE_BYTES = 2 * 1024 * 1024;
 const MAX_DIFFABLE_LINE_LENGTH = 4096;
 const SNIFF_SAMPLE_BYTES = 32 * 1024;
-
-// Files that always show up in vaults (esp. on macOS / Windows) but never
-// belong in version control. Matched by basename anywhere in the path.
-const BLOCKED_BASENAMES = new Set<string>([
-  ".DS_Store",
-  "Thumbs.db",
-  "desktop.ini",
-]);
-
-// Directories whose contents are never user-meaningful for an Obsidian vault.
-// Matched as any path segment (so `node_modules/foo/bar.js` is blocked, and
-// so is `nested/.git/HEAD`).
-const BLOCKED_DIR_SEGMENTS = new Set<string>([
-  ".git",
-  ".idea",
-  ".vscode",
-  ".trash",
-  "node_modules",
-]);
-
-// The four canonical files an Obsidian plugin folder should contain. We
-// allowlist these explicitly inside <configDir>/plugins/<id>/ so that vaults
-// where someone checked their plugin source into the plugin directory don't
-// end up uploading node_modules, README, src/, etc.
-const PLUGIN_DIR_ALLOWED_FILES = new Set<string>([
-  "data.json",
-  "main.js",
-  "manifest.json",
-  "styles.css",
-]);
 
 /**
  * Decodes a base64 encoded string, this properly
@@ -141,107 +104,68 @@ export function hasTextExtension(filePath: string) {
 
 /**
  * Single source of truth for "should this file be part of the sync set?".
- * Used by every place that decides what to track in metadata, what to
- * upload, and what to download. Keeping the rules here (rather than
- * duplicated across the codebase) is what stops new bugs from creeping in
- * each time a new sync path is added.
+ * The hardcoded portion is intentionally tiny — only things that absolutely
+ * must not be overridable through a user-edited gitignore. Everything else
+ * (workspace state, junk basenames, plugin folder allowlist, log files,
+ * conflict backups, …) is expressed as gitignore patterns either in the
+ * canonical invariant block (immutable) or in seeded defaults (user-
+ * editable). See gitignore-cache.ts.
  *
  * Decision order:
- *   1. The plugin's own manifest is always synced — it's the wire protocol.
- *   2. Our own plugin's data.json is never synced — it carries the GitHub
- *      token, which is per-device by design.
- *   3. The plugin's log file is never synced.
- *   4. Obsidian's per-device workspace state files (workspace.json,
- *      workspace-mobile.json) are never synced; Obsidian explicitly
- *      recommends against it.
- *   4a. community-plugins.json (the list of community plugins enabled
- *      on this machine) is never synced — plugin files sync via the
- *      allowlist, but the enabled-set is per-device by design.
- *   5. Junk basenames anywhere in the path (.DS_Store, Thumbs.db, ...)
- *      are never synced.
- *   6. Junk directory segments anywhere in the path (.git, .idea,
- *      node_modules, ...) are never synced.
- *   7. Inside <configDir>/plugins/<id>/: only the four canonical plugin
- *      output files are allowed; subdirectories and other files are
- *      rejected. Plugin folders are still gated on syncConfigDir.
- *   8. Other paths inside <configDir>/ require syncConfigDir to be on.
- *   9. Anything else (regular vault content) is allowed.
+ *   1. Manifest path — always allowed (immune to all gitignore patterns).
+ *   2. Our own plugin's data.json — never (security backstop for the
+ *      GitHub token, in addition to the strict per-plugin .gitignore).
+ *   3. Anything inside a `.git` directory at any depth — never (git
+ *      internals: refs, packed objects, hook scripts, possibly
+ *      credentials). Hardcoded so even a deleted root .gitignore can't
+ *      accidentally let .git/ leak to the remote.
+ *   4. Combined gitignore matcher (root + configDir + self plugin) —
+ *      reject if the path matches an ignore pattern.
+ *   5. configDir gating — paths inside <configDir>/ require syncConfigDir.
+ *   6. Otherwise allowed.
+ *
+ * The matcher argument is optional so any code path that legitimately
+ * predates cache initialization can still call isSyncable — those callers
+ * just skip rule 4.
  */
 export function isSyncable(
   filePath: string,
   configDir: string,
   syncConfigDir: boolean,
+  gitignoreMatcher?: { isIgnored(path: string): boolean },
 ): boolean {
   const manifestPath = `${configDir}/${MANIFEST_FILE_NAME}`;
-  const logFilePath = `${configDir}/${LOG_FILE_NAME}`;
-  const workspacePath = `${configDir}/workspace.json`;
-  const workspaceMobilePath = `${configDir}/workspace-mobile.json`;
 
-  // 0. Conflict-backup files dropped during atomic resolution stay local.
-  // They are diagnostic copies of the loser side; replicating them through
-  // sync would multiply them on every machine.
-  if (CONFLICT_BACKUP_PATTERN.test(filePath)) return false;
-
-  // 1. Manifest always syncs, regardless of any other rule.
+  // 1. Manifest always syncs.
   if (filePath === manifestPath) return true;
 
-  // 2. Our own plugin's data.json never syncs — it stores the GitHub token,
-  // which is per-device by design (each machine should use its own
-  // fine-grained token with minimal permissions). Replicating it across
-  // vaults via this very sync mechanism would defeat the security model:
-  // one compromised pull would leak every machine's credentials.
-  if (
-    filePath ===
-    `${configDir}/plugins/${SELF_PLUGIN_ID}/data.json`
-  ) {
+  // 2. Our own data.json carries the GitHub token. The strict per-plugin
+  // .gitignore covers this through `* / !main.js / !manifest.json /
+  // !styles.css`, but we keep a code-level backstop in case the strict
+  // file is missing or its rules haven't been refreshed yet.
+  if (filePath === `${configDir}/plugins/${SELF_PLUGIN_ID}/data.json`) {
     return false;
   }
 
-  // 3-4. Other hard exclusions inside configDir.
-  if (filePath === logFilePath) return false;
-  if (filePath === workspacePath) return false;
-  if (filePath === workspaceMobilePath) return false;
+  // 3. Never sync anything under a `.git` directory at any depth. This
+  // protects vaults that double as git working copies (e.g. users still
+  // running obsidian-git side-by-side, or who init'd git in vault root
+  // for backup): we'd otherwise try to push refs, packed objects and
+  // possibly credentials. Note: `.gitignore` and `.gitattributes` are
+  // single files at vault/configDir root, not under a `.git` directory,
+  // so they pass through this rule.
+  if (filePath.split("/").includes(".git")) return false;
 
-  // 4a. community-plugins.json holds the list of community plugins
-  // *enabled on this machine*. Plugin FILES still sync (via the plugin
-  // folder allowlist), so a plugin installed on one device shows up in
-  // every other device's "Installed plugins" list after Reload — the
-  // user enables it per device. Syncing the enabled-list itself produces
-  // unmergeable JSON-array conflicts the moment two devices diverge in
-  // which plugins they activated. core-plugins.json, hotkeys.json,
-  // graph.json deliberately stay syncable here; the planned user
-  // gitignore-equivalent will let users opt those out per-vault later.
-  if (filePath === `${configDir}/community-plugins.json`) return false;
-
-  const segments = filePath.split("/");
-  const basename = segments[segments.length - 1];
-
-  // 4. Junk basenames anywhere.
-  if (BLOCKED_BASENAMES.has(basename)) return false;
-
-  // 5. Junk directory segments. Only check non-leaf segments — the basename
-  // (last segment) is handled above. configDir itself starts with "." but
-  // is not in the blocked set, so it passes through.
-  for (let i = 0; i < segments.length - 1; i++) {
-    if (BLOCKED_DIR_SEGMENTS.has(segments[i])) return false;
+  // 4. Defer to user-managed gitignore rules.
+  if (gitignoreMatcher && gitignoreMatcher.isIgnored(filePath)) {
+    return false;
   }
 
-  // 6. Plugin folder allowlist.
-  const pluginsPrefix = `${configDir}/plugins/`;
-  if (filePath.startsWith(pluginsPrefix)) {
-    if (!syncConfigDir) return false;
-    const rel = filePath.substring(pluginsPrefix.length).split("/");
-    // Must be exactly <plugin-id>/<file> — anything deeper is rejected.
-    if (rel.length !== 2) return false;
-    return PLUGIN_DIR_ALLOWED_FILES.has(rel[1]);
-  }
-
-  // 7. Other configDir paths follow the user toggle.
+  // 5. configDir gating.
   if (filePath.startsWith(`${configDir}/`)) {
     return syncConfigDir;
   }
 
-  // 8. Everything else (vault root files, regular content folders).
   return true;
 }
 

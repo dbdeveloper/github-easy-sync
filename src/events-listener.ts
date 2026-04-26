@@ -4,6 +4,7 @@ import { GitHubSyncSettings } from "./settings/settings";
 import Logger from "./logger";
 import GitHubSyncPlugin from "./main";
 import { isSyncable } from "./utils";
+import { GitignoreCache } from "./gitignore-cache";
 
 /**
  * Tracks changes to local sync directory and updates files metadata.
@@ -14,6 +15,7 @@ export default class EventsListener {
     private metadataStore: MetadataStore,
     private settings: GitHubSyncSettings,
     private logger: Logger,
+    private gitignoreCache?: GitignoreCache,
   ) {}
 
   start(plugin: GitHubSyncPlugin) {
@@ -141,6 +143,7 @@ export default class EventsListener {
       filePath,
       this.vault.configDir,
       this.settings.syncConfigDir,
+      this.gitignoreCache,
     );
   }
 }
