@@ -369,6 +369,22 @@ export function conflictBackupPath(
 }
 
 /**
+ * Compute the same SHA-1 git would for a blob with this content. Used to
+ * compare local files against remote tree SHAs without uploading anything.
+ */
+export async function calculateGitBlobSHA(content: ArrayBuffer): Promise<string> {
+  const bytes = new Uint8Array(content);
+  const header = new TextEncoder().encode(`blob ${bytes.length}\0`);
+  const store = new Uint8Array(header.length + bytes.length);
+  store.set(header, 0);
+  store.set(bytes, header.length);
+  const hash = await crypto.subtle.digest("SHA-1", store);
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
  * Retries an async function until its return value satisfies a condition or max retries is reached.
  * Uses exponential backoff between retry attempts.
  *

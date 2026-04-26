@@ -28,6 +28,17 @@ import {
   isSyncable,
   pluginIdFromPath,
 } from "./utils";
+import {
+  AdoptionAnalysis,
+  InitAction,
+  LocalState,
+  RemoteState,
+  analyzeLocalState,
+  analyzeRemoteState,
+  compareForAdoption,
+  decideInitAction,
+  shouldAutoAdopt,
+} from "./sync-state";
 import GitHubSyncPlugin from "./main";
 
 interface SyncAction {
@@ -49,6 +60,16 @@ export interface ConflictResolution {
 type OnConflictsCallback = (
   conflicts: ConflictFile[],
 ) => Promise<ConflictResolution[]>;
+
+export type AmbiguousStateInfo = {
+  local: LocalState;
+  remote: RemoteState;
+  analysis: AdoptionAnalysis;
+};
+
+export type OnAmbiguousStateCallback = (
+  info: AmbiguousStateInfo,
+) => Promise<"overwrite-remote" | "overwrite-local" | "cancel">;
 
 export default class SyncManager {
   private metadataStore: MetadataStore;
@@ -75,6 +96,7 @@ export default class SyncManager {
     private settings: GitHubSyncSettings,
     private onConflicts: OnConflictsCallback,
     private logger: Logger,
+    private onAmbiguousState?: OnAmbiguousStateCallback,
   ) {
     this.metadataStore = new MetadataStore(this.vault);
     this.client = new GithubClient(this.settings, this.logger);
@@ -132,75 +154,242 @@ export default class SyncManager {
   private async firstSyncImpl() {
     await this.logger.info("Starting first sync");
     this.updateProgress("Analyzing repository state...");
-    let repositoryIsEmpty = false;
-    let res: RepoContent;
-    let files: {
-      [key: string]: GetTreeResponseItem;
-    } = {};
-    let treeSha: string = "";
-    try {
-      res = await this.client.getRepoContent();
-      files = res.files;
-      treeSha = res.sha;
-    } catch (err) {
-      // 409 is returned in case the remote repo has been just created
-      // and contains no files.
-      // 404 instead is returned in case there are no files.
-      // Either way we can handle both by commiting a new empty manifest.
-      if (err.status !== 409 && err.status !== 404) {
-        this.syncing = false;
-        throw err;
-      }
-      // The repository is bare, meaning it has no tree, no commits and no branches
-      repositoryIsEmpty = true;
-    }
 
-    if (repositoryIsEmpty) {
-      await this.logger.info("Remote repository is empty");
-      // Since the repository is completely empty we need to create a first commit.
-      // We can't create that by going throught the normal sync process since the
-      // API doesn't let us create a new tree when the repo is empty.
-      // So we create a the manifest file as the first commit, since we're going
-      // to create that in any case right after this.
-      const buffer = await this.vault.adapter.readBinary(
-        normalizePath(`${this.vault.configDir}/${MANIFEST_FILE_NAME}`),
+    const isResume = !!this.metadataStore.data.firstSyncFromRemoteInProgress;
+    const [localState, remoteState] = await Promise.all([
+      analyzeLocalState(this.vault, this.settings.syncConfigDir),
+      analyzeRemoteState(this.client, this.vault.configDir),
+    ]);
+    await this.logger.info("State analysis", {
+      local: localState.kind,
+      remote: remoteState.kind,
+      isResume,
+    });
+
+    let action = decideInitAction(localState, remoteState, isResume);
+
+    // Resolve adoption-analysis cases by hashing local files and comparing
+    // against remote SHAs. Silent if no real conflicts; modal otherwise.
+    if (action.kind === "needs-adoption-analysis") {
+      this.updateProgress("Comparing local and remote files...");
+      const analysis = await compareForAdoption(
+        this.vault,
+        this.vault.configDir,
+        this.settings.syncConfigDir,
+        action.remote.kind === "bare" ? {} : action.remote.files,
       );
-      await this.client.createFile({
-        path: `${this.vault.configDir}/${MANIFEST_FILE_NAME}`,
-        content: arrayBufferToBase64(buffer),
-        message: "First sync",
-        retry: true,
+      await this.logger.info("Adoption analysis", {
+        identical: analysis.identical.length,
+        localOnly: analysis.localOnly.length,
+        remoteOnly: analysis.remoteOnly.length,
+        conflicting: analysis.conflicting.length,
       });
-      // Now get the repo content again cause we know for sure it will return a
-      // valid sha that we can use to create the first sync commit.
-      res = await this.client.getRepoContent({ retry: true });
-      files = res.files;
-      treeSha = res.sha;
+      action = shouldAutoAdopt(analysis)
+        ? { kind: "adopt", remote: action.remote, analysis }
+        : { kind: "ambiguous", local: localState, remote: action.remote, analysis };
     }
 
-    const vaultIsEmpty = await this.vaultIsEmpty();
-    const resumingFromRemote =
-      !!this.metadataStore.data.firstSyncFromRemoteInProgress;
-
-    if (!repositoryIsEmpty && !vaultIsEmpty && !resumingFromRemote) {
-      // Both have files, we can't sync, show error
-      await this.logger.error("Both remote and local have files, can't sync");
-      throw new Error("Both remote and local have files, can't sync");
-    } else if (repositoryIsEmpty) {
-      // Remote has no files and no manifest, let's just upload whatever we have locally.
-      // This is fine even if the vault is empty.
-      // The most important thing at this point is that the remote manifest is created.
-      await this.firstSyncFromLocal(files, treeSha);
-    } else {
-      // Local has no files and there's no manifest in the remote repo.
-      // Let's download whatever we have in the remote repo.
-      // This is fine even if the remote repo is empty.
-      // In this case too the important step is that the remote manifest is created.
-      // If resumingFromRemote is true, the local vault may already contain
-      // partially-downloaded files from a previous interrupted attempt;
-      // downloadAllFilesViaAPI is idempotent and will skip those.
-      await this.firstSyncFromRemote(files, treeSha);
+    if (action.kind === "ambiguous") {
+      if (!this.onAmbiguousState) {
+        throw new Error(
+          "Initial sync needs a decision but no UI handler is registered",
+        );
+      }
+      const choice = await this.onAmbiguousState({
+        local: localState,
+        remote: action.remote,
+        analysis: action.analysis,
+      });
+      await this.logger.info("Ambiguous state resolved by user", { choice });
+      if (choice === "cancel") {
+        throw new Error("Sync cancelled by user");
+      }
+      action =
+        choice === "overwrite-remote"
+          ? { kind: "first-sync-from-local", remote: action.remote }
+          : { kind: "first-sync-from-remote", remote: action.remote };
     }
+
+    await this.executeInitAction(action);
+  }
+
+  /**
+   * Carry out the action chosen by decideInitAction (after any
+   * adoption/modal resolution). Each branch maps to one of the existing
+   * helper methods plus a small bootstrap path for bare-repo cases.
+   */
+  private async executeInitAction(action: InitAction): Promise<void> {
+    switch (action.kind) {
+      case "needs-adoption-analysis":
+      case "ambiguous":
+        // Should have been resolved by firstSyncImpl before reaching here.
+        throw new Error(
+          `Internal: unresolved init action "${action.kind}" reached executor`,
+        );
+
+      case "regular-sync":
+        // Both manifests in place — no init work needed. Caller
+        // (main.ts) will flip settings.firstSync false and a normal
+        // sync will pick up any incremental changes.
+        await this.logger.info("Init: nothing to do, regular sync state");
+        return;
+
+      case "bootstrap-empty": {
+        await this.logger.info("Init: bootstrap empty repo");
+        await this.bootstrapEmptyRepo();
+        return;
+      }
+
+      case "first-sync-from-local": {
+        let remote = action.remote;
+        if (remote.kind === "bare") {
+          await this.bootstrapEmptyRepo();
+          // Refresh: bootstrap put the manifest there, so it's no longer bare.
+          const refreshed = await analyzeRemoteState(
+            this.client,
+            this.vault.configDir,
+          );
+          if (refreshed.kind === "bare") {
+            throw new Error("Bootstrap failed: remote still bare after init commit");
+          }
+          remote = refreshed;
+        }
+        await this.firstSyncFromLocal(remote.files, remote.treeSha);
+        return;
+      }
+
+      case "first-sync-from-remote": {
+        if (action.remote.kind === "bare") {
+          // Resume + bare. Best we can do is bootstrap and exit.
+          await this.bootstrapEmptyRepo();
+          return;
+        }
+        await this.firstSyncFromRemote(
+          action.remote.files,
+          action.remote.treeSha,
+        );
+        return;
+      }
+
+      case "adopt": {
+        if (action.remote.kind === "bare") {
+          // Adoption only happens when both sides have content; bare remote
+          // wouldn't have triggered analysis. Defensive fallback.
+          await this.bootstrapEmptyRepo();
+          return;
+        }
+        await this.adoptCurrentState(action.remote, action.analysis);
+        // After adoption: locals-only need uploading and remotes-only need
+        // downloading. Delegate to the regular sync — manifests are now in
+        // place on both sides, so it'll behave as a normal incremental sync.
+        if (
+          action.analysis.localOnly.length > 0 ||
+          action.analysis.remoteOnly.length > 0
+        ) {
+          this.updateProgress("Reconciling differences after adoption...");
+          await this.syncImpl();
+        }
+        return;
+      }
+    }
+  }
+
+  /**
+   * Bootstrap a bare GitHub repo by writing just the manifest as the very
+   * first commit. This still uses the Contents API (createFile) because the
+   * Git Data API can't create a new tree on a repo with zero refs. The
+   * createFile/getRepoContent race we used to have is now contained: the
+   * caller decides whether to refresh remote state afterwards.
+   */
+  private async bootstrapEmptyRepo(): Promise<void> {
+    const manifestPath = `${this.vault.configDir}/${MANIFEST_FILE_NAME}`;
+    const buffer = await this.vault.adapter.readBinary(
+      normalizePath(manifestPath),
+    );
+    await this.client.createFile({
+      path: manifestPath,
+      content: arrayBufferToBase64(buffer),
+      message: "First sync",
+      retry: true,
+    });
+  }
+
+  /**
+   * Adopt the current state of both sides as the sync baseline: build local
+   * metadata to mirror remote SHAs (for identical paths) plus local-only
+   * paths flagged for upload, push the manifest to remote so future syncs
+   * have a reference point. Reconciliation of one-sided extras is done by
+   * the caller via a follow-up regular sync.
+   */
+  private async adoptCurrentState(
+    remote: RemoteState,
+    analysis: AdoptionAnalysis,
+  ): Promise<void> {
+    if (remote.kind === "bare") return; // type-narrow only
+    this.updateProgress("Adopting current state as sync baseline...");
+    const manifestPath = `${this.vault.configDir}/${MANIFEST_FILE_NAME}`;
+    const now = Date.now();
+    const newFiles: { [path: string]: FileMetadata } = {};
+
+    // Identical paths: use the local SHA we just computed (matches remote).
+    for (const path of analysis.identical) {
+      newFiles[path] = {
+        path,
+        sha: analysis.localFileSHAs[path],
+        dirty: false,
+        justDownloaded: false,
+        lastModified: now,
+      };
+    }
+    // Local-only: track but mark as needing upload (sha=null signals new).
+    for (const path of analysis.localOnly) {
+      newFiles[path] = {
+        path,
+        sha: null,
+        dirty: true,
+        justDownloaded: false,
+        lastModified: now,
+      };
+    }
+    // Remote-only: record remote SHA so determineSyncActions emits download.
+    for (const path of analysis.remoteOnly) {
+      newFiles[path] = {
+        path,
+        sha: remote.files[path].sha,
+        dirty: false,
+        justDownloaded: false,
+        lastModified: now,
+      };
+    }
+    // Manifest itself: tracked, no SHA yet (we'll write it next).
+    newFiles[manifestPath] = {
+      path: manifestPath,
+      sha: null,
+      dirty: false,
+      justDownloaded: false,
+      lastModified: now,
+    };
+
+    this.metadataStore.data.files = newFiles;
+    await this.metadataStore.save();
+
+    // Push the manifest to remote via Contents API — single commit that
+    // adds our manifest to whatever's already there. After this, both
+    // sides have a manifest and regular sync logic applies.
+    const buffer = await this.vault.adapter.readBinary(
+      normalizePath(manifestPath),
+    );
+    await this.client.createFile({
+      path: manifestPath,
+      content: arrayBufferToBase64(buffer),
+      message: "Adopt existing vault state",
+      retry: true,
+    });
+    await this.logger.info("Adoption committed", {
+      identical: analysis.identical.length,
+      localOnly: analysis.localOnly.length,
+      remoteOnly: analysis.remoteOnly.length,
+    });
   }
 
   /**
@@ -780,9 +969,21 @@ export default class SyncManager {
   async findDivergedPaths(filesMetadata: {
     [key: string]: FileMetadata;
   }): Promise<{ filePath: string; category: ConflictCategory }[]> {
-    const commonFiles = Object.keys(filesMetadata).filter(
-      (key) => key in this.metadataStore.data.files,
-    );
+    const commonFiles = Object.keys(filesMetadata)
+      .filter((key) => key in this.metadataStore.data.files)
+      // Skip non-syncable paths up front. Without this, files that USED to
+      // be synced (and so are still in both manifests) but are now blocked
+      // by isSyncable rules — e.g. community-plugins.json after we added it
+      // to the blocklist — get treated as conflicts. The conflict pipeline
+      // then tries to fetch their remote blob and crashes (often with a
+      // null-SHA 422 from GitHub).
+      .filter((filePath) =>
+        isSyncable(
+          filePath,
+          this.vault.configDir,
+          this.settings.syncConfigDir,
+        ),
+      );
     if (commonFiles.length === 0) {
       return [];
     }
@@ -853,12 +1054,24 @@ export default class SyncManager {
     paths: string[],
     filesMetadata: { [key: string]: FileMetadata },
   ): Promise<ConflictFile[]> {
-    return await Promise.all(
-      paths.map(async (filePath: string) => {
+    const results = await Promise.all(
+      paths.map(async (filePath: string): Promise<ConflictFile | null> => {
+        const remoteSha = filesMetadata[filePath]?.sha;
+        // A null/missing remote SHA means the manifest entry was never
+        // populated (legacy state from before the file was upload-tracked
+        // properly). We can't fetch the blob without a real SHA — skip
+        // the conflict gracefully rather than letting GitHub 422 crash sync.
+        if (!remoteSha) {
+          await this.logger.warn(
+            "Skip text conflict: remote SHA missing in manifest",
+            { filePath },
+          );
+          return null;
+        }
         const [remoteContent, localContent] = await Promise.all([
           (async () => {
             const res = await this.client.getBlob({
-              sha: filesMetadata[filePath].sha!,
+              sha: remoteSha,
               retry: true,
               maxRetries: 1,
             });
@@ -869,6 +1082,7 @@ export default class SyncManager {
         return { filePath, remoteContent, localContent };
       }),
     );
+    return results.filter((r): r is ConflictFile => r !== null);
   }
 
   /**

@@ -7,12 +7,17 @@ import {
 } from "obsidian";
 import { GitHubSyncSettings, DEFAULT_SETTINGS } from "./settings/settings";
 import GitHubSyncSettingsTab from "./settings/tab";
-import SyncManager, { ConflictFile, ConflictResolution } from "./sync-manager";
+import SyncManager, {
+  AmbiguousStateInfo,
+  ConflictFile,
+  ConflictResolution,
+} from "./sync-manager";
 import Logger from "./logger";
 import {
   ConflictsResolutionView,
   CONFLICTS_RESOLUTION_VIEW_TYPE,
 } from "./views/conflicts-resolution/view";
+import { InitDecisionModal } from "./views/init-decision-modal";
 
 export default class GitHubSyncPlugin extends Plugin {
   settings: GitHubSyncSettings;
@@ -95,6 +100,7 @@ export default class GitHubSyncPlugin extends Plugin {
       this.settings,
       this.onConflicts.bind(this),
       this.logger,
+      this.onAmbiguousState.bind(this),
     );
     await this.syncManager.loadMetadata();
 
@@ -266,6 +272,18 @@ export default class GitHubSyncPlugin extends Plugin {
       await this.activateView();
       this.getConflictsView()?.setConflictFiles(conflicts);
     });
+  }
+
+  async onAmbiguousState(
+    info: AmbiguousStateInfo,
+  ): Promise<"overwrite-remote" | "overwrite-local" | "cancel"> {
+    const modal = new InitDecisionModal(
+      this.app,
+      info.local,
+      info.remote,
+      info.analysis,
+    );
+    return await modal.prompt();
   }
 
   async loadSettings() {
