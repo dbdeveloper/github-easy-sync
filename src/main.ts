@@ -157,18 +157,18 @@ export default class GitHubSyncPlugin extends Plugin {
       new Notice("Sync plugin not configured");
       return;
     }
+    // settings.firstSync used to gate which entry point we'd call. Now
+    // SyncManager.sync() runs state analysis on every call and routes
+    // to the right flow itself — first-sync, adoption, regular sync,
+    // resume — so we always call it. The flag is kept in the settings
+    // interface for backward compatibility with existing data.json
+    // files but is never read here.
+    await this.syncManager.sync();
     if (this.settings.firstSync) {
-      try {
-        await this.syncManager.firstSync();
-        // Only flip the flag on success — failures keep firstSync=true so
-        // the next attempt resumes through the firstSync path.
-        this.settings.firstSync = false;
-        this.saveSettings();
-      } catch (err) {
-        // syncManager.firstSync owns the user-visible notices; nothing to do here.
-      }
-    } else {
-      await this.syncManager.sync();
+      // Once any sync completes, retire the legacy flag so it stops
+      // showing as "needs first sync" in any downstream consumer.
+      this.settings.firstSync = false;
+      await this.saveSettings();
     }
     this.updateStatusBarItem();
   }

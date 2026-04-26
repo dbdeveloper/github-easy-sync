@@ -129,37 +129,8 @@ export default class SyncManager {
     );
   }
 
-  /**
-   * Handles first sync with remote and local.
-   * This fails if neither remote nor local folders are empty.
-   */
-  async firstSync() {
-    if (this.syncing) {
-      this.logger.info("First sync already in progress");
-      // We're already syncing, nothing to do
-      return;
-    }
-
-    this.syncing = true;
-    // Pass 0 so the notice stays until we hide it explicitly — first sync can
-    // take minutes on a large repo or slow mobile connection.
-    this.progressNotice = new Notice("Preparing first sync...", 0);
-    try {
-      await this.gitignoreCache.refreshIfChanged();
-      await this.firstSyncImpl();
-      new Notice("Sync successful", 5000);
-    } catch (err) {
-      new Notice(`Error syncing. ${err}`);
-      throw err;
-    } finally {
-      this.syncing = false;
-      this.progressNotice?.hide();
-      this.progressNotice = null;
-    }
-  }
-
-  private async firstSyncImpl() {
-    await this.logger.info("Starting first sync");
+  private async dispatchSync() {
+    await this.logger.info("Starting sync");
     this.updateProgress("Analyzing repository state...");
 
     // Two independent resume markers — each set by the corresponding
@@ -244,10 +215,13 @@ export default class SyncManager {
         );
 
       case "regular-sync":
-        // Both manifests in place — no init work needed. Caller
-        // (main.ts) will flip settings.firstSync false and a normal
-        // sync will pick up any incremental changes.
-        await this.logger.info("Init: nothing to do, regular sync state");
+        // Both sides have a manifest — run the incremental sync. This is
+        // what used to be the body of the old separate sync() method:
+        // dispatch reaches it whenever no first-sync work is needed.
+        await this.logger.info(
+          "Dispatch: regular incremental sync",
+        );
+        await this.syncImpl();
         return;
 
       case "bootstrap-empty": {
@@ -744,13 +718,15 @@ export default class SyncManager {
   }
 
   /**
-   * Syncs local and remote folders.
-   * @returns
+   * Sync local and remote. Single public entry point: this method analyses
+   * the current state of both sides and routes to the right flow itself
+   * (bootstrap, first-sync-from-local, first-sync-from-remote, adoption,
+   * or incremental sync) — callers no longer need to track whether this
+   * is "first" sync or a regular one.
    */
   async sync() {
     if (this.syncing) {
       this.logger.info("Sync already in progress");
-      // We're already syncing, nothing to do
       return;
     }
 
@@ -762,7 +738,7 @@ export default class SyncManager {
     this.progressNotice = new Notice("Preparing sync...", 0);
     try {
       await this.gitignoreCache.refreshIfChanged();
-      await this.syncImpl();
+      await this.dispatchSync();
       new Notice("Sync successful", 5000);
     } catch (err) {
       new Notice(`Error syncing. ${err}`);
@@ -774,8 +750,9 @@ export default class SyncManager {
   }
 
   private async syncImpl() {
-    await this.logger.info("Starting sync");
-    this.updateProgress("Analyzing repository state...");
+    await this.logger.info("Starting incremental sync");
+    // dispatchSync set "Analyzing repository state..." already; syncImpl
+    // doesn't need to repeat it.
     const { files, sha: treeSha } = await this.client.getRepoContent({
       retry: true,
     });
