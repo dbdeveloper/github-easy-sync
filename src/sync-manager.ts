@@ -246,19 +246,13 @@ export default class SyncManager {
       }
 
       case "first-sync-from-local": {
-        let remote = action.remote;
-        if (remote.kind === "bare") {
-          await this.bootstrapEmptyRepo();
-          // Refresh: bootstrap put the manifest there, so it's no longer bare.
-          const refreshed = await analyzeRemoteState(
-            this.client,
-            this.vault.configDir,
-          );
-          if (refreshed.kind === "bare") {
-            throw new Error("Bootstrap failed: remote still bare after init commit");
-          }
-          remote = refreshed;
-        }
+        // bootstrapEmptyRepo returns the freshly-built RemoteState so
+        // we skip the follow-up analyzeRemoteState that used to race
+        // against GitHub's eventual consistency.
+        const remote =
+          action.remote.kind === "bare"
+            ? await this.bootstrapEmptyRepo()
+            : action.remote;
         await this.firstSyncFromLocal(remote.files, remote.treeSha);
         return;
       }
@@ -300,23 +294,83 @@ export default class SyncManager {
   }
 
   /**
-   * Bootstrap a bare GitHub repo by writing just the manifest as the very
-   * first commit. This still uses the Contents API (createFile) because the
-   * Git Data API can't create a new tree on a repo with zero refs. The
-   * createFile/getRepoContent race we used to have is now contained: the
-   * caller decides whether to refresh remote state afterwards.
+   * Bootstrap a bare GitHub repo by writing just the manifest as the
+   * first commit. Uses the Git Data API directly so the operation is
+   * atomic from our point of view: we know the new tree SHA without a
+   * follow-up getRepoContent that could race against eventual
+   * consistency. The earlier createFile-based bootstrap had us
+   * round-tripping for that SHA and occasionally seeing stale tree
+   * data, which broke the next commit.
+   *
+   * Returns the freshly-built RemoteState (always kind="has-manifest")
+   * so callers don't have to re-analyze remote.
    */
-  private async bootstrapEmptyRepo(): Promise<void> {
+  private async bootstrapEmptyRepo(): Promise<
+    Extract<RemoteState, { kind: "has-manifest" }>
+  > {
     const manifestPath = `${this.vault.configDir}/${MANIFEST_FILE_NAME}`;
-    const buffer = await this.vault.adapter.readBinary(
-      normalizePath(manifestPath),
-    );
-    await this.client.createFile({
-      path: manifestPath,
-      content: arrayBufferToBase64(buffer),
-      message: "First sync",
+    const manifestContent = JSON.stringify(this.metadataStore.data);
+
+    const blob = await this.client.createBlob({
+      content: arrayBufferToBase64(
+        new TextEncoder().encode(manifestContent).buffer as ArrayBuffer,
+      ),
       retry: true,
     });
+
+    const treeSha = await this.client.createTree({
+      tree: {
+        // No base_tree — we're building the very first tree of this repo.
+        tree: [
+          {
+            path: manifestPath,
+            mode: "100644",
+            type: "blob",
+            sha: blob.sha,
+          },
+        ],
+      },
+      retry: true,
+    });
+
+    const commitSha = await this.client.createCommit({
+      message: "First sync",
+      treeSha,
+      // No parent — root commit.
+      retry: true,
+    });
+
+    await this.client.createReference({
+      ref: `refs/heads/${this.settings.githubBranch}`,
+      sha: commitSha,
+      retry: true,
+    });
+
+    // Update local metadata so the manifest entry knows the SHA we just
+    // pushed; otherwise the next sync would re-detect divergence.
+    this.metadataStore.data.files[manifestPath] = {
+      ...this.metadataStore.data.files[manifestPath],
+      sha: blob.sha,
+      lastModified: Date.now(),
+    };
+    await this.metadataStore.save();
+
+    // Construct the RemoteState the caller would have re-fetched.
+    return {
+      kind: "has-manifest",
+      treeSha,
+      files: {
+        [manifestPath]: {
+          path: manifestPath,
+          mode: "100644",
+          type: "blob",
+          sha: blob.sha,
+          size: manifestContent.length,
+          url: "",
+        },
+      },
+      manifest: this.metadataStore.data,
+    };
   }
 
   /**
@@ -1532,10 +1586,16 @@ export default class SyncManager {
       }),
     );
 
-    // Update manifest in list of new tree items
-    delete treeFiles[`${this.vault.configDir}/${MANIFEST_FILE_NAME}`].sha;
-    treeFiles[`${this.vault.configDir}/${MANIFEST_FILE_NAME}`].content =
-      JSON.stringify(this.metadataStore.data);
+    // Always set the manifest entry from the current in-memory metadata.
+    // commitSync owns this: callers no longer have to remember to populate
+    // it (and used to crash with TypeError when the entry was missing).
+    const manifestPath = `${this.vault.configDir}/${MANIFEST_FILE_NAME}`;
+    treeFiles[manifestPath] = {
+      path: manifestPath,
+      mode: "100644",
+      type: "blob",
+      content: JSON.stringify(this.metadataStore.data),
+    };
 
     // Create the new tree
     const newTree: { tree: NewTreeRequestItem[]; base_tree: string } = {

@@ -57,7 +57,12 @@ export default class MetadataStore {
   }
 
   /**
-   * Loads the metadata from disk.
+   * Loads the metadata from disk and guarantees that an entry for the
+   * manifest file itself is present in `data.files`. Several call sites
+   * (commitSync in particular) used to assume that entry existed and
+   * crashed with a TypeError if a stale or hand-edited file was missing
+   * it. Centralising the invariant here means callers can stop guarding
+   * against that case.
    */
   async load() {
     const fileExists = await this.vault.adapter.exists(this.metadataFile);
@@ -65,7 +70,26 @@ export default class MetadataStore {
       const content = await this.vault.adapter.read(this.metadataFile);
       this.data = JSON.parse(content);
     } else {
-      this.data = { lastSync: 0, files: {}, firstSyncFromRemoteInProgress: false };
+      this.data = {
+        lastSync: 0,
+        files: {},
+        firstSyncFromRemoteInProgress: false,
+      };
+    }
+    if (!this.data.files) {
+      this.data.files = {};
+    }
+    const manifestRelativePath = normalizePath(
+      `${this.vault.configDir}/${MANIFEST_FILE_NAME}`,
+    );
+    if (!this.data.files[manifestRelativePath]) {
+      this.data.files[manifestRelativePath] = {
+        path: manifestRelativePath,
+        sha: null,
+        dirty: false,
+        justDownloaded: false,
+        lastModified: Date.now(),
+      };
     }
   }
 

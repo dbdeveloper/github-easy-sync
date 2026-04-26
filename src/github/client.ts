@@ -129,7 +129,9 @@ export default class GithubClient {
     retry = false,
     maxRetries = 5,
   }: {
-    tree: { tree: NewTreeRequestItem[]; base_tree: string };
+    // base_tree is optional: omit when bootstrapping a brand-new repo
+    // (no commits yet, no tree to base on).
+    tree: { tree: NewTreeRequestItem[]; base_tree?: string };
     retry?: boolean;
     maxRetries?: number;
   }) {
@@ -162,7 +164,9 @@ export default class GithubClient {
    *
    * @param message The commit message
    * @param treeSha The SHA of the tree
-   * @param parent The SHA of the parent commit
+   * @param parent The SHA of the parent commit. Omit (or pass undefined)
+   *   to create a root commit — needed when bootstrapping a brand-new
+   *   repo that doesn't have any commits yet.
    * @param retry Whether to retry the request on failure (default: false)
    * @param maxRetries Maximum number of retry attempts (default: 5)
    * @returns The SHA of the created commit
@@ -176,7 +180,7 @@ export default class GithubClient {
   }: {
     message: string;
     treeSha: string;
-    parent: string;
+    parent?: string;
     retry?: boolean;
     maxRetries?: number;
   }): Promise<string> {
@@ -189,7 +193,7 @@ export default class GithubClient {
           body: JSON.stringify({
             message: message,
             tree: treeSha,
-            parents: [parent],
+            parents: parent ? [parent] : [],
           }),
           throw: false,
         });
@@ -206,6 +210,46 @@ export default class GithubClient {
       );
     }
     return response.json.sha;
+  }
+
+  /**
+   * Creates a new branch reference pointing at a commit. Used when
+   * bootstrapping a bare repo: after we've made the root commit via
+   * createCommit (no parent), we still need to publish a ref so HEAD
+   * resolves and the next sync's getRepoContent finds the tree.
+   */
+  async createReference({
+    ref,
+    sha,
+    retry = false,
+    maxRetries = 5,
+  }: {
+    ref: string;
+    sha: string;
+    retry?: boolean;
+    maxRetries?: number;
+  }): Promise<void> {
+    const response = await retryUntil(
+      async () => {
+        return requestUrl({
+          url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/refs`,
+          headers: this.headers(),
+          method: "POST",
+          body: JSON.stringify({ ref, sha }),
+          throw: false,
+        });
+      },
+      (res) => res.status !== 422,
+      retry ? maxRetries : 0,
+    );
+
+    if (response.status < 200 || response.status >= 400) {
+      await this.logger.error("Failed to create reference", response);
+      throw new GithubAPIError(
+        response.status,
+        `Failed to create reference, status ${response.status}`,
+      );
+    }
   }
 
   /**
