@@ -1717,63 +1717,97 @@ export default class SyncManager {
   async loadMetadata() {
     await this.logger.info("Loading metadata");
     // The gitignore cache must be ready before any isSyncable check fires —
-    // the file walk below filters via that, and so do all subsequent sync
+    // reconcile below filters via it, and so do all subsequent sync
     // operations. initialize() also writes the canonical/strict files if
     // missing, which is something we want to happen exactly once at startup.
     await this.gitignoreCache.initialize();
     await this.metadataStore.load();
-    if (Object.keys(this.metadataStore.data.files).length === 0) {
-      await this.logger.info("Metadata was empty, loading all files");
-      // Walk the whole vault. isSyncable handles the configDir gating —
-      // when syncConfigDir is off it drops everything inside configDir
-      // except the manifest, so we don't need to special-case the walk.
-      let files = [];
-      let folders = [this.vault.getRoot().path];
-      while (folders.length > 0) {
-        const folder = folders.pop();
-        if (folder === undefined) {
-          continue;
-        }
-        const res = await this.vault.adapter.list(folder);
-        files.push(...res.files);
-        folders.push(...res.folders);
-      }
-      files.forEach((filePath: string) => {
-        if (
-          !isSyncable(
-            filePath,
-            this.vault.configDir,
-            this.settings.syncConfigDir,
-            this.gitignoreCache,
-          )
-        ) {
-          return;
-        }
-        this.metadataStore.data.files[filePath] = {
-          path: filePath,
-          sha: null,
-          dirty: false,
-          justDownloaded: false,
-          lastModified: Date.now(),
-        };
-      });
 
-      // Manifest is always tracked even if isSyncable would otherwise gate
-      // it through the configDir rule — initialize it explicitly. This is
-      // also what makes a freshly-loaded plugin runnable on a vault where
-      // syncConfigDir is off: we still need the manifest entry to coordinate.
-      this.metadataStore.data.files[
-        `${this.vault.configDir}/${MANIFEST_FILE_NAME}`
-      ] = {
-        path: `${this.vault.configDir}/${MANIFEST_FILE_NAME}`,
+    // Always reconcile metadata with what's actually on disk. This catches
+    // changes that happened while the plugin wasn't loaded — files added
+    // or deleted by the user via Finder, files restored from backup, the
+    // disable→edit-vault→re-enable cycle, etc. Plus it handles the
+    // "metadata is essentially empty (only the manifest entry)" first-
+    // install case as a special case of "lots of files appeared on disk
+    // since metadata last saw them".
+    await this.reconcileWithVault();
+
+    await this.logger.info("Loaded metadata");
+  }
+
+  /**
+   * Compare the metadata's view of the vault to what's actually on disk
+   * and update metadata where they disagree at the path level:
+   *   - File tracked but not on disk → mark deleted (next sync removes
+   *     it from remote).
+   *   - File on disk but not tracked → add as a fresh entry (next sync
+   *     uploads it).
+   * Content-level divergence (file's contents changed but path is the
+   * same) is left to findDivergedPaths, which already handles it via
+   * SHA comparison during sync.
+   */
+  private async reconcileWithVault(): Promise<void> {
+    const all: string[] = [];
+    const folders: string[] = [this.vault.getRoot().path];
+    while (folders.length > 0) {
+      const folder = folders.pop();
+      if (folder === undefined) continue;
+      const res = await this.vault.adapter.list(folder);
+      all.push(...res.files);
+      folders.push(...res.folders);
+    }
+    const onDisk = new Set(all);
+
+    const now = Date.now();
+    let markedDeleted = 0;
+    let addedFresh = 0;
+
+    for (const filePath of Object.keys(this.metadataStore.data.files)) {
+      const entry = this.metadataStore.data.files[filePath];
+      if (entry.deleted) continue;
+      if (onDisk.has(filePath)) continue;
+      // Tracked, not deleted, but no longer on disk — user removed it
+      // outside the events-listener's reach. Mark it so the next sync
+      // propagates the delete.
+      entry.deleted = true;
+      entry.deletedAt = now;
+      markedDeleted++;
+    }
+
+    for (const filePath of onDisk) {
+      if (this.metadataStore.data.files[filePath]) continue;
+      if (
+        !isSyncable(
+          filePath,
+          this.vault.configDir,
+          this.settings.syncConfigDir,
+          this.gitignoreCache,
+        )
+      ) {
+        continue;
+      }
+      // On disk but not tracked — first-install case, or a file dropped
+      // into the vault while the plugin was disabled. Track it; next
+      // sync uploads.
+      this.metadataStore.data.files[filePath] = {
+        path: filePath,
         sha: null,
         dirty: false,
         justDownloaded: false,
-        lastModified: Date.now(),
+        lastModified: now,
       };
-      this.metadataStore.save();
+      addedFresh++;
     }
-    await this.logger.info("Loaded metadata");
+
+    if (markedDeleted > 0 || addedFresh > 0) {
+      await this.metadataStore.save();
+      await this.logger.info("Reconcile applied changes", {
+        markedDeleted,
+        addedFresh,
+      });
+    } else {
+      await this.logger.info("Reconcile: no changes");
+    }
   }
 
   /**
