@@ -154,6 +154,9 @@ export function hasTextExtension(filePath: string) {
  *   4. Obsidian's per-device workspace state files (workspace.json,
  *      workspace-mobile.json) are never synced; Obsidian explicitly
  *      recommends against it.
+ *   4a. community-plugins.json (the list of community plugins enabled
+ *      on this machine) is never synced — plugin files sync via the
+ *      allowlist, but the enabled-set is per-device by design.
  *   5. Junk basenames anywhere in the path (.DS_Store, Thumbs.db, ...)
  *      are never synced.
  *   6. Junk directory segments anywhere in the path (.git, .idea,
@@ -198,6 +201,17 @@ export function isSyncable(
   if (filePath === logFilePath) return false;
   if (filePath === workspacePath) return false;
   if (filePath === workspaceMobilePath) return false;
+
+  // 4a. community-plugins.json holds the list of community plugins
+  // *enabled on this machine*. Plugin FILES still sync (via the plugin
+  // folder allowlist), so a plugin installed on one device shows up in
+  // every other device's "Installed plugins" list after Reload — the
+  // user enables it per device. Syncing the enabled-list itself produces
+  // unmergeable JSON-array conflicts the moment two devices diverge in
+  // which plugins they activated. core-plugins.json, hotkeys.json,
+  // graph.json deliberately stay syncable here; the planned user
+  // gitignore-equivalent will let users opt those out per-vault later.
+  if (filePath === `${configDir}/community-plugins.json`) return false;
 
   const segments = filePath.split("/");
   const basename = segments[segments.length - 1];
