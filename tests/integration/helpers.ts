@@ -7,8 +7,10 @@ import type { Vault as ObsidianVault } from "obsidian";
 // substitutes the same module at test time, so runtime is identical.
 import {
   Vault as MockVault,
+  installRequestFaultInjector,
   recordedNotices,
   clearRecordedNotices,
+  type RequestFaultInjector,
 } from "../../mock-obsidian";
 import SyncManager, {
   AmbiguousStateInfo,
@@ -777,6 +779,46 @@ export async function syncAndCollectErrors(
   return recordedNotices
     .map((n) => n.message)
     .filter((m) => m.startsWith("Error syncing"));
+}
+
+// ----------------------------------------------------------------------------
+// Fault injection — re-exports the mock-obsidian primitive so tests
+// don't need to reach into mock-obsidian directly. Pair every
+// installFaultInjector(injector) with installFaultInjector(null) in
+// afterEach to stop the injector leaking into the next test.
+// ----------------------------------------------------------------------------
+
+export type { RequestFaultInjector };
+export { installRequestFaultInjector };
+
+/**
+ * Builds an injector that throws on the Nth match of a per-call
+ * filter. Useful for "fail on the 3rd createBlob" style tests:
+ *
+ *   installRequestFaultInjector(failOnNthMatch(
+ *     (url, method) => method === "POST" && url.endsWith("/git/blobs"),
+ *     3,
+ *     "Simulated crash mid-upload",
+ *   ));
+ *
+ * The N count is per-injector lifetime — if you uninstall and
+ * reinstall, the count resets.
+ */
+export function failOnNthMatch(
+  matcher: (url: string, method: string) => boolean,
+  n: number,
+  message = "Simulated mid-sync crash",
+): RequestFaultInjector {
+  let matches = 0;
+  return {
+    intercept(url, method) {
+      if (matcher(url, method)) {
+        matches += 1;
+        if (matches === n) return new Error(message);
+      }
+      return null;
+    },
+  };
 }
 
 /**

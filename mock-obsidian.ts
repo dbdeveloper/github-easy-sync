@@ -286,7 +286,56 @@ interface RequestUrlParam {
   throw?: boolean;
 }
 
+// Fault injection for integration tests that need to simulate crashes
+// mid-sync (the C-series resume tests). Tests install an injector
+// that inspects every requestUrl call; returning an Error causes the
+// requestUrl to throw before issuing the network round-trip, which
+// surfaces to the SyncManager as a real failure. Because the
+// injector intercepts BEFORE fetch, we don't waste API calls.
+//
+// The injector is global because mock-obsidian itself is loaded
+// once per vitest worker, but tests must always reset it in
+// afterEach (helpers.installFaultInjector(null)) — otherwise a
+// stale injector leaks into subsequent tests.
+export interface RequestFaultInjector {
+  /**
+   * Decide what to do with this request.
+   * Return null to pass through to the real fetch; return an Error
+   * to throw it instead. callIndex is monotonically increasing
+   * across the lifetime of the injector (1-based).
+   */
+  intercept(
+    url: string,
+    method: string,
+    callIndex: number,
+  ): Error | null;
+}
+
+let activeInjector: RequestFaultInjector | null = null;
+let interceptorCallIndex = 0;
+
+export function installRequestFaultInjector(
+  injector: RequestFaultInjector | null,
+): void {
+  activeInjector = injector;
+  interceptorCallIndex = 0;
+}
+
 export async function requestUrl(options: RequestUrlParam) {
+  // Fault injection hook — runs BEFORE the real fetch so tests can
+  // simulate "Obsidian killed mid-sync" without burning API quota.
+  // Throwing here propagates up through GithubClient → SyncManager
+  // exactly like a network error would.
+  if (activeInjector) {
+    interceptorCallIndex += 1;
+    const err = activeInjector.intercept(
+      options.url,
+      options.method || "GET",
+      interceptorCallIndex,
+    );
+    if (err) throw err;
+  }
+
   // Mirror Obsidian's requestUrl behaviour: when there's a body and
   // the caller didn't set Content-Type, default to application/json.
   // Without this default, GitHub PUT /contents/{path} returns 404 on
