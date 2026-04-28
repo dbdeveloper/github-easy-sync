@@ -117,6 +117,17 @@ function ghHeaders(token?: string): Record<string, string> {
   };
 }
 
+/**
+ * URL-encode each `/`-separated segment, leaving the slashes alone.
+ * GitHub's Contents API expects this shape: each path component is
+ * percent-encoded, but the path structure is preserved. Without it,
+ * paths with spaces / Cyrillic / `()` etc. produce malformed URLs
+ * and 404 responses.
+ */
+function encodePathForUrl(p: string): string {
+  return p.split("/").map(encodeURIComponent).join("/");
+}
+
 async function ghFetch(
   url: string,
   init?: { method?: string; body?: unknown; token?: string },
@@ -351,7 +362,7 @@ export async function writeRemoteFile(
   };
   if (existingSha) body.sha = existingSha;
   const res = await ghFetch(
-    `${GH}/repos/${owner}/${repo}/contents/${path}`,
+    `${GH}/repos/${owner}/${repo}/contents/${encodePathForUrl(path)}`,
     { method: "PUT", token, body },
   );
   if (res.status !== 200 && res.status !== 201) {
@@ -375,7 +386,7 @@ export async function removeRemoteFile(
     throw new Error(`removeRemoteFile: ${path} not in branch ${branch}`);
   }
   const res = await ghFetch(
-    `${GH}/repos/${owner}/${repo}/contents/${path}`,
+    `${GH}/repos/${owner}/${repo}/contents/${encodePathForUrl(path)}`,
     { method: "DELETE", token, body: { message, sha, branch } },
   );
   if (res.status !== 200) {
