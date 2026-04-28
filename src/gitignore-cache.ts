@@ -1,6 +1,7 @@
 import { Vault, normalizePath } from "obsidian";
 import ignore, { Ignore } from "ignore";
 import manifest from "../manifest.json";
+import { calculateGitBlobSHA } from "./utils";
 
 const SELF_PLUGIN_ID = manifest.id;
 
@@ -119,12 +120,38 @@ export class GitignoreCache {
   /**
    * One-time setup: ensure files exist with the right content, then load
    * them into the matcher. Call once after plugin onload, before any sync.
+   *
+   * Returns:
+   *  - `created`: paths this call freshly wrote (file didn't exist
+   *    beforehand). The caller persists this so analyzeLocalState can
+   *    distinguish "plugin-managed infra .gitignore" from
+   *    "user-authored .gitignore" during fresh-vault routing.
+   *  - `rewritten`: paths whose pre-existing content we modified
+   *    (currently just <configDir>/.gitignore when we prepend our
+   *    INVARIANT_BLOCK), mapped to the git blob SHA of the original
+   *    content. compareForAdoption uses this to recognize transitions
+   *    from another sync tool: if remote matches the pre-rewrite SHA,
+   *    the apparent conflict is just our invariants being added.
    */
-  async initialize(): Promise<void> {
-    await this.ensureSelfPluginGitignore();
-    await this.ensureConfigDirGitignore();
-    await this.ensureRootGitignore();
+  async initialize(): Promise<{
+    created: Set<string>;
+    rewritten: Map<string, string>;
+  }> {
+    const created = new Set<string>();
+    const rewritten = new Map<string, string>();
+
+    const self = await this.ensureSelfPluginGitignore();
+    if (self) created.add(this.selfPluginPath());
+
+    const cfg = await this.ensureConfigDirGitignore();
+    if (cfg.created) created.add(this.configDirPath());
+    if (cfg.originalSha) rewritten.set(this.configDirPath(), cfg.originalSha);
+
+    const root = await this.ensureRootGitignore();
+    if (root) created.add(this.rootPath());
+
     await this.reload();
+    return { created, rewritten };
   }
 
   /**
@@ -166,13 +193,30 @@ export class GitignoreCache {
 
   // -- file lifecycle ---------------------------------------------------
 
-  private async ensureRootGitignore(): Promise<void> {
+  /**
+   * Returns true if the file was newly created (didn't exist beforehand),
+   * false if it was already present.
+   */
+  private async ensureRootGitignore(): Promise<boolean> {
     const path = this.rootPath();
-    if (await this.vault.adapter.exists(path)) return;
+    if (await this.vault.adapter.exists(path)) return false;
     await this.vault.adapter.write(path, ROOT_SEED + "\n");
+    return true;
   }
 
-  private async ensureConfigDirGitignore(): Promise<void> {
+  /**
+   * Returns:
+   *   - created: true if file was newly written (didn't exist before)
+   *   - originalSha: git blob SHA of the pre-rewrite content if we
+   *     modified an existing file (to add INVARIANT_BLOCK), null
+   *     otherwise. Captured so adoption can recognise the
+   *     "transitioning from another sync tool" case where the remote
+   *     .gitignore matches what we just rewrote on top of.
+   */
+  private async ensureConfigDirGitignore(): Promise<{
+    created: boolean;
+    originalSha: string | null;
+  }> {
     const path = this.configDirPath();
     const existing = (await this.vault.adapter.exists(path))
       ? await this.vault.adapter.read(path)
@@ -184,32 +228,44 @@ export class GitignoreCache {
         path,
         INVARIANT_BLOCK + "\n\n" + CONFIG_DIR_SEED + "\n",
       );
-      return;
+      return { created: true, originalSha: null };
     }
 
     // File exists — check whether the canonical block is intact at the top.
     if (existing.startsWith(INVARIANT_BLOCK)) {
-      return; // unchanged, leave alone
+      return { created: false, originalSha: null }; // unchanged, leave alone
     }
 
-    // Tampered or missing block. Strip any old block (between BEGIN/END
-    // markers) and prepend the canonical block. Don't touch user content
-    // outside the invariant region, including any seed they may have edited.
+    // Tampered or missing block. Capture the pre-rewrite SHA before
+    // modifying — adoption uses this to detect "user had this exact
+    // file before our invariants showed up". Then strip any old block
+    // (between BEGIN/END markers) and prepend the canonical block.
+    // Don't touch user content outside the invariant region, including
+    // any seed they may have edited.
+    const originalBytes = new TextEncoder().encode(existing)
+      .buffer as ArrayBuffer;
+    const originalSha = await calculateGitBlobSHA(originalBytes);
     const cleaned = stripInvariantRegion(existing).trimStart();
     const rebuilt =
       INVARIANT_BLOCK + (cleaned ? "\n\n" + cleaned : "\n");
     await this.vault.adapter.write(path, rebuilt);
+    return { created: false, originalSha };
   }
 
-  private async ensureSelfPluginGitignore(): Promise<void> {
+  /**
+   * Returns true if the file was newly created (didn't exist beforehand),
+   * false if it was already present.
+   */
+  private async ensureSelfPluginGitignore(): Promise<boolean> {
     const path = this.selfPluginPath();
     const existing = (await this.vault.adapter.exists(path))
       ? await this.vault.adapter.read(path)
       : null;
     if (existing === SELF_PLUGIN_STRICT + "\n" || existing === SELF_PLUGIN_STRICT) {
-      return;
+      return false;
     }
     await this.vault.adapter.write(path, SELF_PLUGIN_STRICT + "\n");
+    return existing === null;
   }
 
   // -- load + combined matcher build -----------------------------------

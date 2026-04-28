@@ -9,6 +9,57 @@ import {
   decodeBase64String,
   isSyncable,
 } from "./utils";
+import manifest from "../manifest.json";
+
+const SELF_PLUGIN_ID = manifest.id;
+
+/**
+ * Decide whether a syncable path counts as auto-managed infrastructure
+ * (and so doesn't make the vault "non-empty" for sync routing) vs.
+ * actual user content.
+ *
+ * The user's mental model of "empty vault" is: "I created a vault,
+ * installed this plugin, and did nothing else." The state at that
+ * moment looks like:
+ *   - Welcome.md at root (Obsidian creates on every new vault)
+ *   - <configDir>/* (Obsidian's own settings, themes, snippets…)
+ *   - <configDir>/plugins/<our-plugin-id>/* (the plugin we just installed)
+ *   - <configDir>/.gitignore + <configDir>/plugins/<our-id>/.gitignore
+ *     + (root) .gitignore — written by GitignoreCache.initialize on
+ *     first plugin run
+ *
+ * Anything *outside* that set is real user content — notes the user
+ * authored, other plugins they installed, .gitignore files they
+ * placed before the plugin existed.
+ *
+ * The root .gitignore is the only ambiguous case: it lives outside
+ * <configDir>/, so we have no path-based way to tell ours apart from
+ * a user-authored one. We track creation in
+ * Metadata.pluginCreatedGitignores and pass that set in here.
+ */
+function isInfraPath(
+  path: string,
+  configDir: string,
+  pluginCreatedGitignores: Set<string>,
+): boolean {
+  if (path === "Welcome.md") return true;
+  if (pluginCreatedGitignores.has(path)) return true;
+  if (path.startsWith(`${configDir}/`)) {
+    if (path.startsWith(`${configDir}/plugins/`)) {
+      const sub = path.substring(`${configDir}/plugins/`.length);
+      const pluginId = sub.split("/")[0];
+      // Only our own plugin's folder is infra. Other plugins under
+      // <configDir>/plugins/<other-id>/ mean the user installed
+      // something — that's user activity, not "fresh vault".
+      return pluginId === SELF_PLUGIN_ID;
+    }
+    // Anything else inside configDir (app.json, appearance.json,
+    // workspace.json, themes/, snippets/, etc.) is Obsidian's own
+    // state, never user-authored content.
+    return true;
+  }
+  return false;
+}
 
 /**
  * Structured snapshot of the local vault's sync-relevant state. Built by
@@ -118,6 +169,7 @@ export async function analyzeLocalState(
   vault: Vault,
   syncConfigDir: boolean,
   gitignoreMatcher?: { isIgnored(path: string): boolean },
+  pluginCreatedGitignores: Set<string> = new Set(),
 ): Promise<LocalState> {
   const manifestPath = `${vault.configDir}/${MANIFEST_FILE_NAME}`;
   const manifestExists = await vault.adapter.exists(manifestPath);
@@ -140,11 +192,45 @@ export async function analyzeLocalState(
       isSyncable(p, vault.configDir, syncConfigDir, gitignoreMatcher),
   );
 
+  // Neither the manifest's presence nor its file-entry count is a
+  // reliable "prior sync happened" signal:
+  //   - MetadataStore.load() creates the manifest file at plugin start.
+  //   - The events listener can populate file entries (sha=null,
+  //     dirty=true) for everything Obsidian/plugins create during init
+  //     — Welcome.md, the .gitignore files we seed, plus configDir
+  //     defaults if syncConfigDir is on. None of that represents an
+  //     actual sync event.
+  // The one field that's only ever set inside commitSync is lastSync,
+  // so it's the trustworthy marker that some sync truly completed in
+  // this vault before. Without this check, opening the plugin in a
+  // fresh vault routes through regular-sync — which then sees those
+  // dirty=true infra entries and tries to *upload* the local
+  // Welcome.md / .gitignore over the remote versions instead of
+  // pulling the user's notes down.
+  let hasRealManifest = false;
   if (manifestExists) {
+    try {
+      const raw = await vault.adapter.read(manifestPath);
+      const parsed = JSON.parse(raw) as { lastSync?: number };
+      hasRealManifest =
+        typeof parsed.lastSync === "number" && parsed.lastSync > 0;
+    } catch {
+      // Corrupt manifest — treat as fresh.
+    }
+  }
+
+  if (hasRealManifest) {
     return { kind: "has-manifest", fileCount: syncableFiles.length };
   }
 
-  if (syncableFiles.length === 0) {
+  // Per-path infra check (see isInfraPath docstring): Welcome.md,
+  // plugin-created .gitignore files, all of <configDir>/* except for
+  // OTHER plugins' folders. If nothing on disk is real user content,
+  // route through the empty/fresh-vault flows.
+  const userContent = syncableFiles.filter(
+    (p) => !isInfraPath(p, vault.configDir, pluginCreatedGitignores),
+  );
+  if (userContent.length === 0) {
     return { kind: "empty" };
   }
 
@@ -306,10 +392,14 @@ export async function compareForAdoption(
   );
 
   // Build remote syncable map (path → sha), excluding manifest.
+  // Pass the gitignore matcher so a remote file that the user has
+  // chosen to ignore (e.g. *.log) doesn't get categorized for adoption
+  // — adoption would otherwise either re-download it or treat it as a
+  // remote-only "needs adoption" path.
   const remoteSHAs: { [path: string]: string } = {};
   for (const [path, item] of Object.entries(remoteFiles)) {
     if (path === manifestPath) continue;
-    if (!isSyncable(path, configDir, syncConfigDir)) continue;
+    if (!isSyncable(path, configDir, syncConfigDir, gitignoreMatcher)) continue;
     remoteSHAs[path] = item.sha;
   }
 

@@ -143,8 +143,16 @@ export default class SyncManager {
       : this.metadataStore.data.firstSyncFromRemoteInProgress
         ? "from-remote"
         : null;
+    const pluginCreatedGitignores = new Set(
+      this.metadataStore.data.pluginCreatedGitignores ?? [],
+    );
     const [localState, remoteState] = await Promise.all([
-      analyzeLocalState(this.vault, this.settings.syncConfigDir),
+      analyzeLocalState(
+        this.vault,
+        this.settings.syncConfigDir,
+        this.gitignoreCache,
+        pluginCreatedGitignores,
+      ),
       analyzeRemoteState(this.client, this.vault.configDir),
     ]);
     await this.logger.info("State analysis", {
@@ -164,7 +172,46 @@ export default class SyncManager {
         this.vault.configDir,
         this.settings.syncConfigDir,
         action.remote.kind === "bare" ? {} : action.remote.files,
+        this.gitignoreCache,
       );
+
+      // Reclassify "conflicts" caused by our own startup-time rewrite
+      // of <configDir>/.gitignore. If the remote SHA matches the
+      // pre-rewrite SHA we recorded, the file was identical to remote
+      // before we touched it — the apparent conflict is just our
+      // INVARIANT_BLOCK addition. Move from `conflicting` to
+      // `localOnly` so adoption pushes our augmented version up
+      // instead of asking the user. Common when transitioning from
+      // another sync tool (obsidian-git, etc.) whose .gitignore
+      // didn't carry our invariants.
+      const preExisting =
+        this.metadataStore.data.preExistingGitignoreShas ?? {};
+      if (
+        action.remote.kind !== "bare" &&
+        Object.keys(preExisting).length > 0
+      ) {
+        const remoteFiles = action.remote.files;
+        const stillConflicting: string[] = [];
+        const reclassified: string[] = [];
+        for (const path of analysis.conflicting) {
+          const originalSha = preExisting[path];
+          const remoteSha = remoteFiles[path]?.sha;
+          if (originalSha && remoteSha && originalSha === remoteSha) {
+            analysis.localOnly.push(path);
+            reclassified.push(path);
+          } else {
+            stillConflicting.push(path);
+          }
+        }
+        analysis.conflicting = stillConflicting;
+        if (reclassified.length > 0) {
+          await this.logger.info(
+            "Reclassified pre-rewrite gitignore conflicts as localOnly",
+            { paths: reclassified },
+          );
+        }
+      }
+
       await this.logger.info("Adoption analysis", {
         identical: analysis.identical.length,
         localOnly: analysis.localOnly.length,
@@ -263,14 +310,13 @@ export default class SyncManager {
           return;
         }
         await this.adoptCurrentState(action.remote, action.analysis);
-        // After adoption: locals-only need uploading and remotes-only need
-        // downloading. Delegate to the regular sync — manifests are now in
-        // place on both sides, so it'll behave as a normal incremental sync.
-        if (
-          action.analysis.localOnly.length > 0 ||
-          action.analysis.remoteOnly.length > 0
-        ) {
-          this.updateProgress("Reconciling differences after adoption...");
+        // adoptCurrentState already pushed local-only files in its commit,
+        // so the only remaining work is downloading remote-only files. Skip
+        // the follow-up sync entirely when there's nothing to pull — that
+        // also dodges the eventual-consistency window where syncImpl's
+        // getRepoContent might still see the pre-adoption tree.
+        if (action.analysis.remoteOnly.length > 0) {
+          this.updateProgress("Downloading remote-only files...");
           await this.syncImpl();
         }
         return;
@@ -279,13 +325,24 @@ export default class SyncManager {
   }
 
   /**
-   * Bootstrap a bare GitHub repo by writing just the manifest as the
-   * first commit. Uses the Git Data API directly so the operation is
-   * atomic from our point of view: we know the new tree SHA without a
-   * follow-up getRepoContent that could race against eventual
-   * consistency. The earlier createFile-based bootstrap had us
-   * round-tripping for that SHA and occasionally seeing stale tree
-   * data, which broke the next commit.
+   * Bootstrap a bare GitHub repo with two commits:
+   *   1. Seed: push root .gitignore via the Contents API. Bare repos
+   *      reject every Git Data API endpoint with 409 "Git Repository is
+   *      empty" until at least one ref exists, but the Contents API PUT
+   *      auto-creates the ref. Using the .gitignore (already created
+   *      locally by GitignoreCache.initialize()) gives the first GitHub
+   *      commit a meaningful, human-readable file rather than an
+   *      internal-looking metadata json.
+   *   2. Manifest: createBlob + createTree(base_tree=seed.treeSha) +
+   *      createCommit(parent=seed.commitSha) + updateBranchHead. Now
+   *      that we have a ref, Git Data API works.
+   *
+   * The SHAs from createFile's response let us skip a getRepoContent
+   * round-trip after the seed commit — that endpoint is
+   * eventually-consistent and was the source of the stale-tree bugs the
+   * previous Git-Data-API-only bootstrap was trying to avoid (but that
+   * approach broke entirely on bare repos). refs/heads/<branch> is
+   * authoritative, so the subsequent Git Data API calls are safe.
    *
    * Returns the freshly-built RemoteState (always kind="has-manifest")
    * so callers don't have to re-analyze remote.
@@ -293,77 +350,193 @@ export default class SyncManager {
   private async bootstrapEmptyRepo(): Promise<
     Extract<RemoteState, { kind: "has-manifest" }>
   > {
-    const manifestPath = `${this.vault.configDir}/${MANIFEST_FILE_NAME}`;
-    const manifestContent = JSON.stringify(this.metadataStore.data);
+    const gitignorePath = ".gitignore";
+    const normalizedGitignorePath = normalizePath(gitignorePath);
+    // Defensive: GitignoreCache.initialize() runs at plugin onload, so
+    // this should always exist. If a user (or a third-party plugin)
+    // deleted it between init and first sync, re-seed before reading.
+    if (!(await this.vault.adapter.exists(normalizedGitignorePath))) {
+      await this.gitignoreCache.initialize();
+    }
+    const gitignoreText = await this.vault.adapter.read(normalizedGitignorePath);
+    const gitignoreBytes = new TextEncoder().encode(gitignoreText)
+      .buffer as ArrayBuffer;
 
-    const blob = await this.client.createBlob({
+    const seed = await this.client.createFile({
+      path: gitignorePath,
+      content: arrayBufferToBase64(gitignoreBytes),
+      message: `Initial commit from ${this.settings.deviceName}`,
+      retry: true,
+    });
+
+    // If Obsidian's auto-created Welcome.md is sitting locally, push it
+    // too as part of this commit — the bootstrap-empty path is exactly
+    // the "fresh local vault" case (analyzeLocalState ignored Welcome.md
+    // when classifying emptiness), and uploading it gives the user a
+    // visible "yes, sync works" file in the new GitHub repo.
+    const welcomePath = "Welcome.md";
+    const welcomeNormalized = normalizePath(welcomePath);
+    let welcomeBlobEntry:
+      | { sha: string; size: number }
+      | null = null;
+    if (await this.vault.adapter.exists(welcomeNormalized)) {
+      const buffer = await this.vault.adapter.readBinary(welcomeNormalized);
+      const { sha } = await this.client.createBlob({
+        content: arrayBufferToBase64(buffer),
+        retry: true,
+      });
+      welcomeBlobEntry = { sha, size: buffer.byteLength };
+    }
+
+    const manifestPath = `${this.vault.configDir}/${MANIFEST_FILE_NAME}`;
+    const manifestForRemote = { ...this.metadataStore.data };
+    delete manifestForRemote.firstSyncFromRemoteInProgress;
+    delete manifestForRemote.firstSyncFromLocalInProgress;
+    delete manifestForRemote.pluginCreatedGitignores;
+    delete manifestForRemote.preExistingGitignoreShas;
+    const manifestContent = JSON.stringify(manifestForRemote);
+    const manifestBlob = await this.client.createBlob({
       content: arrayBufferToBase64(
         new TextEncoder().encode(manifestContent).buffer as ArrayBuffer,
       ),
       retry: true,
     });
 
-    const treeSha = await this.client.createTree({
-      tree: {
-        // No base_tree — we're building the very first tree of this repo.
-        tree: [
-          {
-            path: manifestPath,
-            mode: "100644",
-            type: "blob",
-            sha: blob.sha,
-          },
-        ],
+    // Build the full tree from scratch (no base_tree) so the resulting
+    // commit can be a root commit. We then force-update the branch ref
+    // to point at this root commit, orphaning the seed commit. Net
+    // effect on GitHub: a single visible commit named "Initial commit"
+    // containing everything we want to ship at init time, instead of
+    // the user seeing "Initialize sync manifest" on top of a separate
+    // ".gitignore" seed commit.
+    const treeChanges: NewTreeRequestItem[] = [
+      {
+        path: gitignorePath,
+        mode: "100644",
+        type: "blob",
+        sha: seed.blobSha,
       },
+      {
+        path: manifestPath,
+        mode: "100644",
+        type: "blob",
+        sha: manifestBlob.sha,
+      },
+    ];
+    if (welcomeBlobEntry) {
+      treeChanges.push({
+        path: welcomePath,
+        mode: "100644",
+        type: "blob",
+        sha: welcomeBlobEntry.sha,
+      });
+    }
+    const treeSha = await this.client.createTree({
+      tree: { tree: treeChanges },
       retry: true,
     });
 
     const commitSha = await this.client.createCommit({
-      message: "First sync",
+      message: `Initial commit from ${this.settings.deviceName}`,
       treeSha,
-      // No parent — root commit.
+      // No parent — this is a root commit. The branch update below uses
+      // force=true to repoint refs/heads/<branch> from the seed commit
+      // (which had a different tree) to this one.
       retry: true,
     });
 
-    await this.client.createReference({
-      ref: `refs/heads/${this.settings.githubBranch}`,
+    await this.client.updateBranchHead({
       sha: commitSha,
+      force: true,
       retry: true,
     });
 
-    // Update local metadata so the manifest entry knows the SHA we just
+    // Update local metadata so both blob entries know the SHAs we just
     // pushed; otherwise the next sync would re-detect divergence.
+    const now = Date.now();
     this.metadataStore.data.files[manifestPath] = {
       ...this.metadataStore.data.files[manifestPath],
-      sha: blob.sha,
-      lastModified: Date.now(),
+      sha: manifestBlob.sha,
+      lastModified: now,
     };
+    this.metadataStore.data.files[gitignorePath] = {
+      path: gitignorePath,
+      sha: seed.blobSha,
+      dirty: false,
+      justDownloaded: false,
+      lastModified: now,
+    };
+    if (welcomeBlobEntry) {
+      this.metadataStore.data.files[welcomePath] = {
+        path: welcomePath,
+        sha: welcomeBlobEntry.sha,
+        dirty: false,
+        justDownloaded: false,
+        lastModified: now,
+      };
+    }
     await this.metadataStore.save();
 
     // Construct the RemoteState the caller would have re-fetched.
+    const remoteFiles: { [key: string]: GetTreeResponseItem } = {
+      [gitignorePath]: {
+        path: gitignorePath,
+        mode: "100644",
+        type: "blob",
+        sha: seed.blobSha,
+        size: gitignoreBytes.byteLength,
+        url: "",
+      },
+      [manifestPath]: {
+        path: manifestPath,
+        mode: "100644",
+        type: "blob",
+        sha: manifestBlob.sha,
+        size: manifestContent.length,
+        url: "",
+      },
+    };
+    if (welcomeBlobEntry) {
+      remoteFiles[welcomePath] = {
+        path: welcomePath,
+        mode: "100644",
+        type: "blob",
+        sha: welcomeBlobEntry.sha,
+        size: welcomeBlobEntry.size,
+        url: "",
+      };
+    }
     return {
       kind: "has-manifest",
       treeSha,
-      files: {
-        [manifestPath]: {
-          path: manifestPath,
-          mode: "100644",
-          type: "blob",
-          sha: blob.sha,
-          size: manifestContent.length,
-          url: "",
-        },
-      },
+      files: remoteFiles,
       manifest: this.metadataStore.data,
     };
   }
 
   /**
-   * Adopt the current state of both sides as the sync baseline: build local
-   * metadata to mirror remote SHAs (for identical paths) plus local-only
-   * paths flagged for upload, push the manifest to remote so future syncs
-   * have a reference point. Reconciliation of one-sided extras is done by
-   * the caller via a follow-up regular sync.
+   * Adopt the current state of both sides as the sync baseline.
+   *
+   * Builds the new manifest (identical + localOnly + remoteOnly + the
+   * manifest itself), uploads local-only files as blobs, then commits
+   * a single tree on top of the remote's existing tree
+   * (base_tree=remote.treeSha) that adds the manifest blob plus all
+   * local-only blobs. After this commit:
+   *   - identical paths match on both sides — no further work.
+   *   - local-only paths are now on remote and recorded in metadata
+   *     with their actual blob SHA — no follow-up upload needed.
+   *   - remote-only paths still need to be downloaded locally; the
+   *     orchestrator handles that via a follow-up syncImpl.
+   *
+   * adoption is only invoked when remote.kind != "bare" (decideInitAction
+   * routes bare-remote cases to bootstrap/first-sync-from-local), so
+   * the Git Data API path is always available here.
+   *
+   * The previous version used createFile (Contents API) for the manifest
+   * push, which broke with 422 "sha wasn't supplied" if the manifest
+   * already existed remotely (e.g. on a second adoption attempt), and
+   * left local-only files unpushed — they relied on a follow-up
+   * syncImpl that often raced against eventual consistency.
    */
   private async adoptCurrentState(
     remote: RemoteState,
@@ -385,12 +558,15 @@ export default class SyncManager {
         lastModified: now,
       };
     }
-    // Local-only: track but mark as needing upload (sha=null signals new).
+    // Local-only: we'll upload these in the adoption commit. SHA from the
+    // hash we already computed during compareForAdoption — createBlob
+    // will return the same SHA (content-addressed), so we can record it
+    // up front and skip a re-hash later.
     for (const path of analysis.localOnly) {
       newFiles[path] = {
         path,
-        sha: null,
-        dirty: true,
+        sha: analysis.localFileSHAs[path],
+        dirty: false,
         justDownloaded: false,
         lastModified: now,
       };
@@ -405,7 +581,7 @@ export default class SyncManager {
         lastModified: now,
       };
     }
-    // Manifest itself: tracked, no SHA yet (we'll write it next).
+    // Manifest itself: tracked. SHA filled in below once we upload the blob.
     newFiles[manifestPath] = {
       path: manifestPath,
       sha: null,
@@ -413,22 +589,79 @@ export default class SyncManager {
       justDownloaded: false,
       lastModified: now,
     };
-
     this.metadataStore.data.files = newFiles;
-    await this.metadataStore.save();
 
-    // Push the manifest to remote via Contents API — single commit that
-    // adds our manifest to whatever's already there. After this, both
-    // sides have a manifest and regular sync logic applies.
-    const buffer = await this.vault.adapter.readBinary(
-      normalizePath(manifestPath),
+    // Upload all local-only files as blobs in parallel.
+    if (analysis.localOnly.length > 0) {
+      this.updateProgress(
+        `Uploading ${analysis.localOnly.length} local-only files to GitHub...`,
+      );
+    }
+    const localOnlyBlobs: NewTreeRequestItem[] = await Promise.all(
+      analysis.localOnly.map(async (path) => {
+        const buffer = await this.vault.adapter.readBinary(
+          normalizePath(path),
+        );
+        const blob = await this.client.createBlob({
+          content: arrayBufferToBase64(buffer),
+          retry: true,
+        });
+        return {
+          path,
+          mode: "100644",
+          type: "blob",
+          sha: blob.sha,
+        };
+      }),
     );
-    await this.client.createFile({
-      path: manifestPath,
-      content: arrayBufferToBase64(buffer),
-      message: "Adopt existing vault state",
+
+    // Serialize manifest from the just-built newFiles. Strip the
+    // per-device resume markers — they're local progress state and
+    // must never propagate via the remote manifest (commitSync does
+    // the same in the regular path).
+    const manifestForRemote = { ...this.metadataStore.data };
+    delete manifestForRemote.firstSyncFromRemoteInProgress;
+    delete manifestForRemote.firstSyncFromLocalInProgress;
+    delete manifestForRemote.pluginCreatedGitignores;
+    delete manifestForRemote.preExistingGitignoreShas;
+    const manifestContent = JSON.stringify(manifestForRemote);
+    const manifestBlob = await this.client.createBlob({
+      content: arrayBufferToBase64(
+        new TextEncoder().encode(manifestContent).buffer as ArrayBuffer,
+      ),
       retry: true,
     });
+    // Record the manifest blob's SHA so the next sync sees it as
+    // up-to-date and doesn't re-upload it.
+    newFiles[manifestPath].sha = manifestBlob.sha;
+
+    // Commit: base_tree=remote.treeSha keeps everything that was there
+    // (including remote-only files), our additions are the manifest
+    // and the local-only blobs.
+    this.updateProgress("Committing adoption to GitHub...");
+    const treeChanges: NewTreeRequestItem[] = [
+      {
+        path: manifestPath,
+        mode: "100644",
+        type: "blob",
+        sha: manifestBlob.sha,
+      },
+      ...localOnlyBlobs,
+    ];
+    const newTreeSha = await this.client.createTree({
+      tree: { tree: treeChanges, base_tree: remote.treeSha },
+      retry: true,
+    });
+    const parentSha = await this.client.getBranchHeadSha({ retry: true });
+    const commitSha = await this.client.createCommit({
+      message: `Adopt existing vault state from ${this.settings.deviceName}`,
+      treeSha: newTreeSha,
+      parent: parentSha,
+      retry: true,
+    });
+    await this.client.updateBranchHead({ sha: commitSha, retry: true });
+
+    await this.metadataStore.save();
     await this.logger.info("Adoption committed", {
       identical: analysis.identical.length,
       localOnly: analysis.localOnly.length,
@@ -615,11 +848,18 @@ export default class SyncManager {
         }),
     );
 
-    // Clear the resume flag before commit; commitSync writes the in-memory
-    // metadata into the new tree manifest, so the remote will reflect the
-    // completed state.
-    this.metadataStore.data.firstSyncFromRemoteInProgress = false;
+    // Don't clear the resume marker until commitSync has actually
+    // succeeded — earlier we cleared it before commit, but commitSync
+    // persists in-memory metadata to disk multiple times along the way
+    // (once for lastSync, once per binary upload). If the sync was
+    // interrupted mid-commit, the cleared marker would already be on
+    // disk and the next attempt would route through regular sync
+    // instead of resume. Strip the marker from the *remote* manifest
+    // copy in commitSync (that already happens), but leave the local
+    // value true until we can prove the commit landed.
     await this.commitSync(newTreeFiles, treeSha);
+    this.metadataStore.data.firstSyncFromRemoteInProgress = false;
+    await this.metadataStore.save();
   }
 
   /**
@@ -709,12 +949,18 @@ export default class SyncManager {
         ? "Resuming GitHub init from vault: uploading..."
         : "Initializing GitHub from vault: uploading...",
     );
-    // Clear the resume marker before commit. commitSync writes the
-    // in-memory metadata to disk at the end, so a successful commit
-    // persists flag=false. A crash before then leaves the on-disk
-    // value untouched (still true), so resume detection still kicks in.
-    this.metadataStore.data.firstSyncFromLocalInProgress = false;
+    // Keep the resume marker set throughout commitSync. commitSync
+    // saves metadata mid-flow (lastSync up front, then per binary
+    // upload), so clearing in memory first would persist marker=false
+    // on disk before the commit completes. An interrupt in that
+    // window would then look like a regular sync next time and stop
+    // resume from triggering. Clear only after we've verified the
+    // commit landed — at worst, an interrupt between commitSync
+    // returning and our save below replays firstSyncFromLocal once
+    // more, which is cheap thanks to the per-blob SHA skip cache.
     await this.commitSync(newTreeFiles, treeSha, [], { showProgress: true });
+    this.metadataStore.data.firstSyncFromLocalInProgress = false;
+    await this.metadataStore.save();
   }
 
   /**
@@ -784,30 +1030,78 @@ export default class SyncManager {
       decodeBase64String(blob.content),
     );
 
-    // Reconcile manifest against the actual tree. The manifest only records
-    // what the *previous* commit chose to track — files that were filtered
-    // out at the time (e.g. because syncConfigDir was off, or rules differed)
-    // remain in the tree but are absent from the manifest. Without this step
-    // determineSyncActions never proposes downloading them, so toggling
-    // syncConfigDir on or relaxing a rule wouldn't pull anything new from
-    // the remote. Synthesize manifest entries for those files so they enter
-    // the action pipeline; isSyncable still filters at the end.
-    let reconciled = 0;
+    // Reconcile manifest against the actual tree. Two cases the manifest
+    // alone misses:
+    //   1. Files in tree but absent from manifest — happens when the
+    //      previous commit filtered them out (e.g. syncConfigDir off,
+    //      stricter rules) but they're still present on the remote.
+    //      Synthesize manifest entries so they enter the action pipeline
+    //      (isSyncable still filters at the end).
+    //   2. Files in manifest with a stale SHA — happens when a file was
+    //      modified directly on GitHub (web UI, gh CLI, third-party
+    //      tooling). The tree has the new blob, but the manifest still
+    //      lists the old SHA from our last commitSync. Without an SHA
+    //      refresh here, determineSyncActions sees `remoteFile.sha ===
+    //      localSHA` (both the pre-edit value) and returns "no work",
+    //      silently dropping the remote change.
+    let reconciledAdded = 0;
+    let reconciledUpdated = 0;
     for (const filePath of Object.keys(files)) {
-      if (filePath in remoteMetadata.files) continue;
-      remoteMetadata.files[filePath] = {
-        path: filePath,
-        sha: files[filePath].sha,
-        dirty: false,
-        justDownloaded: false,
-        lastModified: Date.now(),
-      };
-      reconciled++;
+      const treeSha = files[filePath].sha;
+      const existing = remoteMetadata.files[filePath];
+      if (!existing) {
+        remoteMetadata.files[filePath] = {
+          path: filePath,
+          sha: treeSha,
+          dirty: false,
+          justDownloaded: false,
+          lastModified: Date.now(),
+        };
+        reconciledAdded++;
+      } else if (existing.sha !== treeSha) {
+        // Trust the tree — it's what's actually on the remote. Leave
+        // lastModified alone; we don't know when the off-band change
+        // landed, and existing values feed deletion-conflict timestamps.
+        existing.sha = treeSha;
+        reconciledUpdated++;
+      }
     }
-    if (reconciled > 0) {
+    if (reconciledAdded > 0 || reconciledUpdated > 0) {
       await this.logger.info("Reconciled tree files into manifest view", {
-        added: reconciled,
+        added: reconciledAdded,
+        updatedSha: reconciledUpdated,
         manifestSize: Object.keys(remoteMetadata.files).length,
+      });
+    }
+
+    // Inverse reconciliation: a file in the remote manifest but absent
+    // from the actual tree was deleted directly on the remote (typical
+    // case: user removed it through the GitHub web UI). The manifest
+    // doesn't reflect that because it's only rewritten by commitSync,
+    // which never ran for that web-UI deletion. Mark it as deleted
+    // here so determineSyncActions handles it like any other remote
+    // deletion: delete locally if local hasn't changed since the last
+    // shared sync, or treat as a "resurrection" upload if the local
+    // file was edited after that sync (lastModified > lastSync).
+    const treePaths = new Set(Object.keys(files));
+    const manifestFilePath = `${this.vault.configDir}/${MANIFEST_FILE_NAME}`;
+    let removedFromTree = 0;
+    for (const path of Object.keys(remoteMetadata.files)) {
+      if (path === manifestFilePath) continue;
+      if (treePaths.has(path)) continue;
+      if (remoteMetadata.files[path].deleted) continue;
+      remoteMetadata.files[path].deleted = true;
+      // Use the manifest's lastSync as the deletion timestamp: it's the
+      // latest moment we know the file was definitely on the remote.
+      // The actual deletion happened at or after this point. A local
+      // file with lastModified > lastSync is therefore a clear local
+      // edit-after-deletion; otherwise the deletion wins.
+      remoteMetadata.files[path].deletedAt = remoteMetadata.lastSync;
+      removedFromTree++;
+    }
+    if (removedFromTree > 0) {
+      await this.logger.info("Detected remote-side deletions", {
+        count: removedFromTree,
       });
     }
 
@@ -1378,34 +1672,32 @@ export default class SyncManager {
           return;
         }
 
-        const localSHA = await this.calculateSHA(filePath);
-        if (remoteFile.sha === localSHA) {
-          // If the remote file sha is identical to the actual sha of the local file
-          // there are no actions to take.
-          // We calculate the SHA at the moment instead of using the one stored in the
-          // metadata file cause we update that only when the file is uploaded or downloaded.
-          return;
-        }
-
+        // Handle one-sided deletions BEFORE the SHA equality short-
+        // circuit below. Without this ordering, a file deleted on the
+        // remote (e.g. via the GitHub web UI) whose local copy still
+        // matches the manifest's pre-deletion SHA would be skipped as
+        // "unchanged" even though one side dropped it.
         if (remoteFile.deleted && !localFile.deleted) {
           if ((remoteFile.deletedAt as number) > localFile.lastModified) {
             actions.push({
               type: "delete_local",
               filePath: filePath,
             });
-            return;
           } else if (
             localFile.lastModified > (remoteFile.deletedAt as number)
           ) {
+            // Local edit landed after remote dropped the file —
+            // resurrect it by uploading the local version.
             actions.push({ type: "upload", filePath: filePath });
-            return;
           }
+          // Equal timestamps fall through with no action; treating
+          // either side as winner here would be arbitrary.
+          return;
         }
 
         if (!remoteFile.deleted && localFile.deleted) {
           if (remoteFile.lastModified > (localFile.deletedAt as number)) {
             actions.push({ type: "download", filePath: filePath });
-            return;
           } else if (
             (localFile.deletedAt as number) > remoteFile.lastModified
           ) {
@@ -1413,8 +1705,17 @@ export default class SyncManager {
               type: "delete_remote",
               filePath: filePath,
             });
-            return;
           }
+          return;
+        }
+
+        const localSHA = await this.calculateSHA(filePath);
+        if (remoteFile.sha === localSHA) {
+          // If the remote file sha is identical to the actual sha of the local file
+          // there are no actions to take.
+          // We calculate the SHA at the moment instead of using the one stored in the
+          // metadata file cause we update that only when the file is uploaded or downloaded.
+          return;
         }
 
         // For non-deletion cases, if SHAs differ, we just need to check if local changed.
@@ -1566,6 +1867,13 @@ export default class SyncManager {
         if (hasTextExtension(filePath)) {
           const sha = await this.calculateSHA(filePath);
           this.metadataStore.data.files[filePath].sha = sha;
+          // Mirror the "Created blob" log that binary uploads produce —
+          // text content is shipped inline in createTree (server side
+          // creates the blob), so we don't have a separate createBlob
+          // call to log against. Without this, the sync log shows only
+          // binary uploads and gives the impression text files weren't
+          // pushed at all.
+          await this.logger.info("Uploading text file", filePath);
           return;
         }
 
@@ -1629,6 +1937,8 @@ export default class SyncManager {
     const manifestForRemote = { ...this.metadataStore.data };
     delete manifestForRemote.firstSyncFromRemoteInProgress;
     delete manifestForRemote.firstSyncFromLocalInProgress;
+    delete manifestForRemote.pluginCreatedGitignores;
+    delete manifestForRemote.preExistingGitignoreShas;
     treeFiles[manifestPath] = {
       path: manifestPath,
       mode: "100644",
@@ -1651,8 +1961,7 @@ export default class SyncManager {
     const branchHeadSha = await this.client.getBranchHeadSha({ retry: true });
 
     const commitSha = await this.client.createCommit({
-      // TODO: Make this configurable or find a nicer commit message
-      message: "Sync",
+      message: `Sync from ${this.settings.deviceName} ${new Date().toISOString()}`,
       treeSha: newTreeSha,
       parent: branchHeadSha,
     });
@@ -1720,8 +2029,40 @@ export default class SyncManager {
     // reconcile below filters via it, and so do all subsequent sync
     // operations. initialize() also writes the canonical/strict files if
     // missing, which is something we want to happen exactly once at startup.
-    await this.gitignoreCache.initialize();
+    // The returned set is the .gitignore paths it freshly created on this
+    // run; we union it into the persisted set so analyzeLocalState can
+    // tell our plugin-managed .gitignore files from user-authored ones
+    // even across plugin restarts.
+    const initResult = await this.gitignoreCache.initialize();
     await this.metadataStore.load();
+    const known = new Set(this.metadataStore.data.pluginCreatedGitignores ?? []);
+    let changed = false;
+    for (const p of initResult.created) {
+      if (!known.has(p)) {
+        known.add(p);
+        changed = true;
+      }
+    }
+    // Record pre-rewrite SHAs for files we modified at startup. Sticky:
+    // only the FIRST rewrite captures the user's transition state. If
+    // the user later tampers with our INVARIANT_BLOCK and we re-rewrite
+    // on next load, we don't overwrite the original — that one captured
+    // the truth about what was on disk before our plugin existed in
+    // this vault, and it's what adoption needs to compare against.
+    const preExisting = {
+      ...(this.metadataStore.data.preExistingGitignoreShas ?? {}),
+    };
+    for (const [p, sha] of initResult.rewritten) {
+      if (!preExisting[p]) {
+        preExisting[p] = sha;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.metadataStore.data.pluginCreatedGitignores = Array.from(known);
+      this.metadataStore.data.preExistingGitignoreShas = preExisting;
+      await this.metadataStore.save();
+    }
 
     // Always reconcile metadata with what's actually on disk. This catches
     // changes that happened while the plugin wasn't loaded — files added

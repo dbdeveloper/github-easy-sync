@@ -20,6 +20,12 @@ export interface GitHubSyncSettings {
   showSyncRibbonButton: boolean;
   showConflictsRibbonButton: boolean;
   enableLogging: boolean;
+  // Per-device label that gets baked into GitHub commit messages so a
+  // multi-device user can tell at a glance which machine produced a
+  // given commit ("Sync from mobile ...", "Sync from work-laptop ...").
+  // Stored in data.json — never propagates through the sync since
+  // data.json itself is hard-blocked from upload.
+  deviceName: string;
 }
 
 export const DEFAULT_SETTINGS: GitHubSyncSettings = {
@@ -39,4 +45,5 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   showSyncRibbonButton: true,
   showConflictsRibbonButton: true,
   enableLogging: false,
+  deviceName: "Obsidian",
 };

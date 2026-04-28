@@ -93,6 +93,23 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
 
     new Setting(containerEl).setName("Sync").setHeading();
 
+    new Setting(containerEl)
+      .setName("Device name")
+      .setDesc(
+        "Label for this device, baked into commit messages so multi-device " +
+          "users can tell which machine produced a commit (e.g. \"mobile\", " +
+          "\"work-laptop\"). Stored locally only — never propagates via sync.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("Obsidian")
+          .setValue(this.plugin.settings.deviceName)
+          .onChange(async (value) => {
+            this.plugin.settings.deviceName = value.trim() || "Obsidian";
+            await this.plugin.saveSettings();
+          }),
+      );
+
     const syncStrategies = {
       manual: "Manually",
       interval: "On Interval",

@@ -46,6 +46,25 @@ export interface Metadata {
   // Both *_InProgress flags are stripped from the manifest content sent
   // to remote — they're per-device resume markers, not shared state.
   firstSyncFromLocalInProgress?: boolean;
+  // Paths of .gitignore files this plugin created (file didn't exist
+  // beforehand). Used by analyzeLocalState to distinguish "infra we
+  // own" from "user-authored .gitignore" — the latter is real local
+  // content and should not be silently bulldozed by fresh-vault
+  // routing. Sticky once recorded; per-device, never propagates via
+  // sync (stripped from the remote manifest copy alongside the
+  // *_InProgress flags).
+  pluginCreatedGitignores?: string[];
+  // Path → SHA of .gitignore files we rewrote on plugin startup
+  // (typically <configDir>/.gitignore, where we prepend our
+  // INVARIANT_BLOCK). The SHA is git's blob SHA of the *pre-rewrite*
+  // content. compareForAdoption uses this to recognize the "I'm
+  // transitioning from another sync tool" case: if remote's
+  // .gitignore matches the recorded pre-rewrite SHA, the file was
+  // identical to remote before we touched it — the apparent conflict
+  // is just our INVARIANT_BLOCK addition, not a real divergence.
+  // Sticky on first rewrite (later auto-re-rewrites of our own block
+  // don't overwrite the original). Per-device, stripped from remote.
+  preExistingGitignoreShas?: { [path: string]: string };
 }
 
 /**
