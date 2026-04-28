@@ -621,6 +621,18 @@ export default class SyncManager {
       }),
     );
 
+    // Stamp lastSync now so this adoption counts as a "real sync"
+    // for analyzeLocalState's `hasRealManifest` check on the next
+    // run. Without this, lastSync stays 0 and the next sync reroutes
+    // through the fresh-vault flow → another adoption → and that
+    // adoption rebuilds metadata from disk hashes (no `deleted`
+    // flags), which silently undoes any locally-deleted files
+    // (resurrected as localOnly upload) and any remotely-deleted
+    // files (recorded as remoteOnly sha and skipped on next sync's
+    // SHA-equality check). Same fix already applied to
+    // bootstrapEmptyRepo for the same reason.
+    this.metadataStore.data.lastSync = Date.now();
+
     // Serialize manifest from the just-built newFiles. Strip the
     // per-device resume markers — they're local progress state and
     // must never propagate via the remote manifest (commitSync does

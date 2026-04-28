@@ -323,6 +323,60 @@ export async function getRemoteFileSha(
 }
 
 /**
+ * Write or replace a file directly on remote via the Contents API.
+ * Used by tests to simulate web-UI edits without touching the
+ * SyncManager. If the path already exists on the branch, you must
+ * pass a non-null sha to the underlying call — we look it up here.
+ */
+export async function writeRemoteFile(
+  branch: string,
+  path: string,
+  content: string,
+  message: string,
+  env: RepoEnv = requireEnv(),
+): Promise<void> {
+  const { token, owner, repo } = env;
+  const existingSha = await getRemoteFileSha(branch, path, env);
+  const body: Record<string, unknown> = {
+    message,
+    content: Buffer.from(content, "utf-8").toString("base64"),
+    branch,
+  };
+  if (existingSha) body.sha = existingSha;
+  const res = await ghFetch(
+    `${GH}/repos/${owner}/${repo}/contents/${path}`,
+    { method: "PUT", token, body },
+  );
+  if (res.status !== 200 && res.status !== 201) {
+    throw new Error(`writeRemoteFile → ${res.status}: ${res.text}`);
+  }
+}
+
+/**
+ * Delete a file directly on remote via the Contents API. Simulates
+ * a web-UI deletion. Throws if the file isn't there.
+ */
+export async function removeRemoteFile(
+  branch: string,
+  path: string,
+  message: string,
+  env: RepoEnv = requireEnv(),
+): Promise<void> {
+  const { token, owner, repo } = env;
+  const sha = await getRemoteFileSha(branch, path, env);
+  if (!sha) {
+    throw new Error(`removeRemoteFile: ${path} not in branch ${branch}`);
+  }
+  const res = await ghFetch(
+    `${GH}/repos/${owner}/${repo}/contents/${path}`,
+    { method: "DELETE", token, body: { message, sha, branch } },
+  );
+  if (res.status !== 200) {
+    throw new Error(`removeRemoteFile → ${res.status}: ${res.text}`);
+  }
+}
+
+/**
  * Returns all blob paths in a branch's tree. Useful for assertions
  * like "remote should contain exactly these N files".
  */
@@ -564,6 +618,8 @@ export interface ClientOptions {
   >;
   /** Stub for text-conflict callback (rare in atomic-resolution tests). */
   onConflicts?: (conflicts: ConflictFile[]) => Promise<ConflictResolution[]>;
+  /** Enable on-disk logging so a test can dump it on failure. */
+  enableLogging?: boolean;
 }
 
 /**
@@ -590,17 +646,18 @@ export function createClient(opts: ClientOptions): TestClient {
     syncConfigDir: opts.syncConfigDir ?? true,
     conflictHandling: opts.conflictHandling ?? "overwriteLocal",
     deviceName: opts.deviceName ?? "test-client",
-    enableLogging: false,
+    enableLogging: opts.enableLogging ?? false,
     syncStrategy: "manual",
     showStatusBarItem: false,
     showSyncRibbonButton: false,
     showConflictsRibbonButton: false,
   };
 
-  const logger = new Logger(vault, false);
-  // Logger.init creates the log file; for tests we skip — no logging
-  // means the file is never written, which means it never shows up in
-  // analyzeLocalState's walk to confuse "empty vault" detection.
+  const logger = new Logger(vault, opts.enableLogging ?? false);
+  // Logger.init creates the log file; for tests we skip by default —
+  // no logging means the file is never written, which means it never
+  // shows up in analyzeLocalState's walk to confuse "empty vault"
+  // detection. Tests can opt in via enableLogging for debugging.
 
   const onConflicts =
     opts.onConflicts ??
