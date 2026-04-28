@@ -9,6 +9,22 @@ import {
 } from "fs";
 import * as path from "path";
 
+// Obsidian patches Array.prototype with `.contains()` (an alias for
+// `.includes()`). Production source code uses it, so polyfill here so
+// the same code runs under Node during unit + integration tests.
+// Done idempotently and non-enumerably to avoid surprising for-in
+// loops in unrelated test code.
+if (!(Array.prototype as unknown as { contains?: unknown }).contains) {
+  Object.defineProperty(Array.prototype, "contains", {
+    value: function <T>(this: T[], item: T): boolean {
+      return this.indexOf(item) !== -1;
+    },
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+}
+
 // Mock Obsidian's Vault class.
 //
 // Backed by the real filesystem so SyncManager / GitignoreCache /
@@ -34,7 +50,13 @@ export class Vault {
   }
 
   getRoot() {
-    return { path: this.rootPath };
+    // Real Obsidian's TFolder for root has path "" — paths returned by
+    // adapter.list are vault-root-relative. Returning the absolute
+    // tempdir here would corrupt downstream walks (analyzeLocalState,
+    // compareForAdoption, helpers.listVaultFiles) because they push
+    // this back into adapter.list and end up with absolute paths that
+    // isSyncable then rejects.
+    return { path: "" };
   }
 
   // Stub for the events API the plugin's EventsListener subscribes to.

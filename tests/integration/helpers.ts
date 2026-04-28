@@ -215,6 +215,23 @@ export async function cleanupAllTestBranches(
 }
 
 /**
+ * Delete the given repo if it exists. Treats 404 as a no-op (repo
+ * already gone). Used by globalTeardown to wipe the ephemeral
+ * bootstrap repo after all integration tests finish, so the public
+ * repo + classic-PAT exposure window is as small as possible.
+ */
+export async function deleteRepoIfExists(env: RepoEnv): Promise<void> {
+  const { token, owner, repo } = env;
+  const res = await ghFetch(`${GH}/repos/${owner}/${repo}`, {
+    method: "DELETE",
+    token,
+  });
+  if (res.status !== 204 && res.status !== 404) {
+    throw new Error(`deleteRepoIfExists → ${res.status}: ${res.text}`);
+  }
+}
+
+/**
  * Delete the given repo and create it fresh as a bare repo (no
  * commits, no default branch, no auto-init README). The only way to
  * get the "bare repo" state that bootstrap tests need: GitHub auto-
@@ -402,6 +419,111 @@ export async function countBranchCommits(
     throw new Error("countBranchCommits hit the 100-commit safety cap");
   }
   return count;
+}
+
+// ----------------------------------------------------------------------------
+// Baseline helpers — non-bootstrap suites (B/C/D/E + A3) work on the
+// private int-test repo. Each test runs on its own branch off the
+// default branch, so the int-test repo needs at least one commit
+// somewhere first. ensureRepoNotBare() lazily provides that baseline
+// by bootstrapping main on the first call; subsequent calls are
+// cheap (one branches GET).
+// ----------------------------------------------------------------------------
+
+/**
+ * Returns the SHA the default branch points at, or null if the repo
+ * is bare. The repo's `default_branch` field exists even when bare
+ * (it's just the configured default name like "main"); we have to
+ * resolve the ref separately.
+ */
+export async function getDefaultBranchHead(
+  env: RepoEnv = requireEnv(),
+): Promise<string | null> {
+  const { token, owner, repo } = env;
+  const repoInfo = await ghFetch(`${GH}/repos/${owner}/${repo}`, { token });
+  if (repoInfo.status !== 200) {
+    throw new Error(`getDefaultBranchHead repo → ${repoInfo.status}: ${repoInfo.text}`);
+  }
+  const defaultBranch = repoInfo.json.default_branch as string;
+  return getBranchHead(defaultBranch, env);
+}
+
+/**
+ * Create a branch ref pointing at a given commit. Used to derive
+ * per-test branches off the int-test repo's main without going
+ * through full bootstrap each time.
+ */
+export async function createBranchFromHead(
+  branch: string,
+  fromSha: string,
+  env: RepoEnv = requireEnv(),
+): Promise<void> {
+  const { token, owner, repo } = env;
+  const res = await ghFetch(`${GH}/repos/${owner}/${repo}/git/refs`, {
+    method: "POST",
+    token,
+    body: { ref: `refs/heads/${branch}`, sha: fromSha },
+  });
+  if (res.status !== 201) {
+    throw new Error(`createBranchFromHead → ${res.status}: ${res.text}`);
+  }
+}
+
+/**
+ * Make sure the int-test repo has at least one commit on default
+ * branch. If it doesn't, run a one-shot SyncManager.sync() against
+ * default branch with an empty vault — that hits the bootstrap path
+ * and leaves a {.gitignore + manifest} commit behind. Subsequent
+ * tests use createBranchFromHead off this baseline.
+ *
+ * Cheap when already non-bare: a single /branches probe.
+ */
+export async function ensureRepoNotBare(
+  env: RepoEnv = requireEnv(),
+): Promise<void> {
+  const branches = await listAllBranches(env);
+  if (branches.length > 0) return;
+
+  // Bootstrap default branch via the plugin itself. We use the same
+  // SyncManager code path users hit, which means baseline always
+  // matches what a real first-time install produces.
+  const { token, owner, repo } = env;
+  const defaultBranch = await getDefaultBranchName(env);
+  // Spin up a throw-away client targeting default branch.
+  const client = createClient({
+    branch: defaultBranch,
+    deviceName: "int-test-baseline",
+    env,
+  });
+  try {
+    await client.sync.loadMetadata();
+    await client.sync.sync(); // bootstrap path
+  } finally {
+    client.cleanup();
+  }
+}
+
+/** Returns ALL branches on the repo (not filtered by prefix). */
+async function listAllBranches(env: RepoEnv): Promise<string[]> {
+  const { token, owner, repo } = env;
+  const res = await ghFetch(
+    `${GH}/repos/${owner}/${repo}/branches?per_page=100`,
+    { token },
+  );
+  if (res.status === 404 || res.status === 409) return [];
+  if (res.status !== 200) {
+    throw new Error(`listAllBranches → ${res.status}: ${res.text}`);
+  }
+  return (res.json as Array<{ name: string }>).map((b) => b.name);
+}
+
+async function getDefaultBranchName(env: RepoEnv): Promise<string> {
+  const { token, owner, repo } = env;
+  const res = await ghFetch(`${GH}/repos/${owner}/${repo}`, { token });
+  if (res.status !== 200) {
+    throw new Error(`getDefaultBranchName → ${res.status}: ${res.text}`);
+  }
+  return res.json.default_branch as string;
 }
 
 // ----------------------------------------------------------------------------

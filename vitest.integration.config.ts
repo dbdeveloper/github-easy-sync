@@ -30,5 +30,9 @@ export default defineConfig({
     // helpers also assert this, but failing early at config-load gives
     // a clearer "no tests ran" message vs a thrown error mid-suite.
     setupFiles: [path.resolve(__dirname, "tests/integration/setup.ts")],
+    // Once everything finishes (incl. failures), wipe the ephemeral
+    // bootstrap repo so the public-repo + classic-PAT exposure window
+    // is bounded by the test run itself.
+    globalSetup: [path.resolve(__dirname, "tests/integration/teardown.ts")],
   },
 });
