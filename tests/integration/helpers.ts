@@ -327,19 +327,24 @@ export async function getRemoteFileSha(
  * Used by tests to simulate web-UI edits without touching the
  * SyncManager. If the path already exists on the branch, you must
  * pass a non-null sha to the underlying call — we look it up here.
+ *
+ * Accepts a UTF-8 string for text or a Buffer for binary content.
  */
 export async function writeRemoteFile(
   branch: string,
   path: string,
-  content: string,
+  content: string | Buffer,
   message: string,
   env: RepoEnv = requireEnv(),
 ): Promise<void> {
   const { token, owner, repo } = env;
   const existingSha = await getRemoteFileSha(branch, path, env);
+  const buf = Buffer.isBuffer(content)
+    ? content
+    : Buffer.from(content, "utf-8");
   const body: Record<string, unknown> = {
     message,
-    content: Buffer.from(content, "utf-8").toString("base64"),
+    content: buf.toString("base64"),
     branch,
   };
   if (existingSha) body.sha = existingSha;
@@ -620,6 +625,13 @@ export interface ClientOptions {
   onConflicts?: (conflicts: ConflictFile[]) => Promise<ConflictResolution[]>;
   /** Enable on-disk logging so a test can dump it on failure. */
   enableLogging?: boolean;
+  /**
+   * Reuse an existing vault directory instead of creating a fresh
+   * tempdir. Used by tests that simulate "plugin reload" by
+   * standing up a second SyncManager against the vault the first
+   * one already populated (E1).
+   */
+  vaultPath?: string;
 }
 
 /**
@@ -629,9 +641,13 @@ export interface ClientOptions {
  */
 export function createClient(opts: ClientOptions): TestClient {
   const { token, owner, repo } = opts.env ?? requireEnv();
-  const vaultPath = mkdtempSync(
-    path.join(os.tmpdir(), "github-gitless-sync-int-"),
-  );
+  // Track whether we own the vault dir so cleanup() doesn't wipe a
+  // path the caller passed in (E1 reuses a populated vault across
+  // simulated plugin reloads).
+  const ownsVaultPath = opts.vaultPath === undefined;
+  const vaultPath =
+    opts.vaultPath ??
+    mkdtempSync(path.join(os.tmpdir(), "github-gitless-sync-int-"));
   // Cast to ObsidianVault: SyncManager's constructor signature uses
   // the real Obsidian type, but the mock implements the same shape
   // (read/write/list/exists/mkdir/remove/stat/append/readBinary/...).
@@ -689,6 +705,7 @@ export function createClient(opts: ClientOptions): TestClient {
     branch: opts.branch,
     settings,
     cleanup() {
+      if (!ownsVaultPath) return;
       try {
         rmSync(vaultPath, { recursive: true, force: true });
       } catch {}
