@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 An Obsidian plugin that syncs a local vault with a GitHub repository using **only the GitHub REST API** — no `git` binary, no `isomorphic-git`. This constraint is deliberate so the plugin works identically on desktop and mobile. It means features like branching, merging, rebasing, or any non-GitHub host are out of scope.
 
-This branch (`init-state-machine-refactoring`) sits 10+ commits ahead of upstream main. Significant architectural changes vs upstream: state-machine routing, gitignore-driven filtering, atomic conflict resolution, resume markers, atomic bare-repo bootstrap. See `git log --oneline upstream/main..HEAD` for the chain.
+This branch (`init-state-machine-refactoring`) sits 13+ commits ahead of upstream main. Significant architectural changes vs upstream: state-machine routing, gitignore-driven filtering, atomic conflict resolution, resume markers, atomic bare-repo bootstrap, two-way manifest↔tree reconciliation for off-band edits/deletions on GitHub, transition-detection for vaults moving over from another sync tool. See `git log --oneline upstream/main..HEAD` for the chain.
+
+The plugin has gone through a manual A→E test sweep (bootstrap, transitions, resume across forced kills, incremental, off-band edits, two-device round-trips) — most current behaviour described below is shaped by what those tests revealed. The conflict view UX is the one area still openly known to be primitive; everything else is intentional.
 
 ## Commands
 
@@ -31,11 +33,25 @@ Releases are triggered by pushing a tag matching `[0-9].[0-9]+.[0-9]+*` (a `-bet
    a. Read resume markers (`firstSyncFromRemoteInProgress`, `firstSyncFromLocalInProgress`).
    b. `analyzeLocalState()` + `analyzeRemoteState()` (in parallel) classify each side as `empty` / `has-manifest` / `has-content-no-manifest` (local) or `bare` / `has-manifest` / `has-content-no-manifest` (remote).
    c. `decideInitAction()` (pure, in `sync-state.ts`) maps the (local, remote, resume) tuple to one of: `regular-sync`, `bootstrap-empty`, `first-sync-from-local`, `first-sync-from-remote`, `needs-adoption-analysis`, `adopt`, `ambiguous`.
-   d. For `needs-adoption-analysis`: hash every local syncable file, intersect with remote tree SHAs, partition into identical/local-only/remote-only/conflicting. `shouldAutoAdopt` returns true iff `conflicting.length === 0` → silent adopt + auto-reconcile via regular sync. Otherwise emit `ambiguous`.
+   d. For `needs-adoption-analysis`: hash every local syncable file, intersect with remote tree SHAs, partition into identical/local-only/remote-only/conflicting. A post-step reclassifies any conflict whose remote SHA matches the recorded pre-rewrite SHA of `<configDir>/.gitignore` (see `Metadata.preExistingGitignoreShas` below) from `conflicting` to `localOnly` — the divergence is just our `INVARIANT_BLOCK` having been prepended. `shouldAutoAdopt` returns true iff `conflicting.length === 0` → silent adopt + auto-reconcile via regular sync. Otherwise emit `ambiguous`.
    e. For `ambiguous`: fire the `onAmbiguousState` callback (wired to `InitDecisionModal` in main.ts) with the analysis. The user picks "Keep local" / "Keep remote" / "Cancel".
    f. `executeInitAction(action)` calls the matching helper.
 
 The old `settings.firstSync` boolean used to gate routing in main.ts. It now lives only as a backward-compat field — `main.ts:sync()` clears it after the first successful sync but never reads it.
+
+#### "Has manifest" is keyed off `lastSync > 0`, not file existence
+
+`MetadataStore.load()` writes an empty manifest to disk on every plugin load (so other call sites can rely on the file being there). That means the file's mere presence is *not* a reliable "prior sync happened" signal — a brand-new vault that's just had the plugin enabled already has the manifest on disk, and the events listener can have populated entries for files Obsidian/plugins create during init (Welcome.md, our `.gitignore` files, configDir defaults). `analyzeLocalState` reads `lastSync` from the manifest; only `lastSync > 0` (the field is only set inside `commitSync`) qualifies as `has-manifest`. Without this, the routing thinks regular sync applies and tries to upload the local infra files over the remote's user notes.
+
+#### "Empty vault" means "only auto-managed infra"
+
+When `lastSync == 0`, `analyzeLocalState` strips the following before deciding emptiness:
+- `Welcome.md` (Obsidian creates it on every new vault).
+- The 3 `.gitignore` paths we manage — but **only if we created them**. Tracked in `Metadata.pluginCreatedGitignores`. A user-authored `.gitignore` that pre-existed counts as real content (so transitioning a vault that already had its own `.gitignore` doesn't get bulldozed silently).
+- Everything inside `<configDir>/` — it's all editor-managed state.
+- Files inside `<configDir>/plugins/<our-plugin-id>/` — our own install. Files under any *other* plugin's folder count as user content (the user installed those plugins).
+
+If the residue is empty, the vault routes to `bootstrap-empty` (when remote is bare) or `first-sync-from-remote` (when remote already has content) without prompting. This is the "I just installed the plugin, please pull my notes from another machine" path.
 
 ### What gets synced: tiny hardcoded set + user-managed gitignore
 
@@ -58,19 +74,29 @@ The cache loads all three at plugin onload (`gitignoreCache.initialize()`), refr
 
 ### Manifest as the wire protocol
 
-`MetadataStore` (`src/metadata-store.ts`) defines `github-sync-metadata.json`. It tracks `{ sha, lastModified, dirty, justDownloaded, deleted, deletedAt }` per file plus per-device flags `firstSyncFromRemoteInProgress` / `firstSyncFromLocalInProgress`. The file is pushed to GitHub as a regular tracked file — that's how a different device discovers what was synced.
+`MetadataStore` (`src/metadata-store.ts`) defines `github-sync-metadata.json`. It tracks `{ sha, lastModified, dirty, justDownloaded, deleted, deletedAt }` per file plus several per-device fields:
+
+- `firstSyncFromRemoteInProgress` / `firstSyncFromLocalInProgress` — resume markers (see "First-sync paths" below).
+- `pluginCreatedGitignores: string[]` — paths of `.gitignore` files this plugin created (vs. files that pre-existed). Sticky once recorded. Drives the "empty vault" check in `analyzeLocalState`.
+- `preExistingGitignoreShas: { [path]: string }` — git blob SHA of the pre-rewrite content of any `.gitignore` we modified at startup (currently just `<configDir>/.gitignore` when prepending the invariant block). Sticky on first rewrite — later auto-re-rewrites of our own block don't overwrite the original captured value, since that's the SHA we need to match against remote in the transition-from-another-tool detection.
+
+The file is pushed to GitHub as a regular tracked file — that's how a different device discovers what was synced.
 
 Two invariants:
 
 - **`MetadataStore.load()` always inserts an entry for the manifest itself** in `data.files`. Several call sites (most notably `commitSync`) used to crash with TypeError if a hand-edited manifest didn't carry that entry; the invariant pushes the guard down to the only place it makes sense.
-- **`commitSync` constructs the manifest tree entry from current in-memory metadata, never reading or mutating a caller-provided slot.** Callers can't forget to populate it, and they can't accidentally pass mismatched contents. The `firstSync*InProgress` flags are stripped from the manifest content before push (per-device, not shared state).
+- **`commitSync` constructs the manifest tree entry from current in-memory metadata, never reading or mutating a caller-provided slot.** Callers can't forget to populate it, and they can't accidentally pass mismatched contents. All four per-device fields above are stripped from the manifest content before push — they're not shared state and shouldn't propagate.
 
 ### First-sync paths
 
-- **`bootstrap-empty`** (both sides empty): direct Git Data API path — `createBlob` (manifest) → `createTree` (no `base_tree`) → `createCommit` (no `parent`) → `createReference` (POST `/git/refs`). Atomic from our side: we know the new tree SHA without re-fetching, so the eventual-consistency race we used to have is gone. Returns the freshly-built `RemoteState` so the caller doesn't need to re-analyze.
-- **`first-sync-from-remote`** (local empty, remote has content): per-file blob downloads via `getBlob`, batched 5 at a time. Holds at most one blob in memory — Android-friendly. Resumable: the `firstSyncFromRemoteInProgress` marker plus per-file `metadata.sha` SHA matching let an interrupted attempt skip work it already finished.
-- **`first-sync-from-local`** (vault has content, remote bare or has-content-no-manifest): mirrors the metadata's view of local files into a tree, then `commitSync` uploads. The `firstSyncFromLocalInProgress` marker is set on entry and cleared on the in-memory copy just before the commit; `commitSync` persists `false` only on success. Resume optimization in `commitSync` skips `createBlob` for any binary whose Git blob SHA matches `metadata.files[path].sha` (content-addressed — match means the previous attempt already pushed it).
-- **`adopt`** (both sides have content, no real conflicts): write a manifest reflecting the union of local and remote, push it via Contents API, then run a regular sync. The user sees no prompt.
+- **`bootstrap-empty`** (both sides empty by the rules above): seed commit via `createFile(.gitignore)` (only API that works on a bare repo — Git Data API endpoints all return 409 "Git Repository is empty" until at least one ref exists), then a root commit with `createBlob`/`createTree`/`createCommit` containing `.gitignore` + manifest + (when present locally) `Welcome.md`, then `updateBranchHead({ sha, force: true })` repoints `refs/heads/<branch>` from the seed at the root commit and orphans the seed. Net effect on GitHub: a single visible commit named "Initial commit from `<deviceName>`" — looks human, doesn't betray the two-step bootstrap. Returns the freshly-built `RemoteState` so callers don't re-analyze.
+- **`first-sync-from-remote`** (local empty, remote has content): per-file blob downloads via `getBlob`, batched 5 at a time. Holds at most one blob in memory — Android-friendly. Resumable: the `firstSyncFromRemoteInProgress` marker plus per-file `metadata.sha` SHA matching let an interrupted attempt skip work it already finished. The marker is cleared *after* `commitSync` returns, not before — see the "resume markers" note below.
+- **`first-sync-from-local`** (vault has content, remote bare or has-content-no-manifest): mirrors the metadata's view of local files into a tree, then `commitSync` uploads. Resume optimization in `commitSync` skips `createBlob` for any binary whose Git blob SHA matches `metadata.files[path].sha` (content-addressed — match means the previous attempt already pushed it). Same post-commit marker clearing.
+- **`adopt`** (both sides have content, no real conflicts after the gitignore-rewrite reclassification): builds a single tree on top of `remote.treeSha` containing the manifest blob plus uploaded local-only blobs, commits with the existing branch head as parent, and updates the ref. The follow-up `syncImpl` runs only when `analysis.remoteOnly.length > 0` — skipping it avoids the eventual-consistency window where `getRepoContent` might still see the pre-adoption tree.
+
+#### Resume markers must clear *after* commitSync
+
+`commitSync` persists in-memory metadata multiple times mid-flow (once for `lastSync` up front, then once per binary upload). If the calling first-sync helper cleared its `*InProgress` marker before invoking `commitSync`, those mid-flow saves would put `marker=false` on disk before the commit landed. An interrupt in that window would then leave the on-disk state looking like a successful regular sync (`lastSync > 0`, `marker=false`), and the next attempt would route through `regular-sync` instead of resume — which then sees a manifest from the old commit (the new commit didn't land) and proposes downloading dozens of "missing" files that aren't in the new tree. Both `firstSyncFromLocal` and `commitFirstSyncFromRemote` therefore clear their marker *after* `await commitSync(...)` returns, then call `metadataStore.save()` to persist the cleared state. Worst case on an interrupt between commit success and that save: resume fires once more, replays the first-sync, and the per-blob SHA skip cache makes it cheap.
 
 ### Conflict resolution
 
@@ -78,13 +104,23 @@ Two invariants:
 
 - **plugin-js** (any `.js` inside `<configDir>/plugins/<id>/`): `resolveAtomicConflicts` reads both sides' `manifest.json` versions, compares with `compareSemver`, falls back to `lastModified`, and as a last resort picks local. Optionally drops a `<base>.conflict-(local|remote)-<isoTimestamp>.<ext>` next to the winner (controlled by `keepPluginConflictCopy` setting; off by default).
 - **binary** (no text extension OR text-but-not-merge-friendly): timestamp resolution, then local-wins. Always drops a backup of the loser side.
-- **text** (everything else): goes through the existing CodeMirror split/unified diff modal in `views/conflicts-resolution/`. Note: this UI is rough on mobile and on long files; the design choice was to keep the modal but route as much as possible to atomic resolution so users rarely see it.
+- **text** (everything else): goes through the CodeMirror split/unified diff modal in `views/conflicts-resolution/`. **Known UX limitation**: the modal is chunk-only (pick left or right per chunk), with no Cancel, no "save both", and no free-form merge. Closing the modal blocks every subsequent sync until conflicts are resolved (the next sync re-detects the same divergence and re-opens the modal). Replacing this with `@codemirror/merge` (the official CM6 merge view extension) is the planned next refactor — same editor stack as Obsidian, ~20-30 KB extra bundle, gives proper free-form editing during merge.
 
-The `*.conflict-(local|remote)-*` pattern is in the seeded root `.gitignore`, so backups stay strictly local by default. Users can opt into syncing them by removing the lines.
+The `*.conflict-(local|remote)-*` pattern is in the seeded root `.gitignore`, so backups stay strictly local by default. Users can opt into syncing them by removing the lines. Note: the per-self-plugin `.gitignore` (rewritten on every plugin load to a strict `* / !main.js / !manifest.json / !styles.css / !.gitignore` allowlist) blocks conflict backups inside our own plugin folder regardless of the root rule. That's deliberate — plugin-folder conflict backups would clutter the install across devices on every plugin update divergence.
 
 ### Reconcile on every onload
 
 `SyncManager.reconcileWithVault()` runs from `loadMetadata()` on every plugin start. It walks the vault, marks any tracked-but-missing file as deleted (with `deletedAt`), and adds any on-disk-but-untracked file as a fresh entry. This catches changes that happened off the events listener's watch — disable→edit-vault→re-enable, crash recovery, files restored from backup, drag-and-drop in Finder, etc. Content-level divergence on the same path is still `findDivergedPaths`' job during sync.
+
+### Two-way manifest↔tree reconciliation in syncImpl
+
+`syncImpl` doesn't trust the remote manifest as the sole source of truth — it also reads the actual remote tree via `getRepoContent` and reconciles in both directions:
+
+- **Tree → manifest, additions**: a file in the tree but absent from the manifest (e.g. a previous commit filtered it out) gets a synthesized manifest entry so it enters the action pipeline.
+- **Tree → manifest, SHA refresh**: a file in the manifest with a *different* SHA than the tree gets its manifest entry's SHA updated to match the tree. Without this, a file edited directly on GitHub (web UI, `gh` CLI, third-party tooling) is invisible — the manifest still claims the pre-edit SHA, which matches the local SHA, so `determineSyncActions` sees `remoteFile.sha === localSHA` and returns "no work".
+- **Manifest → tree, deletions**: a file in the manifest but absent from the tree gets marked `deleted: true, deletedAt: remoteMetadata.lastSync`. Same root cause — web-UI deletions don't update the manifest. The chosen `deletedAt` is the latest moment we can prove the file existed on the remote, so a local edit that landed *after* the last shared sync wins (resurrection upload), while a local file untouched since then loses (delete locally).
+
+`determineSyncActions` handles deletions **before** the SHA-equality short-circuit. The previous order returned "no work" for any file whose local SHA matched the manifest's pre-deletion SHA, which silently dropped delete-propagation for unchanged files.
 
 ### Why binary vs text matters at the wire level
 
@@ -98,15 +134,28 @@ The `*.conflict-(local|remote)-*` pattern is in the seeded root `.gitignore`, so
 
 Thin wrapper over Obsidian's `requestUrl` (not `fetch` — `requestUrl` avoids CORS and works identically on mobile). Every method takes `retry`/`maxRetries` and uses `retryUntil` with exponential backoff; retries skip on HTTP 422 (unprocessable). Notable:
 
-- `createTree` accepts an optional `base_tree` (omit for first commit on bare repo).
+- `createTree` accepts an optional `base_tree` (omit for fresh tree, e.g. the bootstrap root commit).
 - `createCommit` accepts an optional `parent` (omit for root commit).
-- `createReference` (POST `/git/refs`) for publishing the bootstrap branch.
+- `createReference` (POST `/git/refs`) for publishing a brand-new branch — kept around but unused by current code (bootstrap relies on `createFile` auto-creating the ref).
+- `updateBranchHead` accepts a `force` flag. The bootstrap path uses `force: true` to repoint the branch from the seed commit to the unrelated root commit (collapsing the visible history to a single "Initial commit").
+- `createFile` returns `{ blobSha, treeSha, commitSha }` parsed from the Contents API response. This is the only API that works on a bare repo (Git Data API endpoints all return 409 until a ref exists), and the SHAs in the response let us avoid the eventual-consistency race that re-fetching `getRepoContent` immediately after a write would have hit.
+- `getRepoContent` logs 404/409 responses at INFO level (not ERROR) — those are the documented "bare repo" signal that `analyzeRemoteState` relies on, not a real failure.
 
 `fetch` and HTTP `Range` requests were both tried for streaming the zipball during firstSync — `fetch` hits a CORS wall on the `codeload.github.com` redirect, `Range` is silently ignored by GitHub's CDN for dynamically-generated archives. Both confirmed dead ends; per-file blob downloads it is.
 
 ### Events listener (`src/events-listener.ts`)
 
 Obsidian fires `create`/`modify`/`delete`/`rename` events. The listener calls into `isSyncable` (with the gitignore cache, just like SyncManager) and updates the local manifest (`dirty`, `lastModified`, `deleted`). **`justDownloaded` trick**: when `SyncManager` writes a file during download, Obsidian still fires `create`/`modify`. We pre-mark the entry; the listener sees the flag, clears it, and doesn't re-mark the file as user-modified. Listener registration is deferred to `workspace.onLayoutReady` to avoid the synthetic create flood at startup.
+
+### Commit messages and `deviceName`
+
+Commit messages are tagged with the per-device label from `settings.deviceName` (default `"Obsidian"`, configurable in the Sync section of settings):
+
+- Bootstrap: `Initial commit from <deviceName>` (both the seed commit and the root commit use this — the seed gets orphaned anyway).
+- Adoption: `Adopt existing vault state from <deviceName>`.
+- Regular sync: `Sync from <deviceName> <ISO timestamp>`.
+
+The setting lives only in `data.json`; it's stripped/never-touched on the remote side because `data.json` itself is hard-blocked from sync (it carries the GitHub token). Multi-device users can tell at a glance which machine produced any given commit on GitHub.
 
 ## Module layout
 
@@ -135,7 +184,7 @@ src/
 - **`main.js` at repo root** is the build output Obsidian loads (`manifest.json` points at it). It's not source.
 - **Mobile support**: `isDesktopOnly: false` in `manifest.json`. Don't introduce Node-only APIs in `src/`; `benchmark.ts` and `mock-obsidian.ts` are the only Node-side files and aren't bundled.
 - **Don't add files to the hardcoded `isSyncable` blocklist** without a real reason. The default for new "should we sync this?" rules is to add patterns to the seeded gitignore (`CONFIG_DIR_SEED` / `ROOT_SEED` in `gitignore-cache.ts`) — that way users can opt out.
-- **Don't ship the resume flags to remote**. `commitSync` strips `firstSyncFromRemoteInProgress` and `firstSyncFromLocalInProgress` from the manifest content before push. They're per-device progress markers, not shared state.
+- **Don't ship per-device manifest fields to remote**. `commitSync` and the bootstrap/adoption helpers strip `firstSyncFromRemoteInProgress`, `firstSyncFromLocalInProgress`, `pluginCreatedGitignores`, and `preExistingGitignoreShas` from the manifest content before push. They're per-device progress markers / install metadata, not shared state. If you add a new manifest field of this kind, add it to the strip list in all three places (search for `delete manifestForRemote.`).
 - **The conflict view UI is fragile** on mobile and long text files. Atomic resolution carries most of the load; if you add new conflict shapes, check whether they belong in the atomic path before plumbing them through the diff modal.
 - **`vault.adapter.read` is for text only.** Use `readBinary` for anything `hasTextExtension` says false. Especially important on iOS where the text path silently corrupts binary content.
 - **Don't hand-edit the canonical block in `<configDir>/.gitignore`** — `GitignoreCache.initialize()` will rewrite it on the next plugin load. To customise the truly-required behaviour, edit the constants in `gitignore-cache.ts` and ship a new build.
