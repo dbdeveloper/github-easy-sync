@@ -389,6 +389,12 @@ export default class SyncManager {
     }
 
     const manifestPath = `${this.vault.configDir}/${MANIFEST_FILE_NAME}`;
+    // Stamp lastSync now so this bootstrap counts as a "real sync"
+    // for analyzeLocalState's `hasRealManifest` check on the next
+    // run. Without this, lastSync stays 0 and the next sync
+    // reroutes through the empty-vault flow, kicking off an
+    // unnecessary first-sync-from-remote round-trip.
+    this.metadataStore.data.lastSync = Date.now();
     const manifestForRemote = { ...this.metadataStore.data };
     delete manifestForRemote.firstSyncFromRemoteInProgress;
     delete manifestForRemote.firstSyncFromLocalInProgress;

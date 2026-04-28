@@ -8,6 +8,9 @@
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:integration:bootstrap": "vitest run --config vitest.integration.config.ts tests/integration/scenarios/bootstrap",
+    "test:integration:nonbootstrap": "vitest run --config vitest.integration.config.ts --passWithNoTests --exclude 'tests/integration/scenarios/bootstrap/**'",
     "version": "node version-bump.mjs",
     "benchmark": "tsx benchmark.ts"
   },
@@ -23,6 +26,7 @@
     "@typescript-eslint/eslint-plugin": "^8.19.0",
     "@typescript-eslint/parser": "^8.19.0",
     "builtin-modules": "^4.0.0",
+    "dotenv": "^17.4.2",
     "esbuild": "^0.24.2",
     "obsidian": "^1.7.2",
     "proxyquire": "^2.1.3",

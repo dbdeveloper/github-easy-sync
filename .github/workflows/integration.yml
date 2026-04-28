@@ -1,0 +1,122 @@
+name: Integration tests
+
+# Bootstrap tests delete + recreate a public test repo (~30-90 s of
+# GitHub-side churn) and are the most sensitive to GitHub API drift,
+# so they run nightly. Other tests (B/C/D/E) are cheap branch-per-test
+# work against a private repo — they're triggered manually or as part
+# of the "all" suite.
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily — bootstrap only
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Which suite to run"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - bootstrap
+          - nonbootstrap
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    # Only one integration job at a time — the test repos are shared
+    # state and parallel runs would trample each other.
+    concurrency:
+      group: integration-tests
+      cancel-in-progress: false
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest-10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Build first — fail fast on TS regressions before burning API quota.
+      - name: Build plugin
+        run: pnpm build
+
+      # Pick the script based on trigger:
+      #   - schedule (nightly): always bootstrap-only
+      #   - manual: inputs.suite picks all / bootstrap / nonbootstrap
+      - name: Run integration tests
+        env:
+          # Fine-grained PAT scoped to the private test repo. Used by
+          # every test except bootstrap. Cannot create/delete repos.
+          GITHUB_TOKEN: ${{ secrets.INTEGRATION_TEST_TOKEN }}
+          # Classic PAT with public_repo + delete_repo. Used ONLY by
+          # bootstrap tests against the ephemeral public test repo.
+          GITHUB_BOOTSTRAP_TOKEN: ${{ secrets.INTEGRATION_BOOTSTRAP_TEST_TOKEN }}
+          # Repo identifiers — non-secret, exposed via GitHub vars.
+          INT_TEST_OWNER: ${{ vars.INT_TEST_OWNER }}
+          INT_TEST_REPO: ${{ vars.INT_TEST_REPO }}
+          INT_BOOTSTRAP_TEST_REPO: ${{ vars.INT_BOOTSTRAP_TEST_REPO }}
+          INT_TEST_BRANCH_PREFIX: ${{ vars.INT_TEST_BRANCH_PREFIX || 'int-test' }}
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            pnpm test:integration:bootstrap
+          else
+            case "${{ inputs.suite }}" in
+              bootstrap)    pnpm test:integration:bootstrap ;;
+              nonbootstrap) pnpm test:integration:nonbootstrap ;;
+              all|*)        pnpm test:integration ;;
+            esac
+          fi
+
+      # Best-effort cleanup of stray feature branches in the PRIVATE
+      # test repo. Bootstrap repo doesn't need this — its lifecycle
+      # is delete+recreate per test.
+      - name: Cleanup leftover branches
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.INTEGRATION_TEST_TOKEN }}
+          INT_TEST_OWNER: ${{ vars.INT_TEST_OWNER }}
+          INT_TEST_REPO: ${{ vars.INT_TEST_REPO }}
+          INT_TEST_BRANCH_PREFIX: ${{ vars.INT_TEST_BRANCH_PREFIX || 'int-test' }}
+        run: |
+          node -e "
+          (async () => {
+            const owner = process.env.INT_TEST_OWNER;
+            const repo = process.env.INT_TEST_REPO;
+            const token = process.env.GITHUB_TOKEN;
+            const prefix = process.env.INT_TEST_BRANCH_PREFIX;
+            const headers = {
+              Authorization: 'Bearer ' + token,
+              Accept: 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+            };
+            const list = await fetch(
+              'https://api.github.com/repos/' + owner + '/' + repo + '/branches?per_page=100',
+              { headers }
+            );
+            if (list.status === 404 || list.status === 409) return;
+            if (list.status !== 200) {
+              console.warn('list branches', list.status);
+              return;
+            }
+            const branches = await list.json();
+            const stray = branches.filter(b => b.name.startsWith(prefix + '-'));
+            for (const b of stray) {
+              const del = await fetch(
+                'https://api.github.com/repos/' + owner + '/' + repo + '/git/refs/heads/' + encodeURIComponent(b.name),
+                { method: 'DELETE', headers }
+              );
+              console.log('cleanup', b.name, '->', del.status);
+            }
+          })().catch(e => { console.error(e); process.exitCode = 0; });
+          "
