@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 An Obsidian plugin that syncs a local vault with a GitHub repository using **only the GitHub REST API** — no `git` binary, no `isomorphic-git`. This constraint is deliberate so the plugin works identically on desktop and mobile. It means features like branching, merging, rebasing, or any non-GitHub host are out of scope.
 
-This branch (`init-state-machine-refactoring`) sits 13+ commits ahead of upstream main. Significant architectural changes vs upstream: state-machine routing, gitignore-driven filtering, atomic conflict resolution, resume markers, atomic bare-repo bootstrap, two-way manifest↔tree reconciliation for off-band edits/deletions on GitHub, transition-detection for vaults moving over from another sync tool. See `git log --oneline upstream/main..HEAD` for the chain.
+This branch (`init-state-machine-refactoring`) sits 30+ commits ahead of upstream main. Significant architectural changes vs upstream: state-machine routing, gitignore-driven filtering, atomic conflict resolution, resume markers, atomic bare-repo bootstrap, two-way manifest↔tree reconciliation for off-band edits/deletions on GitHub, transition-detection for vaults moving over from another sync tool, and a 46-test integration suite that pins the above against real GitHub round-trips. See `git log --oneline upstream/main..HEAD` for the chain.
 
-The plugin has gone through a manual A→E test sweep (bootstrap, transitions, resume across forced kills, incremental, off-band edits, two-device round-trips) — most current behaviour described below is shaped by what those tests revealed. The conflict view UX is the one area still openly known to be primitive; everything else is intentional.
+Behaviour described below is shaped first by an A→E manual test sweep, then locked in by the integration tests (`pnpm test:integration`). Test series A–K each correspond to a different concern — bootstrap, adoption, resume, incremental, atomic conflicts, special chars, multi-device stress, out-of-band drift, settings lifecycle, auth/API failures, manifest corruption. The conflict view UX is the one area still openly known to be primitive; everything else is intentional.
 
 ## Commands
 
@@ -18,7 +18,11 @@ Package manager is **pnpm** (CI uses `pnpm@latest-10`).
 - `pnpm build` — typecheck (`tsc -noEmit`) then production bundle. Run before committing; CI runs the same on tag pushes.
 - `pnpm test` — vitest, runs once and exits. ~76 unit tests covering pure helpers (isSyncable, classifyForConflict, decideInitAction's full decision table, GitignoreCache helpers, MetadataStore.load() invariants, etc.). Mocks the `obsidian` module via `vitest.config.ts` alias to `mock-obsidian.ts`.
 - `pnpm test:watch` — vitest watch mode.
-- `pnpm benchmark` — `benchmark.ts`: real `firstSync` against GitHub. Requires env vars `GITHUB_TOKEN`, `REPO_OWNER`, `REPO_NAME`, `REPO_BRANCH` and an SSH-accessible remote (uses `git clone` over SSH to wipe the repo between runs).
+- `pnpm test:integration` — full integration suite (46 tests, ~9 min end-to-end). Real GitHub round-trips via the fine-grained PAT against the private int-test repo. See "Testing" below for the env vars and layout.
+- `pnpm test:integration:bootstrap` — bootstrap suite only (uses the public ephemeral repo, classic PAT). Slow because each test deletes + recreates the repo.
+- `pnpm test:integration:nonbootstrap` — everything except bootstrap. Cheaper because branch-per-test on the persistent int-test repo.
+- `pnpm test:perf` — opt-in performance baselines under `tests/perf/`. Not part of CI; emits structured `PERF_BASELINE {…}` lines on stdout. See "Testing" below.
+- `pnpm benchmark` — `benchmark.ts`: real `firstSync` against GitHub. Requires env vars `GITHUB_TOKEN`, `REPO_OWNER`, `REPO_NAME`, `REPO_BRANCH` and an SSH-accessible remote (uses `git clone` over SSH to wipe the repo between runs). Predates the integration suite; the test:integration script is usually preferred now.
 
 Releases are triggered by pushing a tag matching `[0-9].[0-9]+.[0-9]+*` (a `-beta` suffix cuts a prerelease); `version-bump.mjs` syncs `manifest.json` and `versions.json` from `package.json`.
 
@@ -132,7 +136,7 @@ The `*.conflict-(local|remote)-*` pattern is in the seeded root `.gitignore`, so
 
 ### GitHub client (`src/github/client.ts`)
 
-Thin wrapper over Obsidian's `requestUrl` (not `fetch` — `requestUrl` avoids CORS and works identically on mobile). Every method takes `retry`/`maxRetries` and uses `retryUntil` with exponential backoff; retries skip on HTTP 422 (unprocessable). Notable:
+Thin wrapper over Obsidian's `requestUrl` (not `fetch` — `requestUrl` avoids CORS and works identically on mobile). Every method takes `retry`/`maxRetries` and uses `retryUntil` with exponential backoff. The retry policy is centralized in `isRetriableStatus(status)` (`utils.ts`): retries 422 (state-conflict), 429 (rate limit), and 5xx (transient server). Other 4xx (401, 403, 404, etc.) short-circuit to an immediate error notice — those are configuration / auth problems where retrying just delays the inevitable. Notable:
 
 - `createTree` accepts an optional `base_tree` (omit for fresh tree, e.g. the bootstrap root commit).
 - `createCommit` accepts an optional `parent` (omit for root commit).
@@ -176,7 +180,57 @@ src/
     └── conflicts-resolution/        // Side-by-side diff for text-mergeable conflicts
 ```
 
-`tests/` holds vitest specs (76 cases). Pure helpers covered; SyncManager orchestration and GithubClient network calls are not — those need integration tests that haven't been built yet.
+`tests/` holds three suites:
+- `tests/*.test.ts` — 76 unit specs over pure helpers.
+- `tests/integration/` — 46 integration tests covering SyncManager orchestration end-to-end against real GitHub. See "Testing" below.
+- `tests/perf/` — 4 opt-in perf baselines (P1–P4). See "Testing" below.
+
+## Testing
+
+### Integration suite (`tests/integration/`, `pnpm test:integration`)
+
+46 tests across 39 files, ~9 min wall-clock. Real GitHub round-trips through the same `mock-obsidian.ts` alias the unit suite uses (it's fs-backed; the mock is a real-vault stand-in, not a mock of GitHub).
+
+**Env vars** (`.env.test` at repo root, loaded by `vitest.integration.config.ts`):
+- `GITHUB_TOKEN` — fine-grained PAT scoped to a single private repo. Permissions: Contents R/W, Metadata R. CANNOT create or delete repos, which is intentional — limits leak blast radius to that one repo's contents. Used by every test except the bootstrap suite.
+- `INT_TEST_OWNER` / `INT_TEST_REPO` — points at the private int-test repo. Each test creates a unique branch (`int-test-<scenario>-<timestamp>-<n>`) off default and deletes it in `afterEach`. The default branch is bootstrapped lazily on first run via `ensureRepoNotBare`.
+- `GITHUB_BOOTSTRAP_TOKEN` — classic PAT with `public_repo` + `delete_repo`. Required only for the bootstrap suite, which has to delete + recreate a repo to get back to the bare state. Two-token split because fine-grained PATs can't create repos.
+- `INT_BOOTSTRAP_TEST_REPO` — the public ephemeral repo the bootstrap suite recreates. `tests/integration/teardown.ts` deletes it after every run so the public-repo-with-classic-PAT exposure window is bounded by the test run itself.
+- `INT_TEST_BRANCH_PREFIX` — defaults to `int-test`; only override if multiple users share the same int-test repo.
+
+**Layout** under `tests/integration/scenarios/`:
+- `bootstrap/` — A1, A2 (two-step bare-repo bootstrap), C2 (resume firstSyncFromLocal mid-upload). Uses the public ephemeral repo via `bootstrapEnabled()`.
+- `sync/` — everything else, branch-per-test on the persistent int-test repo. Series organized by theme:
+  - **A3** — first-sync-from-remote into empty vault.
+  - **B1–B3** — adoption flows (identical / extras / conflict).
+  - **C1** — resume firstSyncFromRemote mid-download.
+  - **D1–D3** — incremental upload / download / bidirectional deletes.
+  - **E1–E4** — onload reconcile, atomic conflict resolution (binary, plugin-js, plugin-js-same-version), gitignore blocking.
+  - **F** — special chars in paths + content edge cases (one file, 7 sub-tests).
+  - **G1–G4** — multi-device stress: 3-client rotation, last-write-wins, modify-vs-delete, delete-vs-modify resurrection.
+  - **H1–H4** — out-of-band drift: web-UI modify between syncs, updateBranchHead failure recovery, sync race (`syncing` flag), settings-change-mid-sync.
+  - **I1–I4** — settings lifecycle: reset, syncConfigDir off/on, deviceName change.
+  - **J1–J5** — auth / API failures: token revoked, 429 backoff, wrong owner, missing branch, network drop.
+  - **K1–K5** — manifest corruption / recovery: invalid JSON, deleted, future lastSync, unknown fields, empty files map.
+
+**Helpers** (`tests/integration/helpers.ts`) — `createClient`, `writeVaultFile`, `readRemoteFile`, `listRemoteFiles`, `removeRemoteFile`, `writeRemoteFile`, `getBranchHead`, `countBranchCommits`, `syncAndAssertNoErrors`, `syncAndCollectErrors`, plus fault-injection primitives below.
+
+**Fault injection** (`mock-obsidian.ts` `RequestFaultInjector` + helpers):
+- `failOnNthMatch(matcher, n, message)` — throws an Error before fetch on the Nth matching call. Used by C1, C2, H2, J5 to simulate kills / network drops.
+- `respondForFirstN(matcher, n, fakeResponse)` — short-circuits the first N matching calls with a synthesized HTTP response (status + headers + body). Used by J2 to feed deterministic 429s into retryUntil's loop without actually rate-limiting the live PAT.
+- Always reset in `afterEach` via `installRequestFaultInjector(null)` — the injector is global to the vitest worker and would leak between tests otherwise.
+
+### Perf baselines (`tests/perf/`, `pnpm test:perf`)
+
+Opt-in, not in CI. Emits one `PERF_BASELINE {"name":...,"ms":...,...}` line per test; doesn't fail on slow runs (perf is signal, not a gate). The `PERF_BASELINE` prefix is a sentinel for log-scraping. ~1 min total wall-clock against a healthy connection.
+
+Tests:
+- **P1** — bulk text upload at 100/250/500 files (parametric `it.each`). Times the incremental sync that ships the bulk via `createTree`'s inline content path.
+- **P2** — single 10 MB binary through `createBlob` (~13 MB base64 in the body).
+- **P3** — 50 small (~1 KB) deterministic binaries — guard against future serialization of `commitSync`'s `filesToUpload` Promise.all loop. If the loop ever gets serialized, this number jumps roughly 50×.
+- **P4** — 245-file A3-style vault: 200 markdown notes + 30 daily-journal entries + 10 PNG attachments + 5 configDir snippets.
+
+`tests/perf/perf-helpers.ts` — `timed(name, extras, fn)` wraps an async block and emits the baseline; `deterministicBytes(seed, length)` generates non-compressible bytes seeded by a string so two runs produce identical SHAs (resume-skip optimization stays consistent across re-runs).
 
 ## Constraints to respect
 
