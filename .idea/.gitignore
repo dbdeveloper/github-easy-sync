@@ -1,0 +1,16 @@
+# Default ignored files
+/shelf/
+/workspace.xml
+# Editor-based HTTP Client requests
+/httpRequests/
+# Ignored default folder with query files
+/queries/
+# Datasource local storage ignored files
+/dataSources/
+/dataSources.local.xml
+# Per-user IDE telemetry / task state / spellcheck additions —
+# committed dirs only contain shared project config.
+/usage.statistics.xml
+/tasks.xml
+/dictionaries/
+/contentModel.xml
