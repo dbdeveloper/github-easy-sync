@@ -1,7 +1,7 @@
 import { requestUrl } from "obsidian";
 import Logger from "src/logger";
 import { GitHubSyncSettings } from "src/settings/settings";
-import { retryUntil } from "src/utils";
+import { isRetriableStatus, retryUntil } from "src/utils";
 
 export type RepoContent = {
   files: { [key: string]: GetTreeResponseItem };
@@ -92,7 +92,7 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422, // Retry condition: only retry on 422 status
+      (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0, // Use 0 retries if retry is false
     );
 
@@ -155,7 +155,7 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -208,7 +208,7 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -249,7 +249,7 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -278,7 +278,7 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -327,7 +327,7 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -370,7 +370,7 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -411,7 +411,7 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -472,7 +472,7 @@ export default class GithubClient {
           throw: false,
         });
       },
-      (res) => res.status !== 422,
+      (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 

@@ -10,6 +10,7 @@ import {
   installRequestFaultInjector,
   recordedNotices,
   clearRecordedNotices,
+  type FakeResponse,
   type RequestFaultInjector,
 } from "../../mock-obsidian";
 import SyncManager, {
@@ -799,7 +800,7 @@ export async function syncAndCollectErrors(
 // afterEach to stop the injector leaking into the next test.
 // ----------------------------------------------------------------------------
 
-export type { RequestFaultInjector };
+export type { FakeResponse, RequestFaultInjector };
 export { installRequestFaultInjector };
 
 /**
@@ -826,6 +827,39 @@ export function failOnNthMatch(
       if (matcher(url, method)) {
         matches += 1;
         if (matches === n) return new Error(message);
+      }
+      return null;
+    },
+  };
+}
+
+/**
+ * Builds an injector that returns a fake HTTP response for the FIRST
+ * `n` calls matching `matcher`, then passes everything else through.
+ * Lets J-series tests feed retryUntil deterministic 429/5xx responses
+ * to verify the retry-then-recover loop without rate-limiting our PAT.
+ *
+ *   installRequestFaultInjector(respondForFirstN(
+ *     (u, m) => m === "GET" && /\/git\/trees\//.test(u),
+ *     2,
+ *     { status: 429, headers: { "Retry-After": "1" }, body: "{}" },
+ *   ));
+ *
+ * After the 2 fakes are exhausted the next matching call goes to
+ * the real GitHub. Reset the injector with installRequestFaultInjector(null)
+ * in afterEach.
+ */
+export function respondForFirstN(
+  matcher: (url: string, method: string) => boolean,
+  n: number,
+  fake: FakeResponse,
+): RequestFaultInjector {
+  let matches = 0;
+  return {
+    intercept(url, method) {
+      if (matcher(url, method)) {
+        matches += 1;
+        if (matches <= n) return fake;
       }
       return null;
     },

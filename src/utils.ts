@@ -309,6 +309,28 @@ export async function calculateGitBlobSHA(content: ArrayBuffer): Promise<string>
 }
 
 /**
+ * Decide whether an HTTP status from a GitHub API call is worth retrying.
+ *
+ * What we retry:
+ *   - 422 — non-fast-forward updateBranchHead and a handful of other
+ *     "conflict" responses GitHub uses when the underlying state moved
+ *     under us. Original retry-on-422 behavior.
+ *   - 429 — rate limit. GitHub's secondary rate limits in particular
+ *     ask for a backoff; retryUntil's exponential delay matches.
+ *   - 5xx — server errors. Transient by nature; safe to retry.
+ *
+ * What we deliberately DON'T retry: 401 (bad token), 403 (permission
+ * or abuse-detection), 404 (wrong repo / branch), and any other 4xx.
+ * Those are configuration / authentication problems where retrying
+ * just delays the inevitable error notice.
+ */
+export function isRetriableStatus(status: number): boolean {
+  if (status === 422 || status === 429) return true;
+  if (status >= 500 && status < 600) return true;
+  return false;
+}
+
+/**
  * Retries an async function until its return value satisfies a condition or max retries is reached.
  * Uses exponential backoff between retry attempts.
  *

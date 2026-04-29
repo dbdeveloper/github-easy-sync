@@ -287,28 +287,41 @@ interface RequestUrlParam {
 }
 
 // Fault injection for integration tests that need to simulate crashes
-// mid-sync (the C-series resume tests). Tests install an injector
-// that inspects every requestUrl call; returning an Error causes the
-// requestUrl to throw before issuing the network round-trip, which
-// surfaces to the SyncManager as a real failure. Because the
-// injector intercepts BEFORE fetch, we don't waste API calls.
+// or transient failures mid-sync. Tests install an injector that
+// inspects every requestUrl call. Three return shapes:
+//   - `null` — pass through to the real fetch
+//   - an `Error` — throw instead of fetching (network drop, killed
+//     mid-flight). C-series resume tests use this.
+//   - a `FakeResponse` — short-circuit the request and return the
+//     given status/body to the caller as if GitHub had responded.
+//     Used by J-series to feed deterministic 429/5xx responses
+//     into retryUntil's loop without actually rate-limiting our PAT.
 //
 // The injector is global because mock-obsidian itself is loaded
 // once per vitest worker, but tests must always reset it in
 // afterEach (helpers.installFaultInjector(null)) — otherwise a
 // stale injector leaks into subsequent tests.
+export interface FakeResponse {
+  status: number;
+  /** Response headers; defaults to empty. */
+  headers?: Record<string, string>;
+  /** Response body as a UTF-8 string. JSON-shaped bodies should be JSON.stringify'd. */
+  body?: string;
+}
+
 export interface RequestFaultInjector {
   /**
    * Decide what to do with this request.
-   * Return null to pass through to the real fetch; return an Error
-   * to throw it instead. callIndex is monotonically increasing
-   * across the lifetime of the injector (1-based).
+   * Return null to pass through, an Error to throw, or a FakeResponse
+   * to short-circuit with a synthesized HTTP response. callIndex is
+   * monotonically increasing across the lifetime of the injector
+   * (1-based).
    */
   intercept(
     url: string,
     method: string,
     callIndex: number,
-  ): Error | null;
+  ): Error | FakeResponse | null;
 }
 
 let activeInjector: RequestFaultInjector | null = null;
@@ -323,17 +336,36 @@ export function installRequestFaultInjector(
 
 export async function requestUrl(options: RequestUrlParam) {
   // Fault injection hook — runs BEFORE the real fetch so tests can
-  // simulate "Obsidian killed mid-sync" without burning API quota.
-  // Throwing here propagates up through GithubClient → SyncManager
-  // exactly like a network error would.
+  // simulate "Obsidian killed mid-sync" or transient HTTP failures
+  // without burning API quota. Three branches mirror the injector
+  // contract: pass-through (null), throw (Error), or short-circuit
+  // with a fake HTTP response.
   if (activeInjector) {
     interceptorCallIndex += 1;
-    const err = activeInjector.intercept(
+    const decision = activeInjector.intercept(
       options.url,
       options.method || "GET",
       interceptorCallIndex,
     );
-    if (err) throw err;
+    if (decision instanceof Error) throw decision;
+    if (decision !== null && decision !== undefined) {
+      const fake = decision;
+      const bodyStr = fake.body ?? "";
+      const buffer = new TextEncoder().encode(bodyStr).buffer;
+      let json: unknown = undefined;
+      try {
+        json = bodyStr ? JSON.parse(bodyStr) : undefined;
+      } catch {
+        // not JSON, leave undefined
+      }
+      return {
+        status: fake.status,
+        headers: fake.headers ?? {},
+        arrayBuffer: buffer,
+        text: bodyStr,
+        json,
+      };
+    }
   }
 
   // Mirror Obsidian's requestUrl behaviour: when there's a body and
