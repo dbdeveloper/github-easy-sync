@@ -2,7 +2,14 @@ import { MergeView, unifiedMergeView } from "@codemirror/merge";
 import { EditorState } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
 import { markdown } from "@codemirror/lang-markdown";
-import { applyAction, chunkActions, ChunkAction } from "./chunk-actions";
+import {
+  applyAction,
+  chunkActions,
+  chunkActionKeymap,
+  chunkCount,
+  chunkNavKeymap,
+  ChunkAction,
+} from "./chunk-actions";
 
 // Reusable diff/merge component (Etap 6.5). Wraps `@codemirror/merge`
 // with two operating modes:
@@ -79,6 +86,10 @@ export class DiffPane {
   private resizeObserver: ResizeObserver | null = null;
   private currentOurs: string;
   private currentTheirs: string;
+  // Status bar pinned under the merge view. Shows "N conflicts left"
+  // plus a one-line keyboard-shortcut hint. Updated on every
+  // notifyChange so the count tracks chunk resolution in real time.
+  private footerEl: HTMLElement | null = null;
 
   constructor(
     parent: HTMLElement,
@@ -120,6 +131,7 @@ export class DiffPane {
 
   private render(): void {
     this.container.empty();
+    this.footerEl = null;
     const wide =
       this.container.clientWidth === 0 ||
       this.container.clientWidth >= NARROW_THRESHOLD_PX;
@@ -127,6 +139,46 @@ export class DiffPane {
     this.renderHeader();
     if (this.isUnified) this.renderUnified();
     else this.renderSideBySide();
+    this.renderFooter();
+    this.updateFooter();
+  }
+
+  private renderFooter(): void {
+    this.footerEl = this.container.createDiv({ cls: "sync2-diff-footer" });
+    this.footerEl.style.padding = "4px 8px";
+    this.footerEl.style.fontSize = "0.85em";
+    this.footerEl.style.color = "var(--text-muted)";
+    this.footerEl.style.borderTop =
+      "1px solid var(--background-modifier-border)";
+    this.footerEl.style.background = "var(--background-secondary)";
+  }
+
+  private updateFooter(): void {
+    if (!this.footerEl) return;
+    if (!(this.view instanceof MergeView)) {
+      // Unified mode — CM6's own gutter buttons are visible; we
+      // skip the keyboard hint there to avoid promising shortcuts
+      // that need a different cursor model.
+      this.footerEl.setText("");
+      return;
+    }
+    const count = chunkCount(this.view.b.state);
+    const hint =
+      this.props.theirsReadOnly === true
+        ? "Alt-N next · Alt-Shift-N prev · Alt-3 take this version into mine"
+        : (this.isMarkdownPath()
+            ? "Alt-N next · Alt-Shift-N prev · Alt-1/2/3 take theirs/both/ours"
+            : "Alt-N next · Alt-Shift-N prev · Alt-1/3 take theirs/ours");
+    if (count === 0) {
+      this.footerEl.setText("All chunks resolved.");
+    } else {
+      const word = count === 1 ? "conflict" : "conflicts";
+      this.footerEl.setText(`${count} ${word} left · ${hint}`);
+    }
+  }
+
+  private isMarkdownPath(): boolean {
+    return this.props.path.endsWith(".md");
   }
 
   // Two-column header above the merge view: theirs label on the
@@ -198,6 +250,12 @@ export class DiffPane {
         extensions: [
           lineNumbers(),
           ...langExt,
+          // Keymaps live on the editable side. Alt-n/Shift-Alt-N
+          // jump between chunks; Alt-1/2/3 apply theirs/both/ours
+          // at the cursor. Alt is chosen so digit/letter typing
+          // stays unaffected.
+          chunkNavKeymap(),
+          chunkActionKeymap("b", isMd, onAction),
           EditorView.updateListener.of((update) => {
             if (!update.docChanged) return;
             this.currentOurs = update.state.doc.toString();
@@ -277,6 +335,10 @@ export class DiffPane {
 
   private notifyChange(): void {
     const state = this.getState();
+    // Footer count tracks chunk resolution in real time — every
+    // keystroke or chunk-action click rebuilds the diff and may
+    // shrink the chunk list.
+    this.updateFooter();
     if (this.props.onChange) this.props.onChange(state);
     if (
       state.bytesEqual &&

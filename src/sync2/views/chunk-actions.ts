@@ -5,9 +5,18 @@ import {
   ViewPlugin,
   ViewUpdate,
   WidgetType,
+  keymap,
 } from "@codemirror/view";
-import { RangeSetBuilder } from "@codemirror/state";
-import { getChunks } from "@codemirror/merge";
+import {
+  EditorState,
+  Extension,
+  RangeSetBuilder,
+} from "@codemirror/state";
+import {
+  getChunks,
+  goToNextChunk,
+  goToPreviousChunk,
+} from "@codemirror/merge";
 
 // Per-chunk action bar mounted on the THEIRS side of a CM6 MergeView
 // (Etap 6.5 conflict resolver UX). For each diverging chunk, renders
@@ -199,6 +208,72 @@ function chunksChanged(update: ViewUpdate): boolean {
     if (a.fromB !== b.fromB || a.toB !== b.toB) return true;
   }
   return false;
+}
+
+// Number of pending diverging chunks in the given state. Used by the
+// DiffPane footer to render "N conflicts left" and to detect the
+// transition to "all resolved".
+export function chunkCount(state: EditorState): number {
+  return getChunks(state)?.chunks.length ?? 0;
+}
+
+// Find the chunk containing the cursor's main head, looked up on
+// either the "a" or "b" side of the merge view. Returns null if the
+// cursor isn't inside any diverging chunk — keymap commands then
+// no-op rather than picking the nearest chunk arbitrarily.
+function chunkAtCursor(
+  state: EditorState,
+  side: "a" | "b",
+): number | null {
+  const info = getChunks(state);
+  if (!info) return null;
+  const head = state.selection.main.head;
+  for (let i = 0; i < info.chunks.length; i++) {
+    const c = info.chunks[i];
+    const from = side === "a" ? c.fromA : c.fromB;
+    const to = side === "a" ? c.toA : c.toB;
+    if (head >= from && head <= to) return i;
+  }
+  return null;
+}
+
+// Keymap: Alt-n / Alt-Shift-N navigate next/prev chunk. Modifier
+// (Alt) chosen so the bindings don't collide with regular typing —
+// users edit text in either pane freely without triggering
+// navigation. CM6 ships goToNextChunk / goToPreviousChunk as
+// commands; we just bind them.
+export function chunkNavKeymap(): Extension {
+  return keymap.of([
+    { key: "Alt-n", run: goToNextChunk },
+    { key: "Alt-Shift-n", run: goToPreviousChunk },
+  ]);
+}
+
+// Keymap: Alt-1 / Alt-2 / Alt-3 apply theirs / both / ours to the
+// chunk under the cursor. `side` is which doc the cursor's position
+// is interpreted against — DiffPane mounts this on `b` (ours/device)
+// because that's where the user types resolution edits. If the
+// cursor isn't inside any chunk the binding no-ops (returns false
+// so CM6 falls through to default key handling).
+export function chunkActionKeymap(
+  side: "a" | "b",
+  isMarkdown: boolean,
+  onAction: (chunkIdx: number, action: ChunkAction) => void,
+): Extension {
+  const fire = (action: ChunkAction) => (view: EditorView): boolean => {
+    const idx = chunkAtCursor(view.state, side);
+    if (idx === null) return false;
+    onAction(idx, action);
+    return true;
+  };
+  return keymap.of([
+    { key: "Alt-1", run: fire("theirs") },
+    // "Both" shortcut only registers for markdown — non-markdown
+    // documents drop the entry so Alt-2 falls through to whatever
+    // CM6 / Obsidian have bound.
+    ...(isMarkdown ? [{ key: "Alt-2", run: fire("both") }] : []),
+    { key: "Alt-3", run: fire("ours") },
+  ]);
 }
 
 // Pure helpers exported for unit-testing the chunk transform logic

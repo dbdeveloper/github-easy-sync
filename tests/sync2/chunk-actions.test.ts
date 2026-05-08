@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { applyAction } from "../../src/sync2/views/chunk-actions";
+import { EditorState } from "@codemirror/state";
+import {
+  applyAction,
+  chunkCount,
+} from "../../src/sync2/views/chunk-actions";
 
 // Pure-logic unit tests for the chunk-action transform. The CM6
 // widget rendering is DOM-side and not testable here without jsdom;
@@ -81,5 +85,15 @@ describe("applyAction — both (markdown blockquote injection)", () => {
     // (auto-finalize fires when a and b are byte-equal).
     const out = applyAction("both", "ours\n", "theirs\n");
     expect(out.aText).toBe(out.bText);
+  });
+});
+
+describe("chunkCount — defensive on plain (non-merge) EditorState", () => {
+  it("returns 0 for a state without the merge state-field installed", () => {
+    // Without a MergeView wrapping the state, getChunks() returns
+    // null and our helper degrades to 0 — that's what the DiffPane
+    // footer falls back to until CM mounts.
+    const plain = EditorState.create({ doc: "hello" });
+    expect(chunkCount(plain)).toBe(0);
   });
 });
