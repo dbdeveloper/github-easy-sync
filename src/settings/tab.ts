@@ -376,7 +376,7 @@ function makePreviewElement(parent: HTMLElement): HTMLElement {
   el.style.fontSize = "0.85em";
   el.style.color = "var(--text-muted)";
   el.style.fontStyle = "italic";
-  el.style.marginTop = "4px";
+  el.style.marginTop = "10px";
   el.style.userSelect = "text"; // let users copy the rendered preview
   return el;
 }
