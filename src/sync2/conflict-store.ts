@@ -53,10 +53,6 @@ export interface ConflictStoreDeps {
   vault: Vault;
   configDir: string;
   selfPluginId: string;
-  // Per-device label baked into the sibling file name and stored in
-  // metadata so a multi-device user can tell at a glance which device
-  // contributed which copy. Sourced from settings.deviceLabel.
-  deviceLabel: string;
   // Override the clock for deterministic IDs in tests.
   now?: () => Date;
 }
@@ -64,7 +60,6 @@ export interface ConflictStoreDeps {
 export default class ConflictStore {
   private readonly vault: Vault;
   private readonly conflictsRoot: string;
-  private readonly deviceLabel: string;
   private readonly now: () => Date;
 
   // In-memory caches populated by load() and kept in sync with disk by
@@ -77,15 +72,6 @@ export default class ConflictStore {
   constructor(deps: ConflictStoreDeps) {
     this.vault = deps.vault;
     this.conflictsRoot = `${deps.configDir}/plugins/${deps.selfPluginId}/${CONFLICTS_DIRNAME}`;
-    // Empty / missing label falls back to the shared "unknown"
-    // sentinel — same behaviour as the commit-message suffix, so
-    // multi-device users see one consistent placeholder both on
-    // GitHub and in vault sibling-file names if they forgot to set
-    // deviceLabel on a particular machine.
-    this.deviceLabel =
-      deps.deviceLabel && deps.deviceLabel.length > 0
-        ? deps.deviceLabel
-        : UNKNOWN_DEVICE_LABEL;
     this.now = deps.now ?? (() => new Date());
   }
 
@@ -125,29 +111,34 @@ export default class ConflictStore {
   // indexes the record in memory. Returns the new record so the caller
   // can hand it off to the modal/view.
   //
-  // The `oursContent` argument is unused at storage time (ours always
-  // lives at vaultPath in the live vault), but accepting it keeps the
-  // call-site signature parallel to the legacy onConflict callback.
+  // `theirsAuthor` identifies the device that authored the GitHub-side
+  // change — typically parsed by the caller from the commit message's
+  // " (label)" suffix via parseDeviceSuffix. It becomes part of the
+  // sibling filename (`<base>.conflict-from-<theirsAuthor>-<ts>.<ext>`)
+  // and the ConflictRecord. An empty/missing value normalizes to
+  // UNKNOWN_DEVICE_LABEL ("unknown") so a hand-edited GitHub commit or
+  // a non-sync2 author still produces a parseable filename.
   async create(args: {
     vaultPath: string;
     baseContent: string;
     theirsContent: string;
     baseCommitSha: string | null;
     theirsBlobSha: string;
+    theirsAuthor: string;
   }): Promise<ConflictRecord> {
     const ts = this.now().getTime();
     const id = await this.allocateUniqueId(ts);
-    const siblingPath = buildSiblingPath(
-      args.vaultPath,
-      this.deviceLabel,
-      ts,
-    );
+    const author =
+      args.theirsAuthor && args.theirsAuthor.length > 0
+        ? args.theirsAuthor
+        : UNKNOWN_DEVICE_LABEL;
+    const siblingPath = buildSiblingPath(args.vaultPath, author, ts);
 
     const record: ConflictRecord = {
       id,
       vaultPath: args.vaultPath,
       siblingPath,
-      deviceLabel: this.deviceLabel,
+      deviceLabel: author,
       ts,
       baseCommitSha: args.baseCommitSha,
       theirsBlobSha: args.theirsBlobSha,

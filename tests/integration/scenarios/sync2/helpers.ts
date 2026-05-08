@@ -135,7 +135,6 @@ export async function createSync2Client(
     vault,
     configDir: CONFIG_DIR,
     selfPluginId: SELF_PLUGIN_ID,
-    deviceLabel: "sync2-int-test",
   });
   await conflictStore.load();
 

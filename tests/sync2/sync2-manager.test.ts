@@ -42,11 +42,13 @@ function makeFakeClient(): Sync2Client & {
     contentsByRef: Map<string, Map<string, string>>; // ref → path → content
     treeShaByCommit: Map<string, string>;
     commitDateByCommit: Map<string, string>;
+    commitMessageByCommit: Map<string, string>;
   };
   setBranchHead(sha: string): void;
   setContentAtRef(ref: string, path: string, content: string): void;
   setTreeShaForCommit(commitSha: string, treeSha: string): void;
   setCommitDate(commitSha: string, isoDate: string): void;
+  setCommitMessage(commitSha: string, message: string): void;
   setCompareResult(
     base: string,
     head: string,
@@ -78,6 +80,7 @@ function makeFakeClient(): Sync2Client & {
     contentsByRef: new Map<string, Map<string, string>>(),
     treeShaByCommit: new Map<string, string>(),
     commitDateByCommit: new Map<string, string>(),
+    commitMessageByCommit: new Map<string, string>(),
     compareByPair: new Map<
       string,
       {
@@ -120,6 +123,9 @@ function makeFakeClient(): Sync2Client & {
     setCommitDate(commitSha, isoDate) {
       state.commitDateByCommit.set(commitSha, isoDate);
     },
+    setCommitMessage(commitSha, message) {
+      state.commitMessageByCommit.set(commitSha, message);
+    },
     setCompareResult(base, head, result) {
       state.compareByPair.set(`${base}...${head}`, result);
     },
@@ -161,7 +167,12 @@ function makeFakeClient(): Sync2Client & {
       const treeSha = state.treeShaByCommit.get(args.sha) ?? `TREE_OF_${args.sha}`;
       const committedAt = state.commitDateByCommit.get(args.sha)
         ?? new Date(0).toISOString();
-      return { tree: { sha: treeSha }, committer: { date: committedAt } };
+      const message = state.commitMessageByCommit?.get(args.sha) ?? "";
+      return {
+        tree: { sha: treeSha },
+        committer: { date: committedAt },
+        message,
+      };
     },
     async getContentsAtRef(args) {
       calls.push({ op: "getContentsAtRef", args });
@@ -1594,7 +1605,6 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
         vault: f2.vault as unknown as import("obsidian").Vault,
         configDir: CONFIG_DIR,
         selfPluginId: SELF_PLUGIN_ID,
-        deviceLabel: "test-device",
       });
       await conflictStore.load();
 
@@ -1631,6 +1641,14 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       f2.store.setLastSync("BASE_HEAD", "BASE_TREE");
       f2.client.setBranchHead("REMOTE_HEAD");
       f2.client.setTreeShaForCommit("REMOTE_HEAD", "REMOTE_TREE");
+      // Commit message ends with " (test-device)" so parseDeviceSuffix
+      // recovers that label and tags the sibling file with the FOREIGN
+      // author rather than the local device — same convention sync2's
+      // own appendDeviceSuffix uses on push.
+      f2.client.setCommitMessage(
+        "REMOTE_HEAD",
+        "Sync at 2026-05-09 12:00:00.000 (test-device)",
+      );
       f2.client.setContentAtRef("BASE_HEAD", "x.md", "shared\n");
       f2.client.setContentAtRef("REMOTE_HEAD", "x.md", "theirs-edits\n");
       f2.client.setCompareResult("BASE_HEAD", "REMOTE_HEAD", {
@@ -1706,6 +1724,79 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 
+    it("hand-edited GitHub commit (no ' (label)' suffix) → sibling labelled 'unknown'", async () => {
+      // Same setup as the kind=deferred test above, but the HEAD
+      // commit message is what a user typed in GitHub's web UI —
+      // no trailing " (deviceLabel)" tag. parseDeviceSuffix
+      // returns the UNKNOWN_DEVICE_LABEL sentinel; the sibling
+      // file should reflect that, NOT the local device's label.
+      const ConflictStore = (
+        await import("../../src/sync2/conflict-store")
+      ).default;
+      const f2 = fixture({});
+      const conflictStore = new ConflictStore({
+        vault: f2.vault as unknown as import("obsidian").Vault,
+        configDir: CONFIG_DIR,
+        selfPluginId: SELF_PLUGIN_ID,
+      });
+      await conflictStore.load();
+
+      const manager = new Sync2Manager({
+        vault: f2.vault as unknown as import("obsidian").Vault,
+        store: f2.store,
+        detector: f2.detector,
+        queue: f2.queue,
+        builder: f2.builder,
+        client: f2.client,
+        logger: silentLogger(),
+        configDir: CONFIG_DIR,
+        selfPluginId: SELF_PLUGIN_ID,
+        commitMessageAll: "Sync at {date} {time}",
+        commitMessageFile: "Update {filename} at {date} {time}",
+        deviceLabel: "test-device",
+        conflictStore,
+        onConflict: async () => ({ kind: "deferred" }),
+        now: () => f2.clock.nowMs(),
+      });
+
+      await f2.store.load();
+      writeVaultFile(f2.root, "x.md", "local-edits\n");
+      const sShared = await shaOf("shared\n");
+      const stat = fs.statSync(path.join(f2.root, "x.md"));
+      f2.store.set("x.md", {
+        path: "x.md",
+        remoteSha: sShared,
+        mtime: 0,
+        size: stat.size,
+      });
+      f2.store.setLastSync("BASE_HEAD", "BASE_TREE");
+      f2.client.setBranchHead("REMOTE_HEAD");
+      f2.client.setTreeShaForCommit("REMOTE_HEAD", "REMOTE_TREE");
+      // NO trailing " (label)" — what a hand-edited or non-sync2
+      // commit looks like. parseDeviceSuffix → "unknown".
+      f2.client.setCommitMessage(
+        "REMOTE_HEAD",
+        "Quick fix from the GitHub web editor",
+      );
+      f2.client.setContentAtRef("BASE_HEAD", "x.md", "shared\n");
+      f2.client.setContentAtRef("REMOTE_HEAD", "x.md", "theirs-edits\n");
+      f2.client.setCompareResult("BASE_HEAD", "REMOTE_HEAD", {
+        status: "ahead",
+        files: [
+          { filename: "x.md", status: "modified", sha: "blob-of-theirs" },
+        ],
+      });
+
+      await manager.syncAll();
+
+      const records = conflictStore.forPath("x.md");
+      expect(records).toHaveLength(1);
+      expect(records[0].deviceLabel).toBe("unknown");
+      expect(records[0].siblingPath).toContain("conflict-from-unknown-");
+
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
     it("pending-conflict path is dropped from enqueue; push only carries clean paths", async () => {
       const ConflictStore = (
         await import("../../src/sync2/conflict-store")
@@ -1715,7 +1806,6 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
         vault: f2.vault as unknown as import("obsidian").Vault,
         configDir: CONFIG_DIR,
         selfPluginId: SELF_PLUGIN_ID,
-        deviceLabel: "test-device",
       });
       await conflictStore.load();
 
@@ -1728,6 +1818,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
         theirsContent: "theirs\n",
         baseCommitSha: "OLD_HEAD",
         theirsBlobSha: "old-theirs-sha",
+        theirsAuthor: "test-device",
       });
 
       // Build manager pointing at the conflict store.
@@ -1785,7 +1876,6 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
         vault: f2.vault as unknown as import("obsidian").Vault,
         configDir: CONFIG_DIR,
         selfPluginId: SELF_PLUGIN_ID,
-        deviceLabel: "test-device",
       });
       await conflictStore.load();
 
@@ -1796,6 +1886,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
         theirsContent: "theirs\n",
         baseCommitSha: "OLD_HEAD",
         theirsBlobSha: "old-theirs-sha",
+        theirsAuthor: "test-device",
       });
 
       const manager = new Sync2Manager({
@@ -1889,7 +1980,6 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
         vault: f2.vault as unknown as import("obsidian").Vault,
         configDir: CONFIG_DIR,
         selfPluginId: SELF_PLUGIN_ID,
-        deviceLabel: "test-device",
       });
       await conflictStore.load();
       writeVaultFile(f2.root, "a.md", "v1\n");
@@ -1899,6 +1989,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
         theirsContent: "theirs\n",
         baseCommitSha: "OLD_HEAD",
         theirsBlobSha: "old-theirs-sha",
+        theirsAuthor: "test-device",
       });
 
       const manager = new Sync2Manager({

@@ -21,7 +21,7 @@ const CONFIG_DIR = ".obsidian";
 const SELF_PLUGIN_ID = "github-easy-sync";
 const DEVICE_LABEL = "test-device";
 
-function fixture(opts: { deviceLabel?: string } = {}): {
+function fixture(): {
   root: string;
   vault: Vault;
   store: ConflictStore;
@@ -49,7 +49,6 @@ function fixture(opts: { deviceLabel?: string } = {}): {
     vault: vault as unknown as import("obsidian").Vault,
     configDir: CONFIG_DIR,
     selfPluginId: SELF_PLUGIN_ID,
-    deviceLabel: opts.deviceLabel ?? DEVICE_LABEL,
     now: () => clock.tick(),
   });
   const conflictsRoot = path.join(
@@ -188,6 +187,7 @@ describe("ConflictStore", () => {
         theirsContent: "theirs version\n",
         baseCommitSha: "deadbeef",
         theirsBlobSha: "cafef00d",
+        theirsAuthor: DEVICE_LABEL,
       });
 
       expect(r.id).toMatch(/^\d{17}$/);
@@ -227,6 +227,7 @@ describe("ConflictStore", () => {
         theirsContent: "t",
         baseCommitSha: null,
         theirsBlobSha: "sha",
+        theirsAuthor: DEVICE_LABEL,
       });
 
       expect(f.store.hasPending("x.md")).toBe(true);
@@ -245,6 +246,7 @@ describe("ConflictStore", () => {
         theirsContent: "t1",
         baseCommitSha: null,
         theirsBlobSha: "sha1",
+        theirsAuthor: DEVICE_LABEL,
       });
       const r2 = await f.store.create({
         vaultPath: "x.md",
@@ -252,6 +254,7 @@ describe("ConflictStore", () => {
         theirsContent: "t2",
         baseCommitSha: null,
         theirsBlobSha: "sha2",
+        theirsAuthor: DEVICE_LABEL,
       });
       const list = f.store.forPath("x.md");
       expect(list.map((r) => r.id)).toEqual([r1.id, r2.id]);
@@ -269,6 +272,7 @@ describe("ConflictStore", () => {
         theirsContent: "t",
         baseCommitSha: null,
         theirsBlobSha: "sha",
+        theirsAuthor: DEVICE_LABEL,
       });
       f.clock.set(fixed);
       const r2 = await f.store.create({
@@ -277,6 +281,7 @@ describe("ConflictStore", () => {
         theirsContent: "t",
         baseCommitSha: null,
         theirsBlobSha: "sha",
+        theirsAuthor: DEVICE_LABEL,
       });
       expect(r2.id).not.toBe(r1.id);
       expect(r2.id > r1.id).toBe(true);
@@ -293,6 +298,7 @@ describe("ConflictStore", () => {
         theirsContent: "t",
         baseCommitSha: null,
         theirsBlobSha: "sha",
+        theirsAuthor: DEVICE_LABEL,
       });
 
       // Spin up a second store against the same vault, simulating
@@ -301,7 +307,6 @@ describe("ConflictStore", () => {
         vault: f.vault as unknown as import("obsidian").Vault,
         configDir: CONFIG_DIR,
         selfPluginId: SELF_PLUGIN_ID,
-        deviceLabel: DEVICE_LABEL,
       });
       await store2.load();
 
@@ -350,6 +355,7 @@ describe("ConflictStore", () => {
         theirsContent: "t",
         baseCommitSha: null,
         theirsBlobSha: "sha",
+        theirsAuthor: DEVICE_LABEL,
       });
       // Wipe the on-disk state without going through resolve().
       fs.rmSync(f.conflictsRoot, { recursive: true });
@@ -367,6 +373,7 @@ describe("ConflictStore", () => {
         theirsContent: "THEIRS-content\n",
         baseCommitSha: null,
         theirsBlobSha: "sha",
+        theirsAuthor: DEVICE_LABEL,
       });
       expect(await f.store.readBase(r.id)).toBe("BASE-content\n");
       expect(await f.store.readTheirs(r.id)).toBe("THEIRS-content\n");
@@ -385,6 +392,7 @@ describe("ConflictStore", () => {
         theirsContent: "t",
         baseCommitSha: null,
         theirsBlobSha: "sha",
+        theirsAuthor: DEVICE_LABEL,
       });
       expect(fs.existsSync(path.join(f.root, r.siblingPath))).toBe(true);
       expect(fs.existsSync(path.join(f.conflictsRoot, r.id))).toBe(true);
@@ -407,6 +415,7 @@ describe("ConflictStore", () => {
         theirsContent: "t1",
         baseCommitSha: null,
         theirsBlobSha: "sha1",
+        theirsAuthor: DEVICE_LABEL,
       });
       const r2 = await f.store.create({
         vaultPath: "x.md",
@@ -414,6 +423,7 @@ describe("ConflictStore", () => {
         theirsContent: "t2",
         baseCommitSha: null,
         theirsBlobSha: "sha2",
+        theirsAuthor: DEVICE_LABEL,
       });
       await f.store.resolve(r1.id);
       expect(f.store.hasPending("x.md")).toBe(true);
@@ -431,6 +441,7 @@ describe("ConflictStore", () => {
         theirsContent: "t",
         baseCommitSha: null,
         theirsBlobSha: "sha",
+        theirsAuthor: DEVICE_LABEL,
       });
       fs.rmSync(path.join(f.root, r.siblingPath));
       await expect(f.store.resolve(r.id)).resolves.not.toThrow();
@@ -446,6 +457,7 @@ describe("ConflictStore", () => {
         theirsContent: "t",
         baseCommitSha: null,
         theirsBlobSha: "sha",
+        theirsAuthor: DEVICE_LABEL,
       });
 
       // Simulate user-driven delete: remove sibling from disk first
@@ -472,6 +484,7 @@ describe("ConflictStore", () => {
         theirsContent: "t",
         baseCommitSha: null,
         theirsBlobSha: "sha",
+        theirsAuthor: DEVICE_LABEL,
       });
       fs.rmSync(path.join(f.conflictsRoot, r.id), { recursive: true });
       fs.rmSync(path.join(f.root, r.siblingPath));
@@ -490,6 +503,7 @@ describe("ConflictStore", () => {
         theirsContent: '{"x":1}\n',
         baseCommitSha: null,
         theirsBlobSha: "sha",
+        theirsAuthor: DEVICE_LABEL,
       });
       expect(r.siblingPath.endsWith(".json")).toBe(true);
       expect(
@@ -507,6 +521,7 @@ describe("ConflictStore", () => {
         theirsContent: "Apache-2.0\n",
         baseCommitSha: null,
         theirsBlobSha: "sha",
+        theirsAuthor: DEVICE_LABEL,
       });
       expect(r.siblingPath).toMatch(/^LICENSE\.conflict-from-/);
       expect(
@@ -517,8 +532,8 @@ describe("ConflictStore", () => {
       ).toBe(true);
     });
 
-    it("stores the human-readable device label in metadata, sanitized version in the sibling filename", async () => {
-      const f2 = fixture({ deviceLabel: "My Phone (старий)" });
+    it("theirsAuthor with parens / spaces survives in metadata; sanitized in the sibling filename", async () => {
+      const f2 = fixture();
       try {
         const r = await f2.store.create({
           vaultPath: "x.md",
@@ -526,6 +541,11 @@ describe("ConflictStore", () => {
           theirsContent: "t",
           baseCommitSha: null,
           theirsBlobSha: "sha",
+          // Per-conflict author — typically parsed by the caller
+          // from the GitHub HEAD commit's " (label)" suffix. The
+          // raw label survives unchanged in metadata; the filename
+          // gets the buildSiblingPath sanitisation.
+          theirsAuthor: "My Phone (старий)",
         });
         expect(r.deviceLabel).toBe("My Phone (старий)");
         expect(r.siblingPath).toContain("My_Phone_");
@@ -535,8 +555,8 @@ describe("ConflictStore", () => {
       }
     });
 
-    it("empty deviceLabel in deps falls back to 'unknown' in both metadata and sibling filename", async () => {
-      const f2 = fixture({ deviceLabel: "" });
+    it("empty theirsAuthor falls back to 'unknown' in both metadata and sibling filename", async () => {
+      const f2 = fixture();
       try {
         const r = await f2.store.create({
           vaultPath: "x.md",
@@ -544,6 +564,10 @@ describe("ConflictStore", () => {
           theirsContent: "t",
           baseCommitSha: null,
           theirsBlobSha: "sha",
+          // Empty string — happens when parseDeviceSuffix runs on
+          // a hand-edited GitHub commit that didn't end with the
+          // " (label)" suffix sync2 normally appends.
+          theirsAuthor: "",
         });
         // One sentinel everywhere — same string in metadata and in
         // the filename — so a viewer reading either surface gets a

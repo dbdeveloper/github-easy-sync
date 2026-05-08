@@ -256,7 +256,6 @@ export default class GitHubSyncPlugin extends Plugin {
       vault: this.app.vault,
       configDir: this.app.vault.configDir,
       selfPluginId: manifest.id,
-      deviceLabel,
     });
     await conflictStore.load();
     this.conflictStore = conflictStore;

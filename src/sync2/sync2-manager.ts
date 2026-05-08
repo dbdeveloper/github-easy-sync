@@ -14,7 +14,11 @@ import PushQueue, { EnqueueMeta } from "./push-queue";
 import SnapshotStore from "./snapshot-store";
 import TreeBuilder from "./tree-builder";
 import { mergeText } from "./three-way-merge";
-import { applyTemplate, appendDeviceSuffix } from "./commit-templates";
+import {
+  applyTemplate,
+  appendDeviceSuffix,
+  parseDeviceSuffix,
+} from "./commit-templates";
 import ConflictStore from "./conflict-store";
 import { normalizeText } from "./text-normalize";
 import { ConflictResolution, FileChange } from "./types";
@@ -49,6 +53,10 @@ export interface Sync2Client {
   }): Promise<{
     tree: { sha: string };
     committer: { date: string };
+    // Full commit message — sync2 reads the trailing " (label)" off
+    // it via parseDeviceSuffix to identify the foreign device that
+    // authored a conflict's "theirs" side.
+    message: string;
   }>;
   // Fetches the base64-encoded blob content for `path` at a specific
   // commit `ref`. Returns null on 404 (path not present at that
@@ -675,12 +683,30 @@ export class Sync2Manager {
             "Sync2 conflict deferral requested but no ConflictStore is wired",
           );
         }
+        // Identify who authored the GitHub-side change so the
+        // sibling filename (`<base>.conflict-from-<author>-<ts>.<ext>`)
+        // points at the FOREIGN device, not the user's local one. We
+        // pull the trailing " (label)" off the head commit's message;
+        // hand-edited commits on the GitHub web UI parse to "unknown".
+        // Falling back gracefully on a fetch failure — the sibling
+        // still lands, just labelled "unknown".
+        let theirsAuthor = "unknown";
+        try {
+          const headCommit = await this.client.getCommit({
+            sha: headRef,
+            retry: true,
+          });
+          theirsAuthor = parseDeviceSuffix(headCommit.message);
+        } catch {
+          // network / 404 — keep "unknown"
+        }
         await this.conflictStore.create({
           vaultPath: path,
           baseContent,
           theirsContent: remoteContent,
           baseCommitSha: baseRef,
           theirsBlobSha: blob.sha,
+          theirsAuthor,
         });
         await this.logger.info("Sync2 conflict deferred via sibling file", {
           path,

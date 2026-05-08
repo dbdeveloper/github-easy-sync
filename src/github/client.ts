@@ -272,7 +272,16 @@ export default class GithubClient {
     sha: string;
     retry?: boolean;
     maxRetries?: number;
-  }): Promise<{ tree: { sha: string }; committer: { date: string } }> {
+  }): Promise<{
+    tree: { sha: string };
+    committer: { date: string };
+    // Full commit message. Sync2 reads the trailing " (label)"
+    // suffix here via parseDeviceSuffix to identify which device
+    // authored a conflict's "theirs" side. Falls back to "" when
+    // the API response is missing the field, which parses to the
+    // UNKNOWN_DEVICE_LABEL sentinel.
+    message: string;
+  }> {
     const response = await retryUntil(
       async () => {
         return this.timed(
@@ -302,6 +311,10 @@ export default class GithubClient {
           response.json.author?.date ??
           new Date(0).toISOString(),
       },
+      message:
+        typeof response.json.message === "string"
+          ? response.json.message
+          : "",
     };
   }
 
