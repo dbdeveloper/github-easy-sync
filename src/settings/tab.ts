@@ -3,12 +3,13 @@ import {
   App,
   Setting,
   TextComponent,
-  Modal,
   Notice,
 } from "obsidian";
 import GitHubSyncPlugin from "src/main";
 import { copyToClipboard } from "src/utils";
 
+// Sync2-only settings tab. Mirrors the shape of GitHubSyncSettings —
+// every input here writes to one field and persists via saveSettings.
 export default class GitHubSyncSettingsTab extends PluginSettingTab {
   plugin: GitHubSyncPlugin;
 
@@ -19,19 +20,19 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
 
   display(): void {
     const { containerEl } = this;
-
     containerEl.empty();
 
+    // ── Remote repository ────────────────────────────────────────────
     new Setting(containerEl).setName("Remote Repository").setHeading();
 
     let tokenInput: TextComponent;
     new Setting(containerEl)
       .setName("GitHub token")
       .setDesc(
-        "A personal access token or a fine-grained token with read and write access to your repository",
+        "A personal access token or fine-grained token with read+write access to your repository.",
       )
       .addButton((button) =>
-        button.setIcon("eye-off").onClick((e) => {
+        button.setIcon("eye-off").onClick(() => {
           if (tokenInput.inputEl.type === "password") {
             tokenInput.inputEl.type = "text";
             button.setIcon("eye");
@@ -91,32 +92,35 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           }),
       );
 
+    // ── Device identity ─────────────────────────────────────────────
     new Setting(containerEl).setName("Sync").setHeading();
 
     new Setting(containerEl)
-      .setName("Device name")
+      .setName("Device label")
       .setDesc(
-        "Label for this device, baked into commit messages so multi-device " +
-          "users can tell which machine produced a commit (e.g. \"mobile\", " +
-          "\"work-laptop\"). Stored locally only — never propagates via sync.",
+        "Label for this machine. Baked into commit messages as a trailing " +
+          '" (label)" suffix and into conflict-resolution sibling-file names. ' +
+          'Default "Obsidian" reads naturally even on a single-device setup; ' +
+          'multi-device users override per machine ("Phone", "Desktop"…).',
       )
       .addText((text) =>
         text
           .setPlaceholder("Obsidian")
-          .setValue(this.plugin.settings.deviceName)
+          .setValue(this.plugin.settings.deviceLabel ?? "Obsidian")
           .onChange(async (value) => {
-            this.plugin.settings.deviceName = value.trim() || "Obsidian";
+            this.plugin.settings.deviceLabel = value.trim() || "Obsidian";
             await this.plugin.saveSettings();
           }),
       );
 
+    // ── Sync strategy ───────────────────────────────────────────────
     const syncStrategies = {
       manual: "Manually",
       interval: "On Interval",
     };
     const uploadStrategySetting = new Setting(containerEl)
       .setName("Sync strategy")
-      .setDesc("How to sync files with remote repository");
+      .setDesc("How to sync files with the remote repository");
 
     let syncInterval = "1";
     if (this.plugin.settings.syncInterval) {
@@ -132,7 +136,6 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.syncInterval = parseInt(value) || 1;
             await this.plugin.saveSettings();
-            // We need to restart the interval if the value is changed
             this.plugin.restartSyncInterval();
           }),
       );
@@ -158,7 +161,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Sync on startup")
-      .setDesc("Download up to date files from remote on startup")
+      .setDesc("Trigger a sync as soon as Obsidian finishes loading.")
       .addToggle((toggle) => {
         toggle
           .setValue(this.plugin.settings.syncOnStartup)
@@ -168,78 +171,20 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           });
       });
 
-    new Setting(containerEl)
-      .setName("Sync configs")
-      .setDesc("Sync Vault config folder with remote repository")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.syncConfigDir)
-          .onChange(async (value) => {
-            this.plugin.settings.syncConfigDir = value;
-            if (value) {
-              await this.plugin.syncManager.addConfigDirToMetadata();
-            } else {
-              await this.plugin.syncManager.removeConfigDirFromMetadata();
-            }
-            await this.plugin.saveSettings();
-          });
-      });
-
-    const conflictHandlingOptions = {
-      overwriteLocal: "Overwrite local file",
-      ask: "Ask",
-      overwriteRemote: "Overwrite remote file",
-    };
-    new Setting(containerEl)
-      .setName("Conflict handling")
-      .setDesc(
-        `What to do in case remote and local files conflict
-        when downloading from GitHub repository`,
-      )
-      .addDropdown((dropdown) => {
-        dropdown
-          .addOptions(conflictHandlingOptions)
-          .setValue(this.plugin.settings.conflictHandling)
-          .onChange(async (value: keyof typeof conflictHandlingOptions) => {
-            this.plugin.settings.conflictHandling = value;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Sync2 (experimental)")
-      .setHeading();
-
-    new Setting(containerEl)
-      .setName("Use Sync2 engine")
-      .setDesc(
-        "Switch the plugin from the legacy sync engine to Sync2. Restart " +
-          "Obsidian after toggling for the change to fully take effect.",
-      )
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.experimentalSync2 ?? false)
-          .onChange(async (value) => {
-            this.plugin.settings.experimentalSync2 = value;
-            await this.plugin.saveSettings();
-            if (value) await this.plugin.initSync2();
-          }),
-      );
-
+    // ── Commit messages ─────────────────────────────────────────────
     new Setting(containerEl)
       .setName("Commit message — full sync")
-      .setDesc("Template used by Sync2 when pushing all local changes. " +
-        "Placeholders: {date}.")
+      .setDesc(
+        "Template used when pushing all local changes. Placeholders: {date}. " +
+          'A " (deviceLabel)" suffix is always appended automatically.',
+      )
       .addText((text) =>
         text
-          .setPlaceholder("Sync from Obsidian {date}")
-          .setValue(
-            this.plugin.settings.commitMessageAll ??
-              "Sync from Obsidian {date}",
-          )
+          .setPlaceholder("Sync at {date}")
+          .setValue(this.plugin.settings.commitMessageAll ?? "Sync at {date}")
           .onChange(async (value) => {
             this.plugin.settings.commitMessageAll =
-              value.trim() || "Sync from Obsidian {date}";
+              value.trim() || "Sync at {date}";
             await this.plugin.saveSettings();
           }),
       );
@@ -247,19 +192,19 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Commit message — single file")
       .setDesc(
-        "Template used by Sync2 when pushing a single file. " +
-          "Placeholders: {date}, {filename}, {path}.",
+        "Template used when pushing a single file. Placeholders: {date}, {filename}, {path}. " +
+          'A " (deviceLabel)" suffix is always appended automatically.',
       )
       .addText((text) =>
         text
-          .setPlaceholder("Update {filename} ({date})")
+          .setPlaceholder("Update {filename} at {date}")
           .setValue(
             this.plugin.settings.commitMessageFile ??
-              "Update {filename} ({date})",
+              "Update {filename} at {date}",
           )
           .onChange(async (value) => {
             this.plugin.settings.commitMessageFile =
-              value.trim() || "Update {filename} ({date})";
+              value.trim() || "Update {filename} at {date}";
             await this.plugin.saveSettings();
           }),
       );
@@ -269,8 +214,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       .setDesc(
         "When the network is unavailable and a previous push is still " +
           "pending, fold subsequent Sync clicks into the same batch. " +
-          "Eventual replay produces a single commit instead of one per " +
-          "click.",
+          "Eventual replay produces a single commit instead of one per click.",
       )
       .addToggle((toggle) =>
         toggle
@@ -281,117 +225,65 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           }),
       );
 
+    // ── Interface ───────────────────────────────────────────────────
     new Setting(containerEl).setName("Interface").setHeading();
 
     new Setting(containerEl)
       .setName("Show status bar item")
-      .setDesc("Displays the status bar item that show the file sync status")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.showStatusBarItem)
-          .onChange((value) => {
-            this.plugin.settings.showStatusBarItem = value;
-            this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Show sync button")
-      .setDesc("Displays a ribbon button to sync files")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.showSyncRibbonButton)
-          .onChange((value) => {
-            this.plugin.settings.showSyncRibbonButton = value;
-            this.plugin.saveSettings();
-            if (value) {
-              this.plugin.showSyncRibbonIcon();
-            } else {
-              this.plugin.hideSyncRibbonIcon();
-            }
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Show conflicts view button")
-      .setDesc("Displays a ribbon button that opens the conflicts view")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.showConflictsRibbonButton)
-          .onChange((value) => {
-            this.plugin.settings.showConflictsRibbonButton = value;
-            this.plugin.saveSettings();
-            if (value) {
-              this.plugin.showConflictsRibbonIcon();
-            } else {
-              this.plugin.hideConflictsRibbonIcon();
-            }
-          });
-      });
-
-    const diffModeOptions = {
-      default: "Default",
-      unified: "Unified",
-      split: "Split",
-    };
-    new Setting(containerEl)
-      .setName("Conflict resolution view mode")
-      .setDesc("Set which diff view mode should be shown in case of conflicts")
-      .addDropdown((dropdown) => {
-        dropdown
-          .addOptions(diffModeOptions)
-          .setValue(this.plugin.settings.conflictViewMode)
-          .onChange(async (value: keyof typeof diffModeOptions) => {
-            this.plugin.settings.conflictViewMode = value;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Keep plugin conflict copies")
       .setDesc(
-        "When a plugin .js file conflicts (auto-resolved by manifest version), " +
-          "also save the loser side as <name>.conflict-(local|remote)-<timestamp>.js " +
-          "next to the winner. Off by default to keep plugin folders tidy. " +
-          "Binary files (images, PDFs, …) always keep a backup — this setting " +
-          "only affects plugin .js files.",
+        "Show 'GitHub' label in the status bar (plus the 🔀 conflict counter " +
+          "when there are pending conflicts).",
       )
       .addToggle((toggle) => {
         toggle
-          .setValue(this.plugin.settings.keepPluginConflictCopy)
+          .setValue(this.plugin.settings.showStatusBarItem)
           .onChange(async (value) => {
-            this.plugin.settings.keepPluginConflictCopy = value;
+            this.plugin.settings.showStatusBarItem = value;
             await this.plugin.saveSettings();
+            if (value) this.plugin.showStatusBarItem();
+            else this.plugin.hideStatusBarItem();
           });
       });
 
+    new Setting(containerEl)
+      .setName("Show sync ribbon button")
+      .setDesc("Display a refresh-cw ribbon button to trigger a full sync.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.showSyncRibbonButton)
+          .onChange(async (value) => {
+            this.plugin.settings.showSyncRibbonButton = value;
+            await this.plugin.saveSettings();
+            if (value) this.plugin.showSyncRibbonIcon();
+            else this.plugin.hideSyncRibbonIcon();
+          });
+      });
+
+    // ── Logging ─────────────────────────────────────────────────────
     new Setting(containerEl).setName("Extra").setHeading();
 
     new Setting(containerEl)
       .setName("Enable logging")
       .setDesc(
-        "If enabled logs from this plugin will be saved in a file in your config directory.",
+        "Persist logs to <configDir>/github-easy-sync.log. Useful for bug reports.",
       )
       .addToggle((toggle) => {
         toggle
           .setValue(this.plugin.settings.enableLogging)
-          .onChange((value) => {
+          .onChange(async (value) => {
             this.plugin.settings.enableLogging = value;
-            if (value) {
-              this.plugin.logger.enable();
-            } else {
-              this.plugin.logger.disable();
-            }
-            this.plugin.saveSettings();
+            if (value) this.plugin.logger.enable();
+            else this.plugin.logger.disable();
+            await this.plugin.saveSettings();
           });
       });
 
     new Setting(containerEl)
       .setName("Copy logs")
-      .setDesc("Copy the log file content, this is useful to report bugs.")
+      .setDesc("Copy the log file content to the clipboard.")
       .addButton((button) => {
         button.setButtonText("Copy").onClick(async () => {
-          const logs: string = await this.plugin.logger.read();
+          const logs = await this.plugin.logger.read();
           try {
             await copyToClipboard(logs);
             new Notice("Logs copied", 5000);
@@ -403,45 +295,11 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Clean logs")
-      .setDesc("Delete all existing logs.")
+      .setDesc("Delete the log file content.")
       .addButton((button) => {
         button.setButtonText("Clean").onClick(async () => {
           await this.plugin.logger.clean();
         });
-      });
-
-    new Setting(containerEl)
-      .setName("Reset")
-      .setDesc("Reset the plugin settings and metadata")
-      .addButton((button) => {
-        button
-          .setButtonText("RESET")
-          .setCta()
-          .onClick(() => {
-            const modal = new Modal(this.plugin.app);
-            modal.setTitle("Are you sure?");
-            modal.setContent(
-              "This will completely delete all sync metadata and plugin settings.\n" +
-                "You'll have to repeat the first sync if you want to use the plugin again.",
-            );
-            new Setting(modal.contentEl);
-            new Setting(modal.contentEl)
-              .addButton((btn) =>
-                btn
-                  .setButtonText("Reset")
-                  .setCta()
-                  .onClick(async () => {
-                    await this.plugin.reset();
-                    modal.close();
-                  }),
-              )
-              .addButton((btn) =>
-                btn.setButtonText("Cancel").onClick(() => {
-                  modal.close();
-                }),
-              );
-            modal.open();
-          });
       });
   }
 }

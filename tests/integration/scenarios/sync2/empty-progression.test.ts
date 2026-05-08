@@ -67,19 +67,19 @@ describe.skipIf(!integrationEnabled())(
         expect(afterFirst).toEqual(expectedAfter);
 
         // Step 2: add a local note → push.
-        await client.vault.adapter.write("Note A.md", "first version");
+        await client.vault.adapter.write("Note A.md", "first version\n");
         await sync2AllAndAssertNoErrors(client);
         const filesAfterAdd = await listRemoteFiles(branch);
         expect(filesAfterAdd).toContain("Note A.md");
         expect(await readRemoteFile(branch, "Note A.md")).toBe(
-          "first version",
+          "first version\n",
         );
 
         // Step 3: edit the same note → push (modified).
-        await client.vault.adapter.write("Note A.md", "second version");
+        await client.vault.adapter.write("Note A.md", "second version\n");
         await sync2AllAndAssertNoErrors(client);
         expect(await readRemoteFile(branch, "Note A.md")).toBe(
-          "second version",
+          "second version\n",
         );
 
         // Step 4: delete locally → push (sha:null).
@@ -91,7 +91,7 @@ describe.skipIf(!integrationEnabled())(
         await writeRemoteFile(
           branch,
           "Web Note.md",
-          "from-web",
+          "from-web\n",
           "[web] add",
         );
         await sync2AllAndAssertNoErrors(client);
@@ -103,13 +103,13 @@ describe.skipIf(!integrationEnabled())(
             path.join(client.vaultPath, "Web Note.md"),
             "utf8",
           ),
-        ).toBe("from-web");
+        ).toBe("from-web\n");
 
         // Step 6: web edits the file → pull updates local.
         await writeRemoteFile(
           branch,
           "Web Note.md",
-          "from-web-v2",
+          "from-web-v2\n",
           "[web] edit",
         );
         await sync2AllAndAssertNoErrors(client);
@@ -118,7 +118,7 @@ describe.skipIf(!integrationEnabled())(
             path.join(client.vaultPath, "Web Note.md"),
             "utf8",
           ),
-        ).toBe("from-web-v2");
+        ).toBe("from-web-v2\n");
 
         // Step 7: web deletes the file → pull removes it locally.
         await removeRemoteFile(branch, "Web Note.md", "[web] delete");

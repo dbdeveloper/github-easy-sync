@@ -91,13 +91,10 @@ export async function createSync2Client(
     githubOwner: owner,
     githubRepo: repo,
     githubBranch: opts.branch,
-    syncConfigDir: false,
     enableLogging: opts.enableLogging ?? false,
     syncStrategy: "manual",
     showStatusBarItem: false,
     showSyncRibbonButton: false,
-    showConflictsRibbonButton: false,
-    experimentalSync2: true,
     accumulateOfflineSyncs: opts.accumulateOfflineSyncs ?? false,
   };
 

@@ -1,25 +1,8 @@
-import { mkdtempSync, rmSync } from "fs";
-import * as os from "os";
-import * as path from "path";
-import type { Vault as ObsidianVault } from "obsidian";
-// Import mock Vault directly (not via the "obsidian" alias) so TS sees
-// the constructor that takes a vault root path. The vitest alias
-// substitutes the same module at test time, so runtime is identical.
 import {
-  Vault as MockVault,
   installRequestFaultInjector,
-  recordedNotices,
-  clearRecordedNotices,
   type FakeResponse,
   type RequestFaultInjector,
 } from "../../mock-obsidian";
-import SyncManager, {
-  AmbiguousStateInfo,
-  ConflictFile,
-  ConflictResolution,
-} from "../../src/sync-manager";
-import Logger from "../../src/logger";
-import { GitHubSyncSettings, DEFAULT_SETTINGS } from "../../src/settings/settings";
 
 // ----------------------------------------------------------------------------
 // Env access — two distinct setups by design:
@@ -544,9 +527,9 @@ export async function createBranchFromHead(
 
 /**
  * Make sure the int-test repo has at least one commit on default
- * branch. If it doesn't, run a one-shot SyncManager.sync() against
- * default branch with an empty vault — that hits the bootstrap path
- * and leaves a {.gitignore + manifest} commit behind. Subsequent
+ * branch. If it doesn't, drop a `.gitkeep` via the GitHub Contents
+ * API — same effect as the legacy SyncManager bootstrap, without
+ * dragging the legacy engine into the test fixture. Subsequent
  * tests use createBranchFromHead off this baseline.
  *
  * Cheap when already non-bare: a single /branches probe.
@@ -556,24 +539,14 @@ export async function ensureRepoNotBare(
 ): Promise<void> {
   const branches = await listAllBranches(env);
   if (branches.length > 0) return;
-
-  // Bootstrap default branch via the plugin itself. We use the same
-  // SyncManager code path users hit, which means baseline always
-  // matches what a real first-time install produces.
-  const { token, owner, repo } = env;
   const defaultBranch = await getDefaultBranchName(env);
-  // Spin up a throw-away client targeting default branch.
-  const client = createClient({
-    branch: defaultBranch,
-    deviceName: "int-test-baseline",
+  await writeRemoteFile(
+    defaultBranch,
+    ".gitkeep",
+    "",
+    "Initial commit (int-test baseline)",
     env,
-  });
-  try {
-    await client.sync.loadMetadata();
-    await client.sync.sync(); // bootstrap path
-  } finally {
-    client.cleanup();
-  }
+  );
 }
 
 /** Returns ALL branches on the repo (not filtered by prefix). */
@@ -599,199 +572,12 @@ async function getDefaultBranchName(env: RepoEnv): Promise<string> {
   return res.json.default_branch as string;
 }
 
-// ----------------------------------------------------------------------------
-// Test client factory: tempdir vault + SyncManager wired up
-// ----------------------------------------------------------------------------
-
-export interface TestClient {
-  readonly vault: ObsidianVault;
-  readonly vaultPath: string;
-  readonly sync: SyncManager;
-  readonly branch: string;
-  readonly settings: GitHubSyncSettings;
-  cleanup(): void;
-}
-
-export interface ClientOptions {
-  /** Branch on the test repo. */
-  branch: string;
-  /** Per-device label for commit messages and to differentiate clients. */
-  deviceName?: string;
-  /** Toggle Sync configs (configDir/* under syncConfigDir). Defaults to true. */
-  syncConfigDir?: boolean;
-  /** Override the conflict-handling strategy. Defaults to 'overwriteLocal'. */
-  conflictHandling?: GitHubSyncSettings["conflictHandling"];
-  /**
-   * Override which (token, owner, repo) the SyncManager talks to.
-   * Defaults to the main fine-grained env. Bootstrap tests pass
-   * requireBootstrapEnv() so traffic goes to the public test repo.
-   */
-  env?: RepoEnv;
-  /**
-   * Stub for ambiguous-state callback. Defaults to throwing — most
-   * tests should set up state so the modal never fires; if you expect
-   * it to fire, pass a stub explicitly.
-   */
-  onAmbiguous?: (info: AmbiguousStateInfo) => Promise<
-    "overwrite-local" | "overwrite-remote" | "cancel"
-  >;
-  /** Stub for text-conflict callback (rare in atomic-resolution tests). */
-  onConflicts?: (conflicts: ConflictFile[]) => Promise<ConflictResolution[]>;
-  /** Enable on-disk logging so a test can dump it on failure. */
-  enableLogging?: boolean;
-  /**
-   * Reuse an existing vault directory instead of creating a fresh
-   * tempdir. Used by tests that simulate "plugin reload" by
-   * standing up a second SyncManager against the vault the first
-   * one already populated (E1).
-   */
-  vaultPath?: string;
-}
-
-/**
- * Spin up a client: create a temp vault directory, wire a SyncManager
- * targeting the given branch on the configured test repo. Returns a
- * cleanup() that removes the tempdir.
- */
-export function createClient(opts: ClientOptions): TestClient {
-  const { token, owner, repo } = opts.env ?? requireEnv();
-  // Track whether we own the vault dir so cleanup() doesn't wipe a
-  // path the caller passed in (E1 reuses a populated vault across
-  // simulated plugin reloads).
-  const ownsVaultPath = opts.vaultPath === undefined;
-  const vaultPath =
-    opts.vaultPath ??
-    mkdtempSync(path.join(os.tmpdir(), "github-gitless-sync-int-"));
-  // Cast to ObsidianVault: SyncManager's constructor signature uses
-  // the real Obsidian type, but the mock implements the same shape
-  // (read/write/list/exists/mkdir/remove/stat/append/readBinary/...).
-  const vault = new MockVault(vaultPath) as unknown as ObsidianVault;
-
-  const settings: GitHubSyncSettings = {
-    ...DEFAULT_SETTINGS,
-    githubToken: token,
-    githubOwner: owner,
-    githubRepo: repo,
-    githubBranch: opts.branch,
-    syncConfigDir: opts.syncConfigDir ?? true,
-    conflictHandling: opts.conflictHandling ?? "overwriteLocal",
-    deviceName: opts.deviceName ?? "test-client",
-    enableLogging: opts.enableLogging ?? false,
-    syncStrategy: "manual",
-    showStatusBarItem: false,
-    showSyncRibbonButton: false,
-    showConflictsRibbonButton: false,
-  };
-
-  const logger = new Logger(vault, opts.enableLogging ?? false);
-  // Logger.init creates the log file; for tests we skip by default —
-  // no logging means the file is never written, which means it never
-  // shows up in analyzeLocalState's walk to confuse "empty vault"
-  // detection. Tests can opt in via enableLogging for debugging.
-
-  const onConflicts =
-    opts.onConflicts ??
-    (async () => {
-      throw new Error(
-        "Test text-conflict callback fired but none was provided.",
-      );
-    });
-  const onAmbiguous =
-    opts.onAmbiguous ??
-    (async () => {
-      throw new Error(
-        "Test ambiguous-state callback fired but none was provided.",
-      );
-    });
-
-  const sync = new SyncManager(
-    vault,
-    settings,
-    onConflicts,
-    logger,
-    onAmbiguous,
-  );
-
-  return {
-    vault,
-    vaultPath,
-    sync,
-    branch: opts.branch,
-    settings,
-    cleanup() {
-      if (!ownsVaultPath) return;
-      try {
-        rmSync(vaultPath, { recursive: true, force: true });
-      } catch {}
-    },
-  };
-}
-
-// ----------------------------------------------------------------------------
-// Vault content helpers (write/read/exists relative to vault root)
-// ----------------------------------------------------------------------------
-
-export async function writeVaultFile(
-  vault: ObsidianVault,
-  relPath: string,
-  content: string,
-): Promise<void> {
-  await vault.adapter.write(relPath, content);
-}
-
-export async function readVaultFile(
-  vault: ObsidianVault,
-  relPath: string,
-): Promise<string> {
-  return vault.adapter.read(relPath);
-}
-
-export async function vaultFileExists(
-  vault: ObsidianVault,
-  relPath: string,
-): Promise<boolean> {
-  return vault.adapter.exists(relPath);
-}
-
-// ----------------------------------------------------------------------------
-// Notice capture: SyncManager.sync() catches errors and surfaces them
-// only via Notice. Tests need to call syncAndAssertNoErrors instead of
-// raw sync() so a failed sync doesn't look like success.
-// ----------------------------------------------------------------------------
-
-/**
- * Run sync(), then assert no error notice was shown. Throws with the
- * captured notices on failure so the assertion message tells you
- * exactly what went wrong upstream (typically a GitHub API error).
- */
-export async function syncAndAssertNoErrors(
-  client: TestClient,
-): Promise<void> {
-  clearRecordedNotices();
-  await client.sync.sync();
-  const errors = recordedNotices
-    .map((n) => n.message)
-    .filter((m) => m.startsWith("Error syncing"));
-  if (errors.length > 0) {
-    throw new Error(
-      `sync() reported errors via Notice:\n  ${errors.join("\n  ")}`,
-    );
-  }
-}
-
-/**
- * Same, but for explicit "I expect this sync to fail" tests. Returns
- * the error messages so the test can assert on them.
- */
-export async function syncAndCollectErrors(
-  client: TestClient,
-): Promise<string[]> {
-  clearRecordedNotices();
-  await client.sync.sync();
-  return recordedNotices
-    .map((n) => n.message)
-    .filter((m) => m.startsWith("Error syncing"));
-}
+// Legacy SyncManager-based TestClient + createClient + sync wrappers
+// were here before the Etap 7 cutover. Sync2 tests instead use
+// `tests/integration/scenarios/sync2/helpers.ts` → createSync2Client
+// and sync2AllAndAssertNoErrors. Vault content helpers (writeVault…)
+// are unused by sync2 tests — they hit fs directly to keep the test
+// fixture independent of Obsidian's adapter quirks.
 
 // ----------------------------------------------------------------------------
 // Fault injection — re-exports the mock-obsidian primitive so tests
@@ -866,27 +652,3 @@ export function respondForFirstN(
   };
 }
 
-/**
- * Walks the vault and returns all file paths. Used to assert "vault
- * contains exactly these files". Skips configDir contents by default
- * because Obsidian's own config noise isn't what tests care about.
- */
-export async function listVaultFiles(
-  vault: ObsidianVault,
-  opts: { includeConfigDir?: boolean } = {},
-): Promise<string[]> {
-  const all: string[] = [];
-  const folders = [vault.getRoot().path];
-  while (folders.length > 0) {
-    const folder = folders.pop();
-    if (folder === undefined) continue;
-    const res = await vault.adapter.list(folder);
-    all.push(...res.files);
-    folders.push(...res.folders);
-  }
-  // Strip the absolute root prefix to keep paths relative to vault.
-  const root = vault.getRoot().path;
-  const rel = all.map((p) => (p.startsWith(root + "/") ? p.slice(root.length + 1) : p));
-  if (opts.includeConfigDir) return rel;
-  return rel.filter((p) => !p.startsWith(`${vault.configDir}/`));
-}

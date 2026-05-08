@@ -118,13 +118,13 @@ describe.skipIf(!integrationEnabled())(
         await writeRemoteFile(
           branch,
           "shared/note.md",
-          "shared content",
+          "shared content\n",
           "[web] add",
         );
         await client.vault.adapter.mkdir("shared");
         await client.vault.adapter.write(
           "shared/note.md",
-          "shared content",
+          "shared content\n",
         );
         await client.vault.adapter.write(".gitignore", "shared/\n");
         await sync2AllAndAssertNoErrors(client);
@@ -141,7 +141,7 @@ describe.skipIf(!integrationEnabled())(
             path.join(client.vaultPath, "shared/note.md"),
             "utf8",
           ),
-        ).toBe("shared content");
+        ).toBe("shared content\n");
       },
       120_000,
     );
@@ -248,7 +248,7 @@ describe.skipIf(!integrationEnabled())(
         await client.vault.adapter.mkdir("drafts");
         await client.vault.adapter.write(
           "drafts/idea.md",
-          "private idea",
+          "private idea\n",
         );
         await sync2AllAndAssertNoErrors(client);
         expect(await listRemoteFiles(branch)).not.toContain(
@@ -261,7 +261,7 @@ describe.skipIf(!integrationEnabled())(
 
         expect(await listRemoteFiles(branch)).toContain("drafts/idea.md");
         expect(await readRemoteFile(branch, "drafts/idea.md")).toBe(
-          "private idea",
+          "private idea\n",
         );
       },
       90_000,
@@ -301,7 +301,7 @@ describe.skipIf(!integrationEnabled())(
 
         await client.vault.adapter.write(".gitignore", "archive/\n");
         await client.vault.adapter.mkdir("drafts");
-        await client.vault.adapter.write("drafts/note.md", "content");
+        await client.vault.adapter.write("drafts/note.md", "content\n");
         await sync2AllAndAssertNoErrors(client);
         expect(await listRemoteFiles(branch)).toContain("drafts/note.md");
 
@@ -338,7 +338,7 @@ describe.skipIf(!integrationEnabled())(
         await client.vault.adapter.mkdir("archive");
         await client.vault.adapter.write(
           "archive/note.md",
-          "from-archive",
+          "from-archive\n",
         );
         await sync2AllAndAssertNoErrors(client);
         expect(await listRemoteFiles(branch)).not.toContain(
@@ -349,14 +349,14 @@ describe.skipIf(!integrationEnabled())(
         await client.vault.adapter.mkdir("drafts");
         await client.vault.adapter.write(
           "drafts/note.md",
-          "from-archive",
+          "from-archive\n",
         );
         await client.vault.adapter.remove("archive/note.md");
         await sync2AllAndAssertNoErrors(client);
 
         expect(await listRemoteFiles(branch)).toContain("drafts/note.md");
         expect(await readRemoteFile(branch, "drafts/note.md")).toBe(
-          "from-archive",
+          "from-archive\n",
         );
       },
       120_000,
@@ -371,12 +371,12 @@ describe.skipIf(!integrationEnabled())(
         await sync2AllAndAssertNoErrors(client);
 
         await client.vault.adapter.mkdir("drafts");
-        await client.vault.adapter.write("drafts/a.md", "content");
+        await client.vault.adapter.write("drafts/a.md", "content\n");
         await sync2AllAndAssertNoErrors(client);
         expect(await listRemoteFiles(branch)).toContain("drafts/a.md");
 
         // Rename a.md → b.md within the syncable zone.
-        await client.vault.adapter.write("drafts/b.md", "content");
+        await client.vault.adapter.write("drafts/b.md", "content\n");
         await client.vault.adapter.remove("drafts/a.md");
         await sync2AllAndAssertNoErrors(client);
 
@@ -397,12 +397,12 @@ describe.skipIf(!integrationEnabled())(
 
         await client.vault.adapter.write(".gitignore", "archive/\n");
         await client.vault.adapter.mkdir("drafts");
-        await client.vault.adapter.write("drafts/note.md", "content");
+        await client.vault.adapter.write("drafts/note.md", "content\n");
         await sync2AllAndAssertNoErrors(client);
 
         // Rename into ignored zone.
         await client.vault.adapter.mkdir("archive");
-        await client.vault.adapter.write("archive/note.md", "content");
+        await client.vault.adapter.write("archive/note.md", "content\n");
         await client.vault.adapter.remove("drafts/note.md");
         await sync2AllAndAssertNoErrors(client);
         expect(await listRemoteFiles(branch)).not.toContain(
@@ -413,7 +413,7 @@ describe.skipIf(!integrationEnabled())(
         );
 
         // Rename back into syncable zone.
-        await client.vault.adapter.write("drafts/note.md", "content");
+        await client.vault.adapter.write("drafts/note.md", "content\n");
         await client.vault.adapter.remove("archive/note.md");
         await sync2AllAndAssertNoErrors(client);
         expect(await listRemoteFiles(branch)).toContain("drafts/note.md");
