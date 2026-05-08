@@ -316,6 +316,7 @@ export default class GitHubSyncPlugin extends Plugin {
         writeResolved: (path, content) =>
           this.app.vault.adapter.write(path, content),
         onConflictResolved: () => this.refreshConflictStatusBar(),
+        oursLabel: deviceLabel,
       });
       return view;
     });

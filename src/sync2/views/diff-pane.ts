@@ -98,6 +98,16 @@ export class DiffPane {
     private readonly props: DiffPaneProps,
   ) {
     this.container = parent.createDiv({ cls: "sync2-diff-pane" });
+    // Vertical flex layout so header / merge body / footer stack
+    // top-to-bottom and the merge view (the only flex: 1 child) eats
+    // all the remaining height. Without this the body collapses to
+    // its CodeMirror auto-height (≈ content rows × line height) and
+    // when the parent is large the editor becomes a thin strip — or
+    // invisible if content is empty.
+    this.container.style.height = "100%";
+    this.container.style.display = "flex";
+    this.container.style.flexDirection = "column";
+    this.container.style.minHeight = "0";
     this.currentOurs = props.oursText;
     this.currentTheirs = props.theirsText;
     this.render();
@@ -241,6 +251,15 @@ export class DiffPane {
     }
   }
 
+  // CM6 editors auto-size to content height by default, so without a
+  // theme telling them to fill the parent they collapse on empty /
+  // short docs. Apply at the per-editor level so it's effective for
+  // both halves of the MergeView and the unified single-editor.
+  private fillParentTheme = EditorView.theme({
+    "&": { height: "100%" },
+    ".cm-scroller": { overflow: "auto" },
+  });
+
   private renderSideBySide(): void {
     const isMd = this.props.path.endsWith(".md");
     const langExt = isMd ? [markdown()] : [];
@@ -263,6 +282,7 @@ export class DiffPane {
       a: {
         doc: this.currentTheirs,
         extensions: [
+          this.fillParentTheme,
           lineNumbers(),
           ...langExt,
           EditorState.readOnly.of(this.props.theirsReadOnly === true),
@@ -283,6 +303,7 @@ export class DiffPane {
       b: {
         doc: this.currentOurs,
         extensions: [
+          this.fillParentTheme,
           lineNumbers(),
           ...langExt,
           // Keymaps live on the editable side. Alt-n/Shift-Alt-N
@@ -303,6 +324,14 @@ export class DiffPane {
       // replaces them with the three-button bar (Take Theirs / Both /
       // Take Ours).
     });
+    // Pin the merge wrapper into the flex column so it eats the
+    // remaining height after header + footer. Without this CM6's
+    // .cm-mergeView is a non-flex block and the inner editors stay
+    // at their auto-content height (= 0 for empty docs, tiny for
+    // short ones), leaving a blank pane below the header.
+    view.dom.style.flex = "1";
+    view.dom.style.minHeight = "0";
+    view.dom.style.overflow = "hidden";
     this.view = view;
   }
 
@@ -352,6 +381,7 @@ export class DiffPane {
     const state = EditorState.create({
       doc: this.currentOurs,
       extensions: [
+        this.fillParentTheme,
         lineNumbers(),
         ...langExt,
         unifiedMergeView({
@@ -365,7 +395,11 @@ export class DiffPane {
         }),
       ],
     });
-    this.view = new EditorView({ state, parent: this.container });
+    const view = new EditorView({ state, parent: this.container });
+    view.dom.style.flex = "1";
+    view.dom.style.minHeight = "0";
+    view.dom.style.overflow = "hidden";
+    this.view = view;
   }
 
   private notifyChange(): void {

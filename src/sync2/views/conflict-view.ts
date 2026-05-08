@@ -45,6 +45,11 @@ export interface ConflictViewDeps {
   // when sync2 owns the write; here the user already produced the
   // final form via the diff editor, so we pass through.
   writeResolved(vaultPath: string, content: string): Promise<void>;
+  // Local device's display label, shown above the OURS pane in the
+  // diff editor. Sourced from settings.deviceLabel; "Obsidian" when
+  // the user hasn't customised it. Falls back to "Obsidian" if the
+  // dep is omitted at construction.
+  oursLabel?: string;
 }
 
 export class ConflictView extends ItemView {
@@ -184,9 +189,19 @@ export class ConflictView extends ItemView {
       }
     }
 
-    // Auto-open the diff if applicable (and the user isn't already
-    // mid-resolve in another pane).
-    if (this.currentDiff !== null) return;
+    // Auto-open the diff if applicable. Two guards against recursion:
+    //
+    //   - currentDiff !== null: the DiffPane is fully constructed, so
+    //     the user is mid-resolve and a background refresh shouldn't
+    //     swap the pane underneath them.
+    //   - selectedRecordId !== null: openDiffFor has been called and
+    //     IS in flight (selectedRecordId is set before it awaits
+    //     readOurs/readTheirs). Without this guard, openDiffFor's own
+    //     internal refreshList() call would re-enter the auto-open
+    //     branch during the await gap, fire a second openDiffFor on
+    //     the same record, and the two parallel constructions would
+    //     trample each other — header rendered, MergeView empty.
+    if (this.currentDiff !== null || this.selectedRecordId !== null) return;
     let toOpen: ConflictRecord | undefined;
     if (focusPath) {
       const forPath = this.deps.conflictStore.forPath(focusPath);
@@ -227,6 +242,15 @@ export class ConflictView extends ItemView {
       path: record.vaultPath,
       oursText: ours,
       theirsText: theirs,
+      oursLabel: this.deps.oursLabel ?? "Obsidian",
+      // theirsLabel: the GitHub-side author parsed from the commit
+      // message. Falls back to "GitHub" when the record's label is
+      // the UNKNOWN_DEVICE_LABEL sentinel — that reads more naturally
+      // above the foreign pane than literally "unknown".
+      theirsLabel:
+        record.deviceLabel === "unknown"
+          ? "GitHub"
+          : `GitHub (${record.deviceLabel})`,
       onByteEqual: async (finalText) => {
         if (!this.deps) return;
         // Write the resolved content to ours, drop the conflict
