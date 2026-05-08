@@ -52,6 +52,16 @@ export class ConflictView extends ItemView {
   private listEl: HTMLElement | null = null;
   private paneEl: HTMLElement | null = null;
   private currentDiff: DiffPane | null = null;
+
+  // Read-only accessor for the live DiffPane (or null when the user
+  // hasn't selected a conflict yet). main.ts reaches in here from
+  // the Obsidian command-palette wrappers to drive nextChunk /
+  // applyAtCursor — same operations the keymap inside the editor
+  // performs, but reachable from vim-mode and other external
+  // bindings.
+  getCurrentDiff(): DiffPane | null {
+    return this.currentDiff;
+  }
   private selectedRecordId: string | null = null;
 
   constructor(leaf: WorkspaceLeaf) {

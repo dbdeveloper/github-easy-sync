@@ -27,6 +27,7 @@ import {
   ConflictView,
   VIEW_TYPE_SYNC2_CONFLICT,
 } from "./sync2/views/conflict-view";
+import { DiffPane } from "./sync2/views/diff-pane";
 import { ConflictStatusBar } from "./sync2/views/conflict-status-bar";
 import ConflictStore from "./sync2/conflict-store";
 import { mergeIntoOne } from "./sync2/conflict-merge-all";
@@ -118,6 +119,62 @@ export default class GitHubSyncPlugin extends Plugin {
       name: "Open sync conflicts",
       icon: "merge",
       callback: () => void this.openConflictView(),
+    });
+
+    // Conflict-view chunk commands. Same operations the in-editor
+    // Alt-N / Alt-1/2/3 keymap performs — exposed here as Obsidian
+    // commands so they can be reassigned from the hotkey panel and
+    // mapped through vim-mode / Commander / other binding plugins.
+    // checkCallback returns false when the active leaf isn't a
+    // ConflictView, which removes the entry from the command palette
+    // in the wrong context (no false promises).
+    this.registerConflictChunkCommand(
+      "conflict-next-chunk",
+      "Conflict view: next chunk",
+      (diff) => diff.nextChunk(),
+    );
+    this.registerConflictChunkCommand(
+      "conflict-prev-chunk",
+      "Conflict view: previous chunk",
+      (diff) => diff.previousChunk(),
+    );
+    this.registerConflictChunkCommand(
+      "conflict-take-theirs",
+      "Conflict view: take chunk from GitHub (theirs)",
+      (diff) => diff.applyAtCursor("theirs"),
+    );
+    this.registerConflictChunkCommand(
+      "conflict-take-both",
+      "Conflict view: take chunk as both (markdown blockquote)",
+      (diff) => diff.applyAtCursor("both"),
+    );
+    this.registerConflictChunkCommand(
+      "conflict-take-ours",
+      "Conflict view: take chunk from this device (ours)",
+      (diff) => diff.applyAtCursor("ours"),
+    );
+  }
+
+  // Helper: register an Obsidian command that targets the active
+  // ConflictView's currently-open DiffPane. Uses checkCallback so the
+  // command is hidden from the palette unless the precondition holds
+  // (active leaf IS a ConflictView with a DiffPane open).
+  private registerConflictChunkCommand(
+    id: string,
+    name: string,
+    run: (diff: DiffPane) => boolean,
+  ): void {
+    this.addCommand({
+      id,
+      name,
+      checkCallback: (checking: boolean): boolean => {
+        const view = this.app.workspace.getActiveViewOfType(ConflictView);
+        const diff = view?.getCurrentDiff();
+        if (!diff) return false;
+        if (checking) return true;
+        run(diff);
+        return true;
+      },
     });
   }
 

@@ -2,10 +2,12 @@ import { MergeView, unifiedMergeView } from "@codemirror/merge";
 import { EditorState } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
 import { markdown } from "@codemirror/lang-markdown";
+import { goToNextChunk, goToPreviousChunk } from "@codemirror/merge";
 import {
   applyAction,
   chunkActions,
   chunkActionKeymap,
+  chunkAtCursor,
   chunkCount,
   chunkNavKeymap,
   ChunkAction,
@@ -110,6 +112,39 @@ export class DiffPane {
       theirs: this.currentTheirs,
       bytesEqual: this.currentOurs === this.currentTheirs,
     };
+  }
+
+  // ── public command surface ──────────────────────────────────────────
+  // The same operations the Alt-N / Alt-1/2/3 keymaps perform inside
+  // the editor's keymap scope, exposed as plain methods so main.ts
+  // can wire them as Obsidian commands. That makes them assignable
+  // through Obsidian's hotkey panel and reachable from external
+  // mappings (vim-mode, Commander, etc.). All four return `true` on
+  // a successful invocation, `false` if the precondition wasn't met
+  // (no merge view, cursor not in a chunk, etc.).
+
+  nextChunk(): boolean {
+    if (!(this.view instanceof MergeView)) return false;
+    return goToNextChunk(this.view.b);
+  }
+
+  previousChunk(): boolean {
+    if (!(this.view instanceof MergeView)) return false;
+    return goToPreviousChunk(this.view.b);
+  }
+
+  // Apply theirs/ours/both to the chunk under the cursor in the `b`
+  // (ours/device) editor. Mirrors the keymap binding's semantics —
+  // including the markdown-only restriction on `both` (returns
+  // false for non-markdown files so callers can show a Notice if
+  // they want).
+  applyAtCursor(action: ChunkAction): boolean {
+    if (!(this.view instanceof MergeView)) return false;
+    if (action === "both" && !this.isMarkdownPath()) return false;
+    const idx = chunkAtCursor(this.view.b.state, "b");
+    if (idx === null) return false;
+    this.handleChunkAction(idx, action);
+    return true;
   }
 
   // Tear down all CM views and detach observers. Idempotent.

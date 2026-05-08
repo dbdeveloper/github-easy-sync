@@ -220,8 +220,12 @@ export function chunkCount(state: EditorState): number {
 // Find the chunk containing the cursor's main head, looked up on
 // either the "a" or "b" side of the merge view. Returns null if the
 // cursor isn't inside any diverging chunk — keymap commands then
-// no-op rather than picking the nearest chunk arbitrarily.
-function chunkAtCursor(
+// no-op rather than picking the nearest chunk arbitrarily. Exported
+// because DiffPane reuses the same lookup for the public
+// applyAtCursor() method that backs the Obsidian command-palette
+// entries (so vim-mode bindings can fire the same actions from
+// outside the editor's keymap scope).
+export function chunkAtCursor(
   state: EditorState,
   side: "a" | "b",
 ): number | null {
