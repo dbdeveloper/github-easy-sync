@@ -124,12 +124,25 @@ export class ConflictView extends ItemView {
   // Re-render the left-side list against current ConflictStore state.
   // Called: on view open, when setDeps fires, and externally from
   // main.ts after sibling-delete or auto-finalize closes a record.
-  refreshList(): void {
+  //
+  // Auto-open rules so the user lands on the diff editor without
+  // hunting for a record to click — especially after "Resolve now"
+  // on the conflict modal:
+  //   1. focusPath given AND has any record → open the latest record
+  //      for that path. main.ts passes args.path here when the user
+  //      picked "Resolve now" so the diff appears right away.
+  //   2. otherwise, exactly 1 record total → open it. Common case
+  //      after a single conflict; saves a click.
+  //   3. otherwise (multiple records, no focus): show list only.
+  // Already-open diff is left alone — users mid-resolve don't get
+  // their pane swapped underneath them by a background refresh.
+  refreshList(focusPath?: string): void {
     if (!this.listEl || !this.deps) return;
     this.listEl.empty();
 
-    const grouped = groupByVaultPath(this.deps.conflictStore.list());
-    const totalCount = this.deps.conflictStore.list().length;
+    const all = this.deps.conflictStore.list();
+    const grouped = groupByVaultPath(all);
+    const totalCount = all.length;
 
     this.listEl.createEl("h4", { text: `Conflicts (${totalCount})` });
     if (totalCount === 0) {
@@ -169,6 +182,21 @@ export class ConflictView extends ItemView {
           void this.openDiffFor(r);
         });
       }
+    }
+
+    // Auto-open the diff if applicable (and the user isn't already
+    // mid-resolve in another pane).
+    if (this.currentDiff !== null) return;
+    let toOpen: ConflictRecord | undefined;
+    if (focusPath) {
+      const forPath = this.deps.conflictStore.forPath(focusPath);
+      if (forPath.length > 0) toOpen = forPath[forPath.length - 1];
+    }
+    if (!toOpen && totalCount === 1) {
+      toOpen = all[0];
+    }
+    if (toOpen) {
+      void this.openDiffFor(toOpen);
     }
   }
 

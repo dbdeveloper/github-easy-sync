@@ -65,6 +65,10 @@ export default class GitHubSyncPlugin extends Plugin {
   // sync(); set by the modal flow.
   private suppressConflictModals = false;
   private openConflictViewAfterSync = false;
+  // Vault path of the file the user picked "Resolve now" on, so the
+  // post-sync openConflictView call lands the user directly on that
+  // file's diff instead of just the list.
+  private resolveNowPath: string | null = null;
 
   // Auto-sync timer id (Window.setInterval handle).
   private syncIntervalId: number | null = null;
@@ -435,13 +439,16 @@ export default class GitHubSyncPlugin extends Plugin {
     // previous "Defer all" choice doesn't carry over.
     this.suppressConflictModals = false;
     this.openConflictViewAfterSync = false;
+    this.resolveNowPath = null;
   }
 
   private afterSync(): void {
     this.refreshConflictStatusBar();
     if (this.openConflictViewAfterSync) {
       this.openConflictViewAfterSync = false;
-      void this.openConflictView();
+      const focus = this.resolveNowPath;
+      this.resolveNowPath = null;
+      void this.openConflictView(focus ?? undefined);
     }
   }
 
@@ -477,7 +484,11 @@ export default class GitHubSyncPlugin extends Plugin {
     if (choice === "resolve-now") {
       // Defer + open the conflict view tab so the user lands on the
       // diff editor as soon as sync finishes its housekeeping.
+      // resolveNowPath tells the post-sync openConflictView to
+      // auto-select THIS file's diff in the view (otherwise the
+      // user lands on an empty list-view and has to click).
       this.openConflictViewAfterSync = true;
+      this.resolveNowPath = args.path;
       return { kind: "deferred" };
     }
     // merge-into-one — markdown only. The modal hides the button
@@ -497,7 +508,12 @@ export default class GitHubSyncPlugin extends Plugin {
 
   // ── conflict view ───────────────────────────────────────────────────
 
-  async openConflictView(): Promise<void> {
+  // Open / focus the Conflict View leaf. `focusPath` (when given)
+  // tells the view to auto-open the diff for that file rather than
+  // landing the user on an empty right pane — used after the user
+  // picks "Resolve now" on the conflict modal so they go straight
+  // to merging.
+  async openConflictView(focusPath?: string): Promise<void> {
     const leaves = this.app.workspace.getLeavesOfType(
       VIEW_TYPE_SYNC2_CONFLICT,
     );
@@ -513,7 +529,7 @@ export default class GitHubSyncPlugin extends Plugin {
     }
     this.app.workspace.revealLeaf(leaf);
     const view = leaf.view;
-    if (view instanceof ConflictView) view.refreshList();
+    if (view instanceof ConflictView) view.refreshList(focusPath);
   }
 
   // ── status bar ──────────────────────────────────────────────────────
