@@ -4,9 +4,17 @@ import { CommitMessagePlaceholders } from "./types";
 // substituted only if the matching field is supplied; unknown braces
 // are left untouched so users can include literal `{` in their text.
 //
-//   {date}     ISO timestamp, e.g. "2026-05-03T09:38:23Z"
+//   {date}     YYYY-MM-DD UTC, e.g. "2026-05-03"
+//   {time}     HH:MM:SS.ccc UTC (ms-precision), e.g. "09:38:23.123"
 //   {filename} basename of a single-file action, e.g. "note.md"
 //   {path}     full vault-relative path, e.g. "Folder/note.md"
+//
+// {date} and {time} both come from the same Date in placeholders.date
+// — they're two views of the same instant, not independent values.
+// Templates may use either, both, or neither. Defaults use both so
+// out-of-the-box messages keep ms-precision and stay unique across
+// multi-device syncs without forcing the user to remember to add
+// {time}.
 //
 // deviceLabel is NOT a template placeholder — it's appended in a fixed
 // trailing position by appendDeviceSuffix(), so any commit message
@@ -15,8 +23,9 @@ import { CommitMessagePlaceholders } from "./types";
 // how the user customized their template, and prevents users from
 // accidentally dropping the device tag while editing the template.
 
-export const DEFAULT_COMMIT_MESSAGE_ALL = "Sync at {date}";
-export const DEFAULT_COMMIT_MESSAGE_FILE = "Update {filename} at {date}";
+export const DEFAULT_COMMIT_MESSAGE_ALL = "Sync at {date} {time}";
+export const DEFAULT_COMMIT_MESSAGE_FILE =
+  "Update {filename} at {date} {time}";
 
 // Sentinel used wherever sync2 needs a stand-in for an unknown device
 // — both at READ time (parseDeviceSuffix on a commit with no trailing
@@ -31,7 +40,11 @@ export function applyTemplate(
 ): string {
   let out = template;
   if (placeholders.date !== undefined) {
-    out = out.replace(/\{date\}/g, formatDate(placeholders.date));
+    // {date} and {time} both substitute from the same Date — they're
+    // two views of the same instant. Templates may use either, both,
+    // or neither.
+    out = out.replace(/\{date\}/g, formatDateOnly(placeholders.date));
+    out = out.replace(/\{time\}/g, formatTimeOnly(placeholders.date));
   }
   if (placeholders.filename !== undefined) {
     out = out.replace(/\{filename\}/g, placeholders.filename);
@@ -81,14 +94,17 @@ export function parseDeviceSuffix(message: string): string {
   return m ? m[1] : UNKNOWN_DEVICE_LABEL;
 }
 
-function formatDate(d: Date): string {
-  // Full ISO including milliseconds. Two devices syncing within the
-  // same second was previously a real collision risk: same template
-  // + same default deviceLabel ("Obsidian") + second-precision date
-  // gave byte-identical commit messages, indistinguishable in
-  // git log scrolling. Millisecond precision makes the message
-  // effectively unique even when three or more devices commit at
-  // the "same" wall-clock second — sub-millisecond clock alignment
-  // across devices doesn't happen in practice.
-  return d.toISOString();
+// `2026-05-08`. ISO date in UTC. Used by `{date}` placeholder.
+function formatDateOnly(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+// `15:30:00.123`. ISO time without `T` prefix or `Z` suffix, ms-
+// precision. Used by `{time}` placeholder. Together with `{date}`
+// reproduces the full ISO timestamp byte-for-byte (just swap the
+// space separator for `T` and append `Z`). Ms-precision keeps the
+// message unique across multi-device same-second syncs even when
+// the user's template is just "{date} {time}".
+function formatTimeOnly(d: Date): string {
+  return d.toISOString().slice(11, 23);
 }

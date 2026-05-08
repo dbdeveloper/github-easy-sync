@@ -211,9 +211,9 @@ export default class GitHubSyncPlugin extends Plugin {
       invariants,
       configDir: this.app.vault.configDir,
       selfPluginId: manifest.id,
-      commitMessageAll: this.settings.commitMessageAll ?? "Sync at {date}",
+      commitMessageAll: this.settings.commitMessageAll ?? "Sync at {date} {time}",
       commitMessageFile:
-        this.settings.commitMessageFile ?? "Update {filename} at {date}",
+        this.settings.commitMessageFile ?? "Update {filename} at {date} {time}",
       deviceLabel,
       conflictStore,
       onConflict: (args) => this.handleSync2Conflict(args),
@@ -351,7 +351,7 @@ export default class GitHubSyncPlugin extends Plugin {
       return;
     }
     const tpl =
-      this.settings.commitMessageFile ?? "Update {filename} at {date}";
+      this.settings.commitMessageFile ?? "Update {filename} at {date} {time}";
     const filename = path.split("/").pop() ?? path;
     const defaultMsg = applyTemplate(tpl, {
       date: new Date(),

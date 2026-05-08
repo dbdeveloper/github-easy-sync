@@ -356,8 +356,8 @@ function fixture(opts?: {
     logger: silentLogger(),
     configDir: CONFIG_DIR,
     selfPluginId: SELF_PLUGIN_ID,
-    commitMessageAll: "Sync at {date}",
-    commitMessageFile: "Update {filename} at {date}",
+    commitMessageAll: "Sync at {date} {time}",
+    commitMessageFile: "Update {filename} at {date} {time}",
     deviceLabel: "test-device",
     conflictStore: opts?.conflictStore,
     onConflict: opts?.onConflict ?? onConflictDefault,
@@ -457,10 +457,10 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
 
     await f.manager.syncAll();
 
-    // New defaults (Etap 6.5): "Sync at {date}" template + auto-
+    // New defaults (Etap 6.5): "Sync at {date} {time}" template + auto-
     // appended " (deviceLabel)" suffix from appendDeviceSuffix.
     expect(f.client.state.lastCommit?.message).toBe(
-      "Sync at 2026-05-03T09:38:23.000Z (test-device)",
+      "Sync at 2026-05-03 09:38:23.000 (test-device)",
     );
   });
 
@@ -674,10 +674,10 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
 
     const commits = f.client.calls.filter((c) => c.op === "createCommit");
     expect(commits).toHaveLength(1);
-    // Etap 6.5: "Update {filename} at {date}" + " (test-device)"
+    // Etap 6.5: "Update {filename} at {date} {time}" + " (test-device)"
     // suffix appended via appendDeviceSuffix.
     expect((commits[0].args as { message: string }).message).toBe(
-      "Update note.md at 2026-05-03T09:38:23.000Z (test-device)",
+      "Update note.md at 2026-05-03 09:38:23.000 (test-device)",
     );
 
     // Tree contains exactly the one file we asked for.
@@ -1610,8 +1610,8 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
         logger: silentLogger(),
         configDir: CONFIG_DIR,
         selfPluginId: SELF_PLUGIN_ID,
-        commitMessageAll: "Sync at {date}",
-        commitMessageFile: "Update {filename} at {date}",
+        commitMessageAll: "Sync at {date} {time}",
+        commitMessageFile: "Update {filename} at {date} {time}",
         deviceLabel: "test-device",
         conflictStore,
         onConflict: async () => ({ kind: "deferred" }),
@@ -1741,8 +1741,8 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
         logger: silentLogger(),
         configDir: CONFIG_DIR,
         selfPluginId: SELF_PLUGIN_ID,
-        commitMessageAll: "Sync at {date}",
-        commitMessageFile: "Update {filename} at {date}",
+        commitMessageAll: "Sync at {date} {time}",
+        commitMessageFile: "Update {filename} at {date} {time}",
         deviceLabel: "test-device",
         conflictStore,
         onConflict: async () => {
@@ -1808,8 +1808,8 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
         logger: silentLogger(),
         configDir: CONFIG_DIR,
         selfPluginId: SELF_PLUGIN_ID,
-        commitMessageAll: "Sync at {date}",
-        commitMessageFile: "Update {filename} at {date}",
+        commitMessageAll: "Sync at {date} {time}",
+        commitMessageFile: "Update {filename} at {date} {time}",
         deviceLabel: "test-device",
         conflictStore,
         onConflict: async () => {
@@ -1911,8 +1911,8 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
         logger: silentLogger(),
         configDir: CONFIG_DIR,
         selfPluginId: SELF_PLUGIN_ID,
-        commitMessageAll: "Sync at {date}",
-        commitMessageFile: "Update {filename} at {date}",
+        commitMessageAll: "Sync at {date} {time}",
+        commitMessageFile: "Update {filename} at {date} {time}",
         deviceLabel: "test-device",
         conflictStore,
         onConflict: async () => {

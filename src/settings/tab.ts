@@ -215,11 +215,12 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       });
 
     // ── Commit messages ─────────────────────────────────────────────
-    const allDefault = "Sync at {date}";
+    const allDefault = "Sync at {date} {time}";
     const allSetting = new Setting(containerEl)
       .setName("Commit message — full sync")
       .setDesc(
-        "Template used when pushing all local changes. Placeholders: {date}. " +
+        "Template used when pushing all local changes. " +
+          "Placeholders: {date} (YYYY-MM-DD), {time} (HH:MM:SS.ccc). " +
           'A " (deviceLabel)" suffix is always appended automatically.',
       )
       .addText((text) =>
@@ -245,11 +246,13 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     updateAllPreview();
     previews.push(updateAllPreview);
 
-    const fileDefault = "Update {filename} at {date}";
+    const fileDefault = "Update {filename} at {date} {time}";
     const fileSetting = new Setting(containerEl)
       .setName("Commit message — single file")
       .setDesc(
-        "Template used when pushing a single file. Placeholders: {date}, {filename}, {path}. " +
+        "Template used when pushing a single file. " +
+          "Placeholders: {date} (YYYY-MM-DD), {time} (HH:MM:SS.ccc), " +
+          "{filename}, {path}. " +
           'A " (deviceLabel)" suffix is always appended automatically.',
       )
       .addText((text) =>

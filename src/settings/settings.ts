@@ -74,8 +74,8 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   showStatusBarItem: true,
   showSyncRibbonButton: true,
   enableLogging: false,
-  commitMessageAll: "Sync at {date}",
-  commitMessageFile: "Update {filename} at {date}",
+  commitMessageAll: "Sync at {date} {time}",
+  commitMessageFile: "Update {filename} at {date} {time}",
   accumulateOfflineSyncs: false,
   deviceLabel: "Obsidian",
 };

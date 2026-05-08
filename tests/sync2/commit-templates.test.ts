@@ -11,12 +11,40 @@ import {
 describe("applyTemplate", () => {
   const fixedDate = new Date("2026-05-03T09:38:23.123Z");
 
-  it("substitutes {date} as full ISO with milliseconds", () => {
-    // ms-precision disambiguates commits made within the same wall-
-    // clock second across multiple devices (Etap 6.5 multi-device
-    // collision fix).
+  it("substitutes {date} as YYYY-MM-DD UTC", () => {
     expect(applyTemplate("at {date}", { date: fixedDate })).toBe(
-      "at 2026-05-03T09:38:23.123Z",
+      "at 2026-05-03",
+    );
+  });
+
+  it("substitutes {time} as HH:MM:SS.ccc UTC (ms-precision)", () => {
+    expect(applyTemplate("at {time}", { date: fixedDate })).toBe(
+      "at 09:38:23.123",
+    );
+  });
+
+  it("{date} and {time} together reproduce the full ISO instant", () => {
+    // Same source Date drives both placeholders — joining them with
+    // T...Z yields a valid ISO timestamp, byte-equal to .toISOString().
+    const out = applyTemplate("{date}T{time}Z", { date: fixedDate });
+    expect(out).toBe("2026-05-03T09:38:23.123Z");
+    expect(out).toBe(fixedDate.toISOString());
+  });
+
+  it("{time} alone (no {date}) substitutes from placeholders.date", () => {
+    // Both placeholders draw from the same Date — they're not
+    // independent fields. Passing only {time} in the template still
+    // works as long as date is supplied.
+    expect(applyTemplate("at {time}", { date: fixedDate })).toBe(
+      "at 09:38:23.123",
+    );
+  });
+
+  it("multi-device collision: ms-precision in {time} keeps messages unique", () => {
+    const a = new Date("2026-05-03T09:38:23.001Z");
+    const b = new Date("2026-05-03T09:38:23.002Z");
+    expect(applyTemplate("Sync {date} {time}", { date: a })).not.toBe(
+      applyTemplate("Sync {date} {time}", { date: b }),
     );
   });
 
@@ -46,19 +74,19 @@ describe("applyTemplate", () => {
     );
   });
 
-  it("supports the default 'sync all' template with date", () => {
+  it("supports the default 'sync all' template with date + time", () => {
     expect(
       applyTemplate(DEFAULT_COMMIT_MESSAGE_ALL, { date: fixedDate }),
-    ).toBe("Sync at 2026-05-03T09:38:23.123Z");
+    ).toBe("Sync at 2026-05-03 09:38:23.123");
   });
 
-  it("supports the default file template with both placeholders", () => {
+  it("supports the default file template with all placeholders", () => {
     expect(
       applyTemplate(DEFAULT_COMMIT_MESSAGE_FILE, {
         filename: "todo.md",
         date: fixedDate,
       }),
-    ).toBe("Update todo.md at 2026-05-03T09:38:23.123Z");
+    ).toBe("Update todo.md at 2026-05-03 09:38:23.123");
   });
 
   it("returns template unchanged if no placeholders supplied", () => {
@@ -84,7 +112,7 @@ describe("appendDeviceSuffix", () => {
       date: new Date("2026-05-03T09:38:23.123Z"),
     });
     expect(appendDeviceSuffix(base, "Phone")).toBe(
-      "Sync at 2026-05-03T09:38:23.123Z (Phone)",
+      "Sync at 2026-05-03 09:38:23.123 (Phone)",
     );
   });
 
@@ -94,7 +122,7 @@ describe("appendDeviceSuffix", () => {
       date: new Date("2026-05-03T09:38:23.123Z"),
     });
     expect(appendDeviceSuffix(base, "Desktop")).toBe(
-      "Update todo.md at 2026-05-03T09:38:23.123Z (Desktop)",
+      "Update todo.md at 2026-05-03 09:38:23.123 (Desktop)",
     );
   });
 
