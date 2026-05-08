@@ -1,0 +1,239 @@
+import {
+  Decoration,
+  DecorationSet,
+  EditorView,
+  ViewPlugin,
+  ViewUpdate,
+  WidgetType,
+} from "@codemirror/view";
+import { RangeSetBuilder } from "@codemirror/state";
+import { getChunks } from "@codemirror/merge";
+
+// Per-chunk action bar mounted on the THEIRS side of a CM6 MergeView
+// (Etap 6.5 conflict resolver UX). For each diverging chunk, renders
+// a 2- or 3-button block widget directly above the chunk:
+//
+//     ┌──────────────────────────────────────────┐
+//     │ [← GitHub]  [ Both ]  [ Obsidian → ]     │
+//     └──────────────────────────────────────────┘
+//     <chunk text on the THEIRS pane>
+//
+// "Both" is markdown-only — for other text formats the third button
+// would produce invalid syntax (a JSON file with a blockquote-prefixed
+// section is not JSON, etc.) so the bar renders only the two side
+// buttons there.
+//
+// Click semantics (the calling DiffPane provides the actual mutation):
+//   - theirs: both panes converge on a's chunk text. "Take the
+//             remote/GitHub version for this part."
+//   - ours:   both panes converge on b's chunk text. "Keep mine."
+//   - both:   both panes converge on `b's text + > "-prefixed a's
+//             text` — markdown blockquote of theirs appended below
+//             ours.
+//
+// Once a click resolves a chunk, the diff recomputes, the chunk
+// disappears from getChunks(), and the widget is rebuilt without it
+// → buttons vanish naturally.
+
+export type ChunkAction = "ours" | "theirs" | "both";
+
+export interface ChunkActionsConfig {
+  // Which side of the merge view this extension is mounted on.
+  // Decorations attach to chunk.fromA when "a", chunk.fromB when "b".
+  // DiffPane mounts on "a" (theirs/GitHub) so the bar appears once
+  // per chunk above the GitHub-side text — visually anchors the
+  // "incoming" version.
+  side: "a" | "b";
+  // Visible button labels. Match DiffPane's pane headers so the user
+  // mentally connects "click GitHub button" → "this chunk now reads
+  // like the GitHub pane above".
+  oursLabel: string;
+  theirsLabel: string;
+  // Hide the "Both" button for non-markdown files where blockquote
+  // injection would corrupt the format.
+  isMarkdown: boolean;
+  // Click handler. Receives the chunk index (into MergeView.chunks)
+  // plus the action; the receiver mutates BOTH editor docs in
+  // coordinated transactions so the diff converges visibly.
+  onAction(chunkIdx: number, action: ChunkAction): void;
+}
+
+class ChunkActionsWidget extends WidgetType {
+  constructor(
+    private readonly chunkIdx: number,
+    private readonly cfg: ChunkActionsConfig,
+  ) {
+    super();
+  }
+
+  eq(other: WidgetType): boolean {
+    return (
+      other instanceof ChunkActionsWidget &&
+      other.chunkIdx === this.chunkIdx &&
+      other.cfg.oursLabel === this.cfg.oursLabel &&
+      other.cfg.theirsLabel === this.cfg.theirsLabel &&
+      other.cfg.isMarkdown === this.cfg.isMarkdown
+    );
+  }
+
+  toDOM(): HTMLElement {
+    const bar = document.createElement("div");
+    bar.className = "sync2-chunk-actions";
+    bar.style.display = "flex";
+    bar.style.gap = "6px";
+    bar.style.padding = "4px 8px";
+    bar.style.background = "var(--background-secondary)";
+    bar.style.borderTop = "1px solid var(--background-modifier-border)";
+    bar.style.borderBottom = "1px solid var(--background-modifier-border)";
+    bar.style.fontSize = "0.85em";
+
+    const mkBtn = (
+      label: string,
+      action: ChunkAction,
+      cls: string,
+    ): HTMLButtonElement => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.className = `sync2-chunk-btn ${cls}`;
+      b.style.padding = "2px 8px";
+      b.style.cursor = "pointer";
+      b.style.border = "1px solid var(--background-modifier-border)";
+      b.style.borderRadius = "4px";
+      b.style.background = "var(--interactive-normal)";
+      b.style.color = "var(--text-normal)";
+      b.addEventListener("mouseenter", () => {
+        b.style.background = "var(--interactive-hover)";
+      });
+      b.addEventListener("mouseleave", () => {
+        b.style.background = "var(--interactive-normal)";
+      });
+      b.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.cfg.onAction(this.chunkIdx, action);
+      });
+      return b;
+    };
+
+    bar.appendChild(
+      mkBtn(`← ${this.cfg.theirsLabel}`, "theirs", "sync2-chunk-theirs"),
+    );
+    if (this.cfg.isMarkdown) {
+      bar.appendChild(mkBtn("Both", "both", "sync2-chunk-both"));
+    }
+    bar.appendChild(
+      mkBtn(`${this.cfg.oursLabel} →`, "ours", "sync2-chunk-ours"),
+    );
+    return bar;
+  }
+
+  // Allow click handlers inside the widget to fire — CM6 swallows
+  // events from widgets by default.
+  ignoreEvent(): boolean {
+    return false;
+  }
+}
+
+// CM6 ViewPlugin: rebuilds the action-bar decorations on every
+// viewport / doc / config change. Runs in the merge view's `a` (or
+// `b`) editor as a regular plugin extension.
+export function chunkActions(cfg: ChunkActionsConfig) {
+  return ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet;
+      constructor(view: EditorView) {
+        this.decorations = build(view, cfg);
+      }
+      update(update: ViewUpdate) {
+        // Doc changes shift chunk positions; viewport changes mean
+        // freshly-mounted decorations need (re)building. CM6 also
+        // emits an update when the merge state's chunk set changes.
+        if (
+          update.docChanged ||
+          update.viewportChanged ||
+          update.geometryChanged ||
+          chunksChanged(update)
+        ) {
+          this.decorations = build(update.view, cfg);
+        }
+      }
+    },
+    {
+      decorations: (v) => v.decorations,
+    },
+  );
+}
+
+function build(view: EditorView, cfg: ChunkActionsConfig): DecorationSet {
+  const info = getChunks(view.state);
+  if (!info) return Decoration.none;
+  const builder = new RangeSetBuilder<Decoration>();
+  info.chunks.forEach((chunk, i) => {
+    const pos = cfg.side === "a" ? chunk.fromA : chunk.fromB;
+    builder.add(
+      pos,
+      pos,
+      Decoration.widget({
+        widget: new ChunkActionsWidget(i, cfg),
+        side: -1,
+        block: true,
+      }),
+    );
+  });
+  return builder.finish();
+}
+
+// Compare chunk arrays between updates. CM6 doesn't emit a discrete
+// "chunks changed" signal, so we sniff via getChunks state — it's
+// cheap and avoids unnecessary widget rebuilds.
+function chunksChanged(update: ViewUpdate): boolean {
+  const before = getChunks(update.startState);
+  const after = getChunks(update.state);
+  if (before === after) return false;
+  if (!before || !after) return true;
+  if (before.chunks.length !== after.chunks.length) return true;
+  for (let i = 0; i < before.chunks.length; i++) {
+    const a = before.chunks[i];
+    const b = after.chunks[i];
+    if (a.fromA !== b.fromA || a.toA !== b.toA) return true;
+    if (a.fromB !== b.fromB || a.toB !== b.toB) return true;
+  }
+  return false;
+}
+
+// Pure helpers exported for unit-testing the chunk transform logic
+// independently of CM6/DOM. DiffPane uses these inside its action
+// handler when constructing the new pane content.
+
+// Take a chunk's content from one side and produce the replacement
+// strings for both panes such that they end up byte-equal for that
+// chunk. Returns { aText, bText } where aText replaces a[fromA..toA]
+// and bText replaces b[fromB..toB].
+export function applyAction(
+  action: ChunkAction,
+  oursText: string,
+  theirsText: string,
+): { aText: string; bText: string } {
+  if (action === "theirs") {
+    // Pull theirs into ours: both panes get theirs's text.
+    return { aText: theirsText, bText: theirsText };
+  }
+  if (action === "ours") {
+    // Pull ours into theirs: both panes get ours's text.
+    return { aText: oursText, bText: oursText };
+  }
+  // both: ours stays, theirs appended below as markdown blockquote.
+  // Each line of theirs gets `> ` prefix. Empty lines become "> "
+  // (with trailing space) so the blockquote stays unbroken in
+  // markdown preview.
+  const quotedTheirs = theirsText
+    .split("\n")
+    .map((line) => `> ${line}`)
+    .join("\n");
+  // Newline between ours and the blockquote keeps them as separate
+  // markdown blocks. If oursText is empty (rare — chunk was an
+  // insertion-only on theirs side), skip the leading newline.
+  const merged =
+    oursText.length === 0 ? quotedTheirs : `${oursText}\n${quotedTheirs}`;
+  return { aText: merged, bText: merged };
+}

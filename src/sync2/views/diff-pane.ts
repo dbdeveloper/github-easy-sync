@@ -2,6 +2,7 @@ import { MergeView, unifiedMergeView } from "@codemirror/merge";
 import { EditorState } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
 import { markdown } from "@codemirror/lang-markdown";
+import { applyAction, chunkActions, ChunkAction } from "./chunk-actions";
 
 // Reusable diff/merge component (Etap 6.5). Wraps `@codemirror/merge`
 // with two operating modes:
@@ -156,12 +157,21 @@ export class DiffPane {
   private renderSideBySide(): void {
     const isMd = this.props.path.endsWith(".md");
     const langExt = isMd ? [markdown()] : [];
+    const oursLabel = this.props.oursLabel ?? DEFAULT_OURS_LABEL;
+    const theirsLabel = this.props.theirsLabel ?? DEFAULT_THEIRS_LABEL;
     // Pane convention (Etap 6.5): theirs (GitHub) on the LEFT (a),
     // ours (device) on the RIGHT (b). Matches the header labels
     // and the natural reading order "incoming → local". For the
     // file-history viewer (Etap 8) the left pane (a, theirs/GitHub)
     // becomes read-only so the user can browse history without
     // accidentally mutating it.
+    //
+    // The chunkActions extension on `a` renders a [← Theirs] [Both?]
+    // [Ours →] button bar above each diverging chunk; clicks fall
+    // through to handleChunkAction which mutates BOTH editor docs
+    // so the chunk converges and the diff recomputes.
+    const onAction = (idx: number, action: ChunkAction) =>
+      this.handleChunkAction(idx, action);
     const view = new MergeView({
       a: {
         doc: this.currentTheirs,
@@ -169,6 +179,13 @@ export class DiffPane {
           lineNumbers(),
           ...langExt,
           EditorState.readOnly.of(this.props.theirsReadOnly === true),
+          chunkActions({
+            side: "a",
+            oursLabel,
+            theirsLabel,
+            isMarkdown: isMd,
+            onAction,
+          }),
           EditorView.updateListener.of((update) => {
             if (!update.docChanged) return;
             this.currentTheirs = update.state.doc.toString();
@@ -189,15 +206,46 @@ export class DiffPane {
         ],
       },
       parent: this.container,
-      // Per-chunk revert button: `b-to-a` means "revert b to match
-      // a" — i.e. overwrite ours (b) with theirs (a)'s chunk. In
-      // conflict mode that's "take this chunk from GitHub"; in
-      // reference mode (file-history viewer, Etap 8) it's "pull
-      // this old version's chunk into my live file". Same semantics
-      // both ways, so we use the same direction unconditionally.
-      revertControls: "b-to-a",
+      // Built-in revert buttons disabled — our chunk-actions widget
+      // replaces them with the three-button bar (Take Theirs / Both /
+      // Take Ours).
     });
     this.view = view;
+  }
+
+  // Mutate both panes so the chunk at `idx` converges per the
+  // chosen action. CM6 dispatches independent transactions on each
+  // editor; the merge view re-diffs automatically on the next
+  // update tick, so the resolved chunk vanishes from getChunks() and
+  // the corresponding action bar disappears with it.
+  //
+  // Caveat: undo is per-pane (each EditorView has its own history).
+  // A click here writes to both panes; reversing it requires an
+  // undo on each. Acceptable trade-off — the alternative (stitching
+  // a single shared transaction) is awkward in CM6 and we already
+  // accept that ad-hoc edits in either pane bypass the central
+  // action bar.
+  private handleChunkAction(
+    chunkIdx: number,
+    action: ChunkAction,
+  ): void {
+    if (!(this.view instanceof MergeView)) return;
+    const chunks = this.view.chunks;
+    if (chunkIdx >= chunks.length) return;
+    const chunk = chunks[chunkIdx];
+    const a = this.view.a;
+    const b = this.view.b;
+    const theirsText = a.state.doc.sliceString(chunk.fromA, chunk.toA);
+    const oursText = b.state.doc.sliceString(chunk.fromB, chunk.toB);
+    const { aText, bText } = applyAction(action, oursText, theirsText);
+    if (!this.props.theirsReadOnly) {
+      a.dispatch({
+        changes: { from: chunk.fromA, to: chunk.toA, insert: aText },
+      });
+    }
+    b.dispatch({
+      changes: { from: chunk.fromB, to: chunk.toB, insert: bText },
+    });
   }
 
   private renderUnified(): void {
