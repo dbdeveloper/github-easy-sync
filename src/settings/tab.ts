@@ -7,6 +7,10 @@ import {
 } from "obsidian";
 import GitHubSyncPlugin from "src/main";
 import { copyToClipboard } from "src/utils";
+import {
+  applyTemplate,
+  appendDeviceSuffix,
+} from "src/sync2/commit-templates";
 
 // Sync2-only settings tab. Mirrors the shape of GitHubSyncSettings —
 // every input here writes to one field and persists via saveSettings.
@@ -95,6 +99,26 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     // ── Device identity ─────────────────────────────────────────────
     new Setting(containerEl).setName("Sync").setHeading();
 
+    // Both commit-message inputs render a live preview directly
+    // underneath. The preview substitutes example values for each
+    // placeholder and appends the device suffix exactly as the
+    // sync engine would on push, so the user sees on-GitHub shape
+    // as they type. References captured in `previews` so the
+    // device-label input can also nudge them when label changes.
+    const previewSamples = {
+      date: new Date(),
+      filename: "test.md",
+      path: "Notes/test.md",
+    };
+    const previews: Array<() => void> = [];
+    const renderPreview = (template: string): string => {
+      const base = applyTemplate(template, previewSamples);
+      return appendDeviceSuffix(
+        base,
+        this.plugin.settings.deviceLabel ?? "Obsidian",
+      );
+    };
+
     new Setting(containerEl)
       .setName("Device label")
       .setDesc(
@@ -110,6 +134,9 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.deviceLabel = value.trim() || "Obsidian";
             await this.plugin.saveSettings();
+            // Refresh both commit-message previews — the trailing
+            // suffix changed.
+            for (const refresh of previews) refresh();
           }),
       );
 
@@ -193,6 +220,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       });
 
     // ── Commit messages ─────────────────────────────────────────────
+    const allDefault = "Sync at {date}";
     new Setting(containerEl)
       .setName("Commit message — full sync")
       .setDesc(
@@ -201,15 +229,23 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       )
       .addText((text) =>
         text
-          .setPlaceholder("Sync at {date}")
-          .setValue(this.plugin.settings.commitMessageAll ?? "Sync at {date}")
+          .setPlaceholder(allDefault)
+          .setValue(this.plugin.settings.commitMessageAll ?? allDefault)
           .onChange(async (value) => {
-            this.plugin.settings.commitMessageAll =
-              value.trim() || "Sync at {date}";
+            this.plugin.settings.commitMessageAll = value.trim() || allDefault;
             await this.plugin.saveSettings();
+            updateAllPreview();
           }),
       );
+    const allPreview = makePreviewElement(containerEl);
+    const updateAllPreview = (): void => {
+      const tpl = this.plugin.settings.commitMessageAll ?? allDefault;
+      allPreview.setText(`Preview: "${renderPreview(tpl)}"`);
+    };
+    updateAllPreview();
+    previews.push(updateAllPreview);
 
+    const fileDefault = "Update {filename} at {date}";
     new Setting(containerEl)
       .setName("Commit message — single file")
       .setDesc(
@@ -218,17 +254,22 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       )
       .addText((text) =>
         text
-          .setPlaceholder("Update {filename} at {date}")
-          .setValue(
-            this.plugin.settings.commitMessageFile ??
-              "Update {filename} at {date}",
-          )
+          .setPlaceholder(fileDefault)
+          .setValue(this.plugin.settings.commitMessageFile ?? fileDefault)
           .onChange(async (value) => {
             this.plugin.settings.commitMessageFile =
-              value.trim() || "Update {filename} at {date}";
+              value.trim() || fileDefault;
             await this.plugin.saveSettings();
+            updateFilePreview();
           }),
       );
+    const filePreview = makePreviewElement(containerEl);
+    const updateFilePreview = (): void => {
+      const tpl = this.plugin.settings.commitMessageFile ?? fileDefault;
+      filePreview.setText(`Preview: "${renderPreview(tpl)}"`);
+    };
+    updateFilePreview();
+    previews.push(updateFilePreview);
 
     new Setting(containerEl)
       .setName("Accumulate offline syncs into one commit")
@@ -324,3 +365,18 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       });
   }
 }
+
+// Build the live-preview element placed under each commit-message
+// input. Styled as a quiet caption — italic, dimmer text, snug
+// padding so it sits visually attached to the input above. Returns
+// the element so the caller can call .setText() on every change.
+function makePreviewElement(parent: HTMLElement): HTMLElement {
+  const el = parent.createDiv({ cls: "sync2-template-preview" });
+  el.style.fontSize = "0.85em";
+  el.style.color = "var(--text-muted)";
+  el.style.fontStyle = "italic";
+  el.style.padding = "4px 0 12px 0";
+  el.style.userSelect = "text"; // let users copy the rendered preview
+  return el;
+}
+
