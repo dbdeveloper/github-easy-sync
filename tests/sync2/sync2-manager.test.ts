@@ -265,6 +265,8 @@ function fixture(opts?: {
     hide: () => void;
   };
   progressMessages?: string[];
+  onLocalCommitted?: (count: number) => void;
+  onNoLocalChanges?: () => void;
 }): {
   root: string;
   vault: Vault;
@@ -361,6 +363,8 @@ function fixture(opts?: {
     onConflict: opts?.onConflict ?? onConflictDefault,
     accumulateOfflineSyncs: opts?.accumulateOfflineSyncs ?? false,
     onProgress: opts?.onProgress,
+    onLocalCommitted: opts?.onLocalCommitted,
+    onNoLocalChanges: opts?.onNoLocalChanges,
     now: () => clock.nowMs(),
   });
   return {
@@ -1834,6 +1838,286 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       const xEntry = treeAfter.find((e) => e.path === "x.md");
       expect(xEntry?.content).toBe("post-resolve-content\n");
 
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+  });
+
+  // ── local-phase UI feedback hooks --------------------------------
+  // onLocalCommitted fires once per syncAll/syncFile after the batch
+  // is enqueued. onNoLocalChanges fires when there's truly nothing to
+  // do (no local changes AND no pending queue). main.ts wires both
+  // to short-lived Notices so the user sees "Commit N files" / "No
+  // changes" before any network I/O happens.
+  describe("local-phase UI hooks", () => {
+    it("onLocalCommitted fires with correct count when files are enqueued", async () => {
+      const calls: number[] = [];
+      const f2 = fixture({ onLocalCommitted: (n) => calls.push(n) });
+      writeVaultFile(f2.root, "a.md", "v1\n");
+      writeVaultFile(f2.root, "b.md", "v1\n");
+      writeVaultFile(f2.root, "c.md", "v1\n");
+      f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+      f2.client.setBranchHead("BRANCH_HEAD_INIT");
+
+      await f2.manager.syncAll();
+
+      expect(calls).toEqual([3]);
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
+    it("onLocalCommitted does NOT fire when there's nothing to enqueue", async () => {
+      const calls: number[] = [];
+      const f2 = fixture({ onLocalCommitted: (n) => calls.push(n) });
+      f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+      f2.client.setBranchHead("BRANCH_HEAD_INIT");
+
+      await f2.manager.syncAll();
+
+      expect(calls).toEqual([]);
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
+    it("onLocalCommitted reports the count after pending-conflict filter", async () => {
+      // Pre-create a conflict on a.md so it gets filtered. b.md and
+      // c.md still go through. Expect count = 2 (filtered length),
+      // not 3 (raw findChanges length).
+      const ConflictStore = (
+        await import("../../src/sync2/conflict-store")
+      ).default;
+      const calls: number[] = [];
+      const f2 = fixture({});
+      const conflictStore = new ConflictStore({
+        vault: f2.vault as unknown as import("obsidian").Vault,
+        configDir: CONFIG_DIR,
+        selfPluginId: SELF_PLUGIN_ID,
+        deviceLabel: "test-device",
+      });
+      await conflictStore.load();
+      writeVaultFile(f2.root, "a.md", "v1\n");
+      await conflictStore.create({
+        vaultPath: "a.md",
+        baseContent: "shared\n",
+        theirsContent: "theirs\n",
+        baseCommitSha: "OLD_HEAD",
+        theirsBlobSha: "old-theirs-sha",
+      });
+
+      const manager = new Sync2Manager({
+        vault: f2.vault as unknown as import("obsidian").Vault,
+        store: f2.store,
+        detector: f2.detector,
+        queue: f2.queue,
+        builder: f2.builder,
+        client: f2.client,
+        logger: silentLogger(),
+        configDir: CONFIG_DIR,
+        selfPluginId: SELF_PLUGIN_ID,
+        commitMessageAll: "Sync at {date}",
+        commitMessageFile: "Update {filename} at {date}",
+        deviceLabel: "test-device",
+        conflictStore,
+        onConflict: async () => {
+          throw new Error("no callback expected");
+        },
+        onLocalCommitted: (n) => calls.push(n),
+        now: () => f2.clock.nowMs(),
+      });
+
+      await f2.store.load();
+      writeVaultFile(f2.root, "a.md", "edited locally\n");
+      writeVaultFile(f2.root, "b.md", "clean-b\n");
+      writeVaultFile(f2.root, "c.md", "clean-c\n");
+      f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+      f2.client.setBranchHead("BRANCH_HEAD_INIT");
+
+      await manager.syncAll();
+
+      expect(calls).toEqual([2]); // a.md filtered, b.md + c.md enqueued
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
+    it("onNoLocalChanges fires when nothing local AND queue empty", async () => {
+      const noChangesCalls: number[] = [];
+      const f2 = fixture({
+        onNoLocalChanges: () => noChangesCalls.push(1),
+      });
+      f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+      f2.client.setBranchHead("BRANCH_HEAD_INIT");
+
+      await f2.manager.syncAll();
+
+      expect(noChangesCalls).toEqual([1]);
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
+    it("onNoLocalChanges does NOT fire when queue has pending batches", async () => {
+      // Pre-load a pending batch into the queue. syncAll finds no
+      // local changes but isn't truly idle — the queue has work.
+      const noChangesCalls: number[] = [];
+      const f2 = fixture({
+        onNoLocalChanges: () => noChangesCalls.push(1),
+      });
+      writeVaultFile(f2.root, "stranded.md", "v1\n");
+      await f2.queue.enqueue(
+        [
+          {
+            kind: "added",
+            path: "stranded.md",
+            size: 3,
+            mtime: 0,
+          },
+        ],
+        {
+          commitMessage: "stranded commit",
+          parentCommitSha: null,
+          parentTreeSha: null,
+        },
+      );
+      f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+      // Snapshot already records stranded.md so findChanges sees nothing.
+      const stat = fs.statSync(path.join(f2.root, "stranded.md"));
+      f2.store.set("stranded.md", {
+        path: "stranded.md",
+        remoteSha: await shaOf("v1\n"),
+        mtime: stat.mtimeMs,
+        size: stat.size,
+      });
+      f2.client.setBranchHead("BRANCH_HEAD_INIT");
+
+      await f2.manager.syncAll();
+
+      // Queue had work → not idle → no "No changes" notice.
+      expect(noChangesCalls).toEqual([]);
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
+    it("syncFile: onLocalCommitted fires with count=1 when file enqueues", async () => {
+      const calls: number[] = [];
+      const f2 = fixture({ onLocalCommitted: (n) => calls.push(n) });
+      writeVaultFile(f2.root, "x.md", "v1\n");
+      f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+      f2.client.setBranchHead("BRANCH_HEAD_INIT");
+
+      await f2.manager.syncFile("x.md");
+
+      expect(calls).toEqual([1]);
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
+    it("syncFile: onNoLocalChanges fires when target is unchanged + no queue", async () => {
+      const noChangesCalls: number[] = [];
+      const f2 = fixture({
+        onNoLocalChanges: () => noChangesCalls.push(1),
+      });
+      writeVaultFile(f2.root, "x.md", "v1\n");
+      const stat = fs.statSync(path.join(f2.root, "x.md"));
+      f2.store.set("x.md", {
+        path: "x.md",
+        remoteSha: await shaOf("v1\n"),
+        mtime: stat.mtimeMs,
+        size: stat.size,
+      });
+      f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+      f2.client.setBranchHead("BRANCH_HEAD_INIT");
+
+      await f2.manager.syncFile("x.md");
+
+      expect(noChangesCalls).toEqual([1]);
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+  });
+
+  // ── pullOnly() ----------------------------------------------------
+  // Interval / startup pull-only entry point. Same pull side-effects
+  // as syncAll's first phase (bootstrap + pullIfNeeded), but skips
+  // findChanges, enqueueOrMerge, and processQueue. Used by main.ts
+  // when autoCommitOnSync is off.
+  describe("pullOnly (background pull)", () => {
+    it("brings remote changes down without enqueueing local edits", async () => {
+      // Set up: ours edited, remote has a different file added.
+      const f2 = fixture({});
+      writeVaultFile(f2.root, "ours-edit.md", "ours new content\n");
+      f2.store.setLastSync("BASE_HEAD", "BASE_TREE");
+      f2.client.setBranchHead("NEW_HEAD");
+      f2.client.setTreeShaForCommit("NEW_HEAD", "NEW_TREE");
+      f2.client.setContentAtRef("NEW_HEAD", "remote-add.md", "remote\n");
+      f2.client.setCompareResult("BASE_HEAD", "NEW_HEAD", {
+        status: "ahead",
+        files: [
+          {
+            filename: "remote-add.md",
+            status: "added",
+            sha: "blob-remote",
+          },
+        ],
+      });
+
+      await f2.manager.pullOnly();
+
+      // Remote-added file landed locally.
+      expect(
+        fs.readFileSync(path.join(f2.root, "remote-add.md"), "utf8"),
+      ).toBe("remote\n");
+      // Local edit is NOT enqueued (no batch on disk).
+      expect(await f2.queue.list()).toEqual([]);
+      // No createCommit fired — pull-only doesn't push.
+      const commits = f2.client.calls.filter(
+        (c) => c.op === "createCommit",
+      );
+      expect(commits).toEqual([]);
+      // lastSync moved to currentHead (pullIfNeeded did its job).
+      expect(f2.store.getLastSyncCommitSha()).toBe("NEW_HEAD");
+
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
+    it("does NOT fire onLocalCommitted or onNoLocalChanges (silent)", async () => {
+      const localCalls: number[] = [];
+      const noChangesCalls: number[] = [];
+      const f2 = fixture({
+        onLocalCommitted: (n) => localCalls.push(n),
+        onNoLocalChanges: () => noChangesCalls.push(1),
+      });
+      f2.store.setLastSync("HEAD", "TREE");
+      f2.client.setBranchHead("HEAD");
+
+      await f2.manager.pullOnly();
+
+      expect(localCalls).toEqual([]);
+      expect(noChangesCalls).toEqual([]);
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
+    it("on a fresh device (lastSync null), runs bootstrap-from-remote", async () => {
+      const f2 = fixture({});
+      f2.client.setBranchHead("FRESH_HEAD");
+      f2.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
+      f2.client.setContentAtRef("FRESH_HEAD", "Notes/x.md", "alpha\n");
+
+      await f2.manager.pullOnly();
+
+      // Bootstrap downloaded the remote file.
+      expect(
+        fs.readFileSync(path.join(f2.root, "Notes/x.md"), "utf8"),
+      ).toBe("alpha\n");
+      expect(f2.store.getLastSyncCommitSha()).toBe("FRESH_HEAD");
+      // No queue entries.
+      expect(await f2.queue.list()).toEqual([]);
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
+    it("does NOT call invariants.enforce", async () => {
+      // pullOnly is reserved for idle background work — it shouldn't
+      // rewrite the user's `.gitignore` files on a timer. We assert
+      // by checking that the configDir/.gitignore file isn't created
+      // when missing (enforce would seed it on first run).
+      const f2 = fixture({});
+      f2.store.setLastSync("HEAD", "TREE");
+      f2.client.setBranchHead("HEAD");
+
+      await f2.manager.pullOnly();
+
+      const configGitignore = path.join(f2.root, CONFIG_DIR, ".gitignore");
+      expect(fs.existsSync(configGitignore)).toBe(false);
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
   });

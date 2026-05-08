@@ -32,6 +32,11 @@ import ConflictStore from "./sync2/conflict-store";
 import { mergeIntoOne } from "./sync2/conflict-merge-all";
 import manifest from "../manifest.json";
 
+// How long the brief local-phase notices stay visible. 700ms is the
+// sweet spot — long enough to read "Commit 3 files" without rushing,
+// short enough that consecutive Sync clicks don't stack notices.
+const BRIEF_NOTICE_MS = 700;
+
 // Plugin entry point. After the Etap 7 cutover this only orchestrates
 // sync2: legacy SyncManager, events-listener, and the chunk-pick
 // conflict view are gone. The plugin id (`github-gitless-sync`) is
@@ -86,7 +91,7 @@ export default class GitHubSyncPlugin extends Plugin {
       if (this.settings.showStatusBarItem) this.showStatusBarItem();
       if (this.settings.showSyncRibbonButton) this.showSyncRibbonIcon();
       if (this.settings.syncOnStartup && this.isConfigured()) {
-        void this.sync();
+        void this.runStartupSync();
       }
     });
 
@@ -214,11 +219,29 @@ export default class GitHubSyncPlugin extends Plugin {
       onConflict: (args) => this.handleSync2Conflict(args),
       accumulateOfflineSyncs: this.settings.accumulateOfflineSyncs ?? false,
       onProgress: (initial: string) => {
+        // Long-lived notice during the network phase — stays visible
+        // until processQueue calls handle.hide(). The text is the
+        // "Syncing with GitHub…" / "Syncing commit N/M …" string the
+        // manager passes in.
         const notice = new Notice(initial, 0);
         return {
           update: (msg: string) => notice.setMessage(msg),
           hide: () => notice.hide(),
         };
+      },
+      // Brief ack after the local snapshot is on disk: tells the user
+      // their work is safe in `.push-queue/` and they can keep
+      // editing even if GitHub is unreachable. Fires once per sync.
+      onLocalCommitted: (count: number) => {
+        const message =
+          count === 1 ? "Commit file" : `Commit ${count} files`;
+        new Notice(message, BRIEF_NOTICE_MS);
+      },
+      // Truly idle sync — nothing local to enqueue and the queue is
+      // empty. Brief reassurance for the user that the click did
+      // something.
+      onNoLocalChanges: () => {
+        new Notice("No changes", BRIEF_NOTICE_MS);
       },
     });
 
@@ -273,6 +296,29 @@ export default class GitHubSyncPlugin extends Plugin {
       new Notice(`Error syncing. ${err}`);
     }
     this.afterSync();
+  }
+
+  // Silent pull — entry point for the interval timer when
+  // autoCommitOnIntervalSync is off. Conflicts that fire during the
+  // pull are auto-deferred (suppressConflictModals stays true for the
+  // whole call) so the timer never blocks waiting for a modal.
+  async pullOnly(): Promise<void> {
+    if (!this.isConfigured()) return;
+    this.suppressConflictModals = true;
+    this.openConflictViewAfterSync = false;
+    try {
+      await this.sync2Manager.pullOnly();
+    } catch (err) {
+      // Network errors during interval pull are common (offline,
+      // captive portal, GitHub down). Don't spam the user with
+      // notices — log only.
+      void this.logger.error("Interval pullOnly failed", `${err}`);
+    } finally {
+      // Reset the suppress flag so a subsequent manual click reaches
+      // the modal again.
+      this.suppressConflictModals = false;
+    }
+    this.refreshConflictStatusBar();
   }
 
   async syncCurrentFile(): Promise<void> {
@@ -469,9 +515,51 @@ export default class GitHubSyncPlugin extends Plugin {
     if (this.syncIntervalId !== null) return;
     const ms = Math.max(1, this.settings.syncInterval) * 60 * 1000;
     this.syncIntervalId = window.setInterval(() => {
-      void this.sync();
+      // Interval semantics depend on autoCommitOnSync. Off
+      // (default) → silent pull only — no notices, no commits. On →
+      // full sync, including push and the user-facing notices. The
+      // Sync ribbon button always invokes the full sync() regardless,
+      // so a user who's left interval on pull-only can still commit
+      // on demand. Interval intentionally does NOT drain pending
+      // queue batches — that's a startup-only concession (see
+      // runStartupSync); idle background ticks shouldn't suddenly
+      // push a commit the user thought was deferred.
+      if (this.settings.autoCommitOnSync ?? false) {
+        void this.sync();
+      } else {
+        void this.pullOnly();
+      }
     }, ms);
     this.registerInterval(this.syncIntervalId);
+  }
+
+  // Startup hook for `syncOnStartup: true`. Same autoCommit gate as
+  // interval, but with one extra step in the off-case: drain pending
+  // queue batches that survived the previous Obsidian session
+  // (offline pushes that never went through). The user explicitly
+  // opted into "sync on startup" — pushing whatever they had queued
+  // last time is the obvious right thing.
+  private async runStartupSync(): Promise<void> {
+    if (this.settings.autoCommitOnSync ?? false) {
+      // Behave exactly like a manual Sync click — full commit + pull
+      // + push, with notices. accumulateOfflineSyncs (if on) folds
+      // the new commit into any pending batch so the result is one
+      // combined commit on GitHub.
+      await this.sync();
+      return;
+    }
+    // Pull-only path: bring remote changes down silently, then push
+    // any commits the user had queued before this Obsidian session
+    // started. The "Commit N files" notice never fires (we don't
+    // enqueue current edits); "Syncing with GitHub…" only appears
+    // if there's actually something queued to push.
+    await this.pullOnly();
+    try {
+      await this.sync2Manager.resumeQueue();
+    } catch (err) {
+      void this.logger.error("Startup queue drain failed", `${err}`);
+    }
+    this.refreshConflictStatusBar();
   }
 
   stopSyncInterval(): void {

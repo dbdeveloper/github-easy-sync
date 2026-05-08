@@ -171,6 +171,27 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           });
       });
 
+    new Setting(containerEl)
+      .setName("Auto-commit on automatic sync")
+      .setDesc(
+        "Governs both interval-driven syncs AND sync-on-startup. " +
+          "When ENABLED, automatic syncs do a full commit + pull + push " +
+          "(same as clicking the Sync button). When DISABLED (default), " +
+          "automatic syncs only pull remote changes silently — your local " +
+          "edits are left for you to commit manually. Sync-on-startup with " +
+          "this off still drains any commits left in the push-queue from " +
+          "a previous offline session. The [Sync with GitHub] button " +
+          "always commits regardless of this setting.",
+      )
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.autoCommitOnSync ?? false)
+          .onChange(async (value) => {
+            this.plugin.settings.autoCommitOnSync = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
     // ── Commit messages ─────────────────────────────────────────────
     new Setting(containerEl)
       .setName("Commit message — full sync")

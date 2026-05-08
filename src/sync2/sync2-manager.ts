@@ -172,6 +172,19 @@ export interface Sync2ManagerDeps {
   // lived Notice; tests omit it. Returns a handle whose update()
   // changes the displayed text and hide() dismisses the notice.
   onProgress?: ProgressFactory;
+  // Brief feedback hooks for the local phase (before any network
+  // I/O). Plugin code wires them to short-lived Notices so the user
+  // gets immediate feedback that "your work is saved locally; if
+  // we're offline, you can keep editing":
+  //   - onLocalCommitted fires once per syncAll/syncFile call after
+  //     enqueueOrMerge has materialised a batch on disk. The count
+  //     is how many distinct file paths landed in the batch (already
+  //     filtered for pending-conflict paths).
+  //   - onNoLocalChanges fires when there's nothing to enqueue AND
+  //     no pending batches in the queue — i.e. a truly idle sync.
+  // Both are no-ops in unit tests that don't pass them.
+  onLocalCommitted?(filesCount: number): void;
+  onNoLocalChanges?(): void;
   // When true, a new sync click while pending batches exist (i.e.
   // earlier push attempt failed — typically offline) folds the new
   // changes into the latest pending batch instead of stacking. The
@@ -199,6 +212,10 @@ export class Sync2Manager {
   private readonly onConflict: OnConflictCallback;
   private readonly accumulateOfflineSyncs: boolean;
   private readonly onProgress: ProgressFactory | undefined;
+  private readonly onLocalCommitted:
+    | ((filesCount: number) => void)
+    | undefined;
+  private readonly onNoLocalChanges: (() => void) | undefined;
   private readonly now: () => number;
   // Guard against re-entrant processQueue. The runner only loops one
   // batch at a time; if a second syncAll() lands while the first is
@@ -224,6 +241,8 @@ export class Sync2Manager {
     this.onConflict = deps.onConflict;
     this.accumulateOfflineSyncs = deps.accumulateOfflineSyncs ?? false;
     this.onProgress = deps.onProgress;
+    this.onLocalCommitted = deps.onLocalCommitted;
+    this.onNoLocalChanges = deps.onNoLocalChanges;
     this.now = deps.now ?? (() => Date.now());
   }
 
@@ -258,11 +277,19 @@ export class Sync2Manager {
     );
     if (combined.length === 0) {
       await this.store.save();
+      // "Nothing local AND nothing pending in the queue" is the truly
+      // idle case — fire onNoLocalChanges so plugin code can flash a
+      // brief "No changes" notice. If the queue still has pending
+      // batches (offline-accumulate case), processQueue picks them up
+      // and onProgress takes over the user feedback.
+      const pendingBatches = await this.queue.list();
+      if (pendingBatches.length === 0) this.onNoLocalChanges?.();
       await this.processQueue(headAfterPull);
       await this.logger.info("Sync2 syncAll: nothing to sync");
       return;
     }
-    await this.enqueueOrMerge(combined, this.fullSyncMeta());
+    const enqueued = await this.enqueueOrMerge(combined, this.fullSyncMeta());
+    if (enqueued > 0) this.onLocalCommitted?.(enqueued);
     await this.processQueue(headAfterPull);
   }
 
@@ -301,8 +328,10 @@ export class Sync2Manager {
     }
     if (!change) {
       await this.store.save();
-      // Drain anything that was already queued (e.g. previous offline
-      // pushes that haven't been replayed yet).
+      // Same idle-vs-draining distinction as syncAll: only fire the
+      // "No changes" hook when there's truly nothing to do.
+      const pendingBatches = await this.queue.list();
+      if (pendingBatches.length === 0) this.onNoLocalChanges?.();
       await this.processQueue(headAfterPull);
       await this.logger.info(`Sync2 syncFile: nothing to sync`, { path });
       return;
@@ -319,11 +348,12 @@ export class Sync2Manager {
     // Apply the device suffix to BOTH the templated path and a
     // user-typed customMessage — uniform parseability on GitHub.
     const message = appendDeviceSuffix(baseMessage, this.deviceLabel);
-    await this.enqueueOrMerge([change], {
+    const enqueued = await this.enqueueOrMerge([change], {
       commitMessage: message,
       parentCommitSha: this.store.getLastSyncCommitSha(),
       parentTreeSha: this.store.getLastSyncTreeSha(),
     });
+    if (enqueued > 0) this.onLocalCommitted?.(enqueued);
     await this.processQueue(headAfterPull);
   }
 
@@ -331,6 +361,33 @@ export class Sync2Manager {
   // is callable on its own and behaves correctly when called fresh.
   async resumeQueue(): Promise<void> {
     await this.processQueue();
+  }
+
+  // Pull-only entry point for interval-driven background syncs (when
+  // autoCommitOnIntervalSync is off). Brings the local vault up to
+  // date with the remote — bootstrap-from-remote on a fresh device,
+  // applyRemoteAddOrModify/applyRemoteDeletion for diverging files —
+  // but DELIBERATELY skips:
+  //   - invariants.enforce (no mass rewrite of `.gitignore`s on a
+  //     timer; reserved for explicit Sync clicks)
+  //   - findChanges + enqueueOrMerge + processQueue (no commits)
+  //   - republishPaths follow-up (Etap 6.6 best-effort canonicalisation
+  //     stays best-effort; the next manual syncAll picks it up)
+  //
+  // Conflicts surfaced during pull behave as if the user had clicked
+  // "Later": the sibling file is created, the 🔀 status-bar widget
+  // ticks up, and the path is excluded from any future push until
+  // the user resolves it. main.ts achieves this by setting its
+  // suppressConflictModals flag before calling pullOnly().
+  async pullOnly(): Promise<void> {
+    await this.logger.info("Sync2 pullOnly start");
+    const republishPaths = new Set<string>();
+    const headAfterBootstrap = await this.bootstrapIfNeeded(republishPaths);
+    if (headAfterBootstrap === null) {
+      await this.pullIfNeeded(republishPaths);
+    }
+    await this.store.save();
+    await this.logger.info("Sync2 pullOnly done");
   }
 
   // ── internal ────────────────────────────────────────────────────────
@@ -809,17 +866,21 @@ export class Sync2Manager {
   // push pipeline naturally on the next syncAll once ConflictStore
   // confirms the conflict is closed (sibling deleted by user OR diff
   // editor finalised the merge).
+  // Returns the number of distinct file paths actually enqueued (after
+  // pending-conflict filtering). Callers use this to drive the local-
+  // phase user feedback Notice ("Commit N files").
   private async enqueueOrMerge(
     changes: import("./types").FileChange[],
     meta: EnqueueMeta,
-  ): Promise<void> {
+  ): Promise<number> {
     const filtered = this.dropPendingConflictPaths(changes);
-    if (filtered.length === 0) return;
+    if (filtered.length === 0) return 0;
     if (this.accumulateOfflineSyncs) {
       const target = await this.queue.mergeIntoLatestPending(filtered);
-      if (target !== null) return;
+      if (target !== null) return filtered.length;
     }
     await this.queue.enqueue(filtered, meta);
+    return filtered.length;
   }
 
   // Filter out file changes whose path has an active conflict record

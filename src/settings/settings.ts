@@ -16,6 +16,24 @@ export interface GitHubSyncSettings {
   syncStrategy: "manual" | "interval";
   syncInterval: number; // minutes
   syncOnStartup: boolean;
+  // What an AUTOMATIC sync (interval timer OR sync-on-startup) does
+  // for local changes. The manual [Sync with GitHub] button always
+  // commits regardless — this setting only governs the automatic
+  // surfaces:
+  //   - false (default): pull-only on interval; pull + drain queue
+  //                      on startup. Local edits are NEVER enqueued
+  //                      automatically; the user commits explicitly.
+  //                      Silent — no "Commit"/"Syncing" notices on
+  //                      idle. Conflicts during pull auto-defer via
+  //                      ConflictStore (the 🔀 status-bar widget
+  //                      surfaces them).
+  //   - true:           full sync (commit + pull + push) on both
+  //                      interval and startup, same flow and same
+  //                      Notices as a manual click. Local changes
+  //                      go up automatically; if accumulateOfflineSyncs
+  //                      is also true, sequential automatic syncs
+  //                      collapse into one combined commit.
+  autoCommitOnSync?: boolean;
 
   // UI affordances.
   showStatusBarItem: boolean;
@@ -52,6 +70,7 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   syncStrategy: "manual",
   syncInterval: 1,
   syncOnStartup: false,
+  autoCommitOnSync: false,
   showStatusBarItem: true,
   showSyncRibbonButton: true,
   enableLogging: false,
