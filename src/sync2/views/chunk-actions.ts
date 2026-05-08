@@ -2,8 +2,6 @@ import {
   Decoration,
   DecorationSet,
   EditorView,
-  ViewPlugin,
-  ViewUpdate,
   WidgetType,
   keymap,
 } from "@codemirror/view";
@@ -11,6 +9,7 @@ import {
   EditorState,
   Extension,
   RangeSetBuilder,
+  StateField,
 } from "@codemirror/state";
 import {
   getChunks,
@@ -143,38 +142,34 @@ class ChunkActionsWidget extends WidgetType {
   }
 }
 
-// CM6 ViewPlugin: rebuilds the action-bar decorations on every
-// viewport / doc / config change. Runs in the merge view's `a` (or
-// `b`) editor as a regular plugin extension.
-export function chunkActions(cfg: ChunkActionsConfig) {
-  return ViewPlugin.fromClass(
-    class {
-      decorations: DecorationSet;
-      constructor(view: EditorView) {
-        this.decorations = build(view, cfg);
-      }
-      update(update: ViewUpdate) {
-        // Doc changes shift chunk positions; viewport changes mean
-        // freshly-mounted decorations need (re)building. CM6 also
-        // emits an update when the merge state's chunk set changes.
-        if (
-          update.docChanged ||
-          update.viewportChanged ||
-          update.geometryChanged ||
-          chunksChanged(update)
-        ) {
-          this.decorations = build(update.view, cfg);
-        }
-      }
+// CM6 StateField rebuilding the action-bar decorations on every
+// transaction. We MUST use a StateField (not a ViewPlugin) because
+// block decorations — `Decoration.widget({block: true, …})` — are
+// only legal when sourced from a state field. CM6 throws
+// `RangeError: Block decorations may not be specified via plugins`
+// otherwise, killing the MergeView before the body can render.
+//
+// Runs in the merge view's `a` or `b` editor as a regular state
+// extension. Rebuild cost is negligible (decorations are O(N) over
+// the chunk count, typically <50) so we don't bother short-circuiting
+// "nothing changed" transactions.
+export function chunkActions(cfg: ChunkActionsConfig): Extension {
+  return StateField.define<DecorationSet>({
+    create(state) {
+      return buildFromState(state, cfg);
     },
-    {
-      decorations: (v) => v.decorations,
+    update(_deco, tr) {
+      return buildFromState(tr.state, cfg);
     },
-  );
+    provide: (f) => EditorView.decorations.from(f),
+  });
 }
 
-function build(view: EditorView, cfg: ChunkActionsConfig): DecorationSet {
-  const info = getChunks(view.state);
+function buildFromState(
+  state: EditorState,
+  cfg: ChunkActionsConfig,
+): DecorationSet {
+  const info = getChunks(state);
   if (!info) return Decoration.none;
   const builder = new RangeSetBuilder<Decoration>();
   info.chunks.forEach((chunk, i) => {
@@ -190,24 +185,6 @@ function build(view: EditorView, cfg: ChunkActionsConfig): DecorationSet {
     );
   });
   return builder.finish();
-}
-
-// Compare chunk arrays between updates. CM6 doesn't emit a discrete
-// "chunks changed" signal, so we sniff via getChunks state — it's
-// cheap and avoids unnecessary widget rebuilds.
-function chunksChanged(update: ViewUpdate): boolean {
-  const before = getChunks(update.startState);
-  const after = getChunks(update.state);
-  if (before === after) return false;
-  if (!before || !after) return true;
-  if (before.chunks.length !== after.chunks.length) return true;
-  for (let i = 0; i < before.chunks.length; i++) {
-    const a = before.chunks[i];
-    const b = after.chunks[i];
-    if (a.fromA !== b.fromA || a.toA !== b.toA) return true;
-    if (a.fromB !== b.fromB || a.toB !== b.toB) return true;
-  }
-  return false;
 }
 
 // Number of pending diverging chunks in the given state. Used by the
