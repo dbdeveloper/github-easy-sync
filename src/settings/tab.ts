@@ -123,9 +123,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       .setName("Device label")
       .setDesc(
         "Label for this machine. Baked into commit messages as a trailing " +
-          '" (label)" suffix and into conflict-resolution sibling-file names. ' +
-          'Default "Obsidian" reads naturally even on a single-device setup; ' +
-          'multi-device users override per machine ("Phone", "Desktop"…).',
+          '" (label)" suffix and into conflict-resolution sibling-file names. ',
       )
       .addText((text) =>
         text
@@ -201,14 +199,11 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Auto-commit on automatic sync")
       .setDesc(
-        "Governs both interval-driven syncs AND sync-on-startup. " +
+        "Governs interval-driven syncs AND sync-on-startup. " +
           "When ENABLED, automatic syncs do a full commit + pull + push " +
-          "(same as clicking the Sync button). When DISABLED (default), " +
+          "(same as clicking the Sync button). When DISABLED, " +
           "automatic syncs only pull remote changes silently — your local " +
-          "edits are left for you to commit manually. Sync-on-startup with " +
-          "this off still drains any commits left in the push-queue from " +
-          "a previous offline session. The [Sync with GitHub] button " +
-          "always commits regardless of this setting.",
+          "edits are left for you to commit manually.",
       )
       .addToggle((toggle) => {
         toggle
@@ -221,7 +216,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
 
     // ── Commit messages ─────────────────────────────────────────────
     const allDefault = "Sync at {date}";
-    new Setting(containerEl)
+    const allSetting = new Setting(containerEl)
       .setName("Commit message — full sync")
       .setDesc(
         "Template used when pushing all local changes. Placeholders: {date}. " +
@@ -237,7 +232,12 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
             updateAllPreview();
           }),
       );
-    const allPreview = makePreviewElement(containerEl);
+    // Mount preview INSIDE the setting row's info column (the same
+    // container that holds name + description) so it stays visually
+    // attached to the input. Appending to containerEl breaks the
+    // row rhythm and looks orphaned in themed UIs that draw a
+    // background around each setting.
+    const allPreview = makePreviewElement(allSetting.infoEl);
     const updateAllPreview = (): void => {
       const tpl = this.plugin.settings.commitMessageAll ?? allDefault;
       allPreview.setText(`Preview: "${renderPreview(tpl)}"`);
@@ -246,7 +246,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     previews.push(updateAllPreview);
 
     const fileDefault = "Update {filename} at {date}";
-    new Setting(containerEl)
+    const fileSetting = new Setting(containerEl)
       .setName("Commit message — single file")
       .setDesc(
         "Template used when pushing a single file. Placeholders: {date}, {filename}, {path}. " +
@@ -263,7 +263,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
             updateFilePreview();
           }),
       );
-    const filePreview = makePreviewElement(containerEl);
+    const filePreview = makePreviewElement(fileSetting.infoEl);
     const updateFilePreview = (): void => {
       const tpl = this.plugin.settings.commitMessageFile ?? fileDefault;
       filePreview.setText(`Preview: "${renderPreview(tpl)}"`);
@@ -367,15 +367,16 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
 }
 
 // Build the live-preview element placed under each commit-message
-// input. Styled as a quiet caption — italic, dimmer text, snug
-// padding so it sits visually attached to the input above. Returns
-// the element so the caller can call .setText() on every change.
+// input, INSIDE the Setting row's info column so it inherits the
+// row's background (themes that draw a rounded grey zone keep the
+// preview inside it). Styled as a quiet caption — italic, dimmer
+// text, small top margin to break from the description.
 function makePreviewElement(parent: HTMLElement): HTMLElement {
   const el = parent.createDiv({ cls: "sync2-template-preview" });
   el.style.fontSize = "0.85em";
   el.style.color = "var(--text-muted)";
   el.style.fontStyle = "italic";
-  el.style.padding = "4px 0 12px 0";
+  el.style.marginTop = "4px";
   el.style.userSelect = "text"; // let users copy the rendered preview
   return el;
 }
