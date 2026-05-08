@@ -11,6 +11,9 @@ importers:
       '@codemirror/lang-markdown':
         specifier: ^6.3.2
         version: 6.3.2
+      '@codemirror/merge':
+        specifier: ^6.12.1
+        version: 6.12.1
       '@codemirror/state':
         specifier: ^6.5.2
         version: 6.5.2
@@ -26,6 +29,9 @@ importers:
       ignore:
         specifier: ^7.0.5
         version: 7.0.5
+      node-diff3:
+        specifier: ^3.2.0
+        version: 3.2.0
       react:
         specifier: ^19.0.0
         version: 19.0.0
@@ -122,6 +128,9 @@ packages:
 
   '@codemirror/lint@6.8.4':
     resolution: {integrity: sha512-u4q7PnZlJUojeRe8FJa/njJcMctISGgPQ4PnWsd9268R4ZTtU+tfFYmwkBvgcrK2+QQ8tYFVALVb5fVJykKc5A==}
+
+  '@codemirror/merge@6.12.1':
+    resolution: {integrity: sha512-GA8hBq2T+IFM0sb5fk8CunTrqOulA3zurJmHtzcU15EMnL8aYpVINfJ5bkfd53M4ikwoew4Y1ydtSaAlk6+B1w==}
 
   '@codemirror/search@6.5.9':
     resolution: {integrity: sha512-7DdQ9aaZMMxuWB1u6IIFWWuK9NocVZwvo4nG8QjJTS6oZGvteoLSiXw3EbVZVlO08Ri2ltO89JVInMpfcJxhtg==}
@@ -1246,6 +1255,10 @@ packages:
   natural-compare@1.4.0:
     resolution: {integrity: sha512-OWND8ei3VtNC9h7V60qff3SVobHr996CTwgxubgyQYEpg290h9J0buyECNNJexkFm5sOajh5G116RYA1c8ZMSw==}
 
+  node-diff3@3.2.0:
+    resolution: {integrity: sha512-vLh2xJFSyniBLYDEDbXKqD32fQ5vAxmYT4hco8t0EHQ4CQ4BDHhshi7kdvDc6Y1MwGSi1Mhl4unUukPbCayZdw==}
+    engines: {bun: '>=1.3.0', node: '>=18'}
+
   obsidian@1.7.2:
     resolution: {integrity: sha512-k9hN9brdknJC+afKr5FQzDRuEFGDKbDjfCazJwpgibwCAoZNYHYV8p/s3mM8I6AsnKrPKNXf8xGuMZ4enWelZQ==}
     peerDependencies:
@@ -1654,6 +1667,14 @@ snapshots:
       '@codemirror/state': 6.5.2
       '@codemirror/view': 6.36.2
       crelt: 1.0.6
+
+  '@codemirror/merge@6.12.1':
+    dependencies:
+      '@codemirror/language': 6.10.8
+      '@codemirror/state': 6.5.2
+      '@codemirror/view': 6.36.2
+      '@lezer/highlight': 1.2.1
+      style-mod: 4.1.2
 
   '@codemirror/search@6.5.9':
     dependencies:
@@ -2665,6 +2686,8 @@ snapshots:
   nanoid@3.3.11: {}
 
   natural-compare@1.4.0: {}
+
+  node-diff3@3.2.0: {}
 
   obsidian@1.7.2(@codemirror/state@6.5.2)(@codemirror/view@6.36.2):
     dependencies:

@@ -20,7 +20,7 @@ const INVARIANT_BLOCK = `${INVARIANT_BEGIN}
 # Editing this block triggers a rewrite to canonical on next load.
 
 # Sync manifest — must always be tracked.
-!github-sync-metadata.json
+!github-easy-sync-metadata.json
 
 # .gitignore files themselves — rules must propagate across devices.
 !.gitignore
@@ -37,7 +37,7 @@ ${INVARIANT_END}`;
  */
 const CONFIG_DIR_SEED = `# Recommended defaults — feel free to edit.
 
-# Logs (covers the plugin's own github-sync.log and any other *.log).
+# Logs (covers the plugin's own github-easy-sync.log and any other *.log).
 *.log
 
 # Plugin folder allowlist — by default sync only the four canonical files.

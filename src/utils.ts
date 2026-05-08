@@ -57,7 +57,13 @@ const SNIFF_SAMPLE_BYTES = 32 * 1024;
  */
 export function decodeBase64String(s: string): string {
   const buffer = base64ToArrayBuffer(s);
-  const decoder = new TextDecoder();
+  // ignoreBOM: keep U+FEFF at index 0 if present so callers (sync2's
+  // text-canonicalisation pipeline) can detect and strip it. The
+  // platform default eats BOM during decode, hiding "remote has BOM"
+  // from us — we'd then save canonical bytes locally but fail to
+  // republish to GitHub, leaving the server stuck on the BOM-laden
+  // version forever.
+  const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
   return decoder.decode(buffer);
 }
 

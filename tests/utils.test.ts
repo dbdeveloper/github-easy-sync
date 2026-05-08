@@ -24,7 +24,7 @@ function fakeMatcher(ignored: string[]) {
 
 describe("isSyncable hardcoded rules", () => {
   it("always syncs the manifest, even when a matcher would ignore it", () => {
-    const path = `${CONFIG_DIR}/github-sync-metadata.json`;
+    const path = `${CONFIG_DIR}/github-easy-sync-metadata.json`;
     expect(isSyncable(path, CONFIG_DIR, true)).toBe(true);
     expect(isSyncable(path, CONFIG_DIR, false)).toBe(true);
     // Even if matcher claims to ignore — manifest stays allowed.

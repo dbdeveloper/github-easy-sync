@@ -66,7 +66,7 @@ describe.skipIf(!integrationEnabled())(
     it(
       "future lastSync passes through; new file uploads normally",
       async () => {
-        const manifestPath = ".obsidian/github-sync-metadata.json";
+        const manifestPath = ".obsidian/github-easy-sync-metadata.json";
         const seedNote = "Notes/k3-prime.md";
         const seedContent = "prime.\n";
 

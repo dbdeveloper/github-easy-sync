@@ -12,8 +12,16 @@ export default defineConfig({
     // mock-obsidian.ts the benchmark script uses. Pure-function tests then
     // run unchanged: anything that touches the actual Obsidian API would
     // need integration-style tests, which we'll add later.
+    //
+    // The `src` alias mirrors tsconfig.json's baseUrl: src files use
+    // bare `src/...` imports (esbuild handles them in production), so
+    // vitest needs the same resolution at test time. Without it, IDE
+    // runners that bypass `pnpm test` (PyCharm, VS Code) hit
+    // "Cannot find package 'src/utils'" the moment a test loads any
+    // file that uses the bare-import form.
     alias: {
       obsidian: path.resolve(__dirname, "mock-obsidian.ts"),
+      src: path.resolve(__dirname, "src"),
     },
   },
 });

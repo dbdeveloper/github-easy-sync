@@ -107,7 +107,7 @@ describe.skipIf(!integrationEnabled())(
         // ---- the reset ------------------------------------------
         // resetMetadata() clears `lastSync`, `files`, and the resume
         // flags (metadata-store.ts:136). The manifest entry for
-        // .obsidian/github-sync-metadata.json gets re-seeded by the
+        // .obsidian/github-easy-sync-metadata.json gets re-seeded by the
         // next loadMetadata().
         await client.sync.resetMetadata();
         const metadataStore = (client.sync as unknown as {

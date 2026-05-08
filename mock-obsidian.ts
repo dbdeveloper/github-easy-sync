@@ -59,6 +59,43 @@ export class Vault {
     return { path: "" };
   }
 
+  // Mirrors Obsidian's vault.getFiles(): a flat list of every file
+  // (TFile, never TFolder) under the vault, with `stat` pre-populated
+  // from disk so callers can filter by mtime/size without doing their
+  // own syscalls. Real Obsidian keeps an in-memory index updated by
+  // its FS-watcher; the mock recomputes from disk each call. That's
+  // slower than production but functionally equivalent — sync2's
+  // findChanges() doesn't care where the stat values came from.
+  getFiles(): TFile[] {
+    const out: TFile[] = [];
+    const walk = (relDir: string) => {
+      const absDir = relDir === "" ? this.rootPath : path.join(this.rootPath, relDir);
+      if (!existsSync(absDir)) return;
+      const entries = require("fs").readdirSync(absDir, {
+        withFileTypes: true,
+      });
+      for (const entry of entries as Array<{ isFile: () => boolean; isDirectory: () => boolean; name: string }>) {
+        const childRel =
+          relDir === "" ? entry.name : `${relDir}/${entry.name}`.replace(/\\/g, "/");
+        if (entry.isFile()) {
+          const fullPath = path.join(this.rootPath, childRel);
+          const s = statSync(fullPath);
+          const file = new TFile(childRel);
+          file.stat = { ctime: s.ctimeMs, mtime: s.mtimeMs, size: s.size };
+          file.name = entry.name;
+          const dot = entry.name.lastIndexOf(".");
+          file.basename = dot > 0 ? entry.name.slice(0, dot) : entry.name;
+          file.extension = dot > 0 ? entry.name.slice(dot + 1) : "";
+          out.push(file);
+        } else if (entry.isDirectory()) {
+          walk(childRel);
+        }
+      }
+    };
+    walk("");
+    return out;
+  }
+
   // Stub for the events API the plugin's EventsListener subscribes to.
   // Integration tests don't fire vault events — they drive sync()
   // directly — so we just record the listener for shape compat.
@@ -128,6 +165,15 @@ export class Vault {
         if (existsSync(fullPath)) {
           await fs.unlink(fullPath);
         }
+      },
+
+      // Mirrors Obsidian's adapter.rmdir(path, recursive). Recursive
+      // mode (the only mode sync2 uses) removes the directory and
+      // everything beneath it.
+      rmdir: async (dirPath: string, recursive?: boolean) => {
+        const fullPath = path.join(this.rootPath, dirPath);
+        if (!existsSync(fullPath)) return;
+        await fs.rm(fullPath, { recursive: !!recursive, force: true });
       },
 
       // Returns an object shaped like Obsidian's Stat. We populate the
@@ -210,7 +256,24 @@ export class TAbstractFile {
     this.path = p;
   }
 }
-export class TFile extends TAbstractFile {}
+
+export interface FileStats {
+  ctime: number;
+  mtime: number;
+  size: number;
+}
+
+export class TFile extends TAbstractFile {
+  // Real Obsidian populates this from its FS index and keeps it in
+  // memory — `stat` reads are O(1) without syscalls. The mock fills
+  // these from a one-shot fs.statSync at the time getFiles() is
+  // called, which is "close enough" for tests: production code that
+  // filters by stat.mtime sees plausible values either way.
+  stat: FileStats = { ctime: 0, mtime: 0, size: 0 };
+  name = "";
+  basename = "";
+  extension = "";
+}
 export class TFolder extends TAbstractFile {}
 
 // Plugin stub. main.ts extends the real one; integration tests don't

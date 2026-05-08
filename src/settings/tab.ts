@@ -206,6 +206,81 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           });
       });
 
+    new Setting(containerEl)
+      .setName("Sync2 (experimental)")
+      .setHeading();
+
+    new Setting(containerEl)
+      .setName("Use Sync2 engine")
+      .setDesc(
+        "Switch the plugin from the legacy sync engine to Sync2. Restart " +
+          "Obsidian after toggling for the change to fully take effect.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.experimentalSync2 ?? false)
+          .onChange(async (value) => {
+            this.plugin.settings.experimentalSync2 = value;
+            await this.plugin.saveSettings();
+            if (value) await this.plugin.initSync2();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Commit message — full sync")
+      .setDesc("Template used by Sync2 when pushing all local changes. " +
+        "Placeholders: {date}.")
+      .addText((text) =>
+        text
+          .setPlaceholder("Sync from Obsidian {date}")
+          .setValue(
+            this.plugin.settings.commitMessageAll ??
+              "Sync from Obsidian {date}",
+          )
+          .onChange(async (value) => {
+            this.plugin.settings.commitMessageAll =
+              value.trim() || "Sync from Obsidian {date}";
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Commit message — single file")
+      .setDesc(
+        "Template used by Sync2 when pushing a single file. " +
+          "Placeholders: {date}, {filename}, {path}.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("Update {filename} ({date})")
+          .setValue(
+            this.plugin.settings.commitMessageFile ??
+              "Update {filename} ({date})",
+          )
+          .onChange(async (value) => {
+            this.plugin.settings.commitMessageFile =
+              value.trim() || "Update {filename} ({date})";
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Accumulate offline syncs into one commit")
+      .setDesc(
+        "When the network is unavailable and a previous push is still " +
+          "pending, fold subsequent Sync clicks into the same batch. " +
+          "Eventual replay produces a single commit instead of one per " +
+          "click.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.accumulateOfflineSyncs ?? false)
+          .onChange(async (value) => {
+            this.plugin.settings.accumulateOfflineSyncs = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
     new Setting(containerEl).setName("Interface").setHeading();
 
     new Setting(containerEl)

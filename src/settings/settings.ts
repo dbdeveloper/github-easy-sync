@@ -26,6 +26,26 @@ export interface GitHubSyncSettings {
   // Stored in data.json — never propagates through the sync since
   // data.json itself is hard-blocked from upload.
   deviceName: string;
+  // Hidden flag: when true, the plugin uses Sync2Manager instead of
+  // the legacy SyncManager. Off by default; flipped manually in
+  // data.json during sync2 development. Removed at the cutover commit
+  // when sync2 replaces legacy outright.
+  experimentalSync2?: boolean;
+  // Sync2 commit-message templates. Placeholders: {date}, {filename},
+  // {path}. {filename}/{path} only meaningful in commitMessageFile.
+  commitMessageAll?: string;
+  commitMessageFile?: string;
+  // When sync2 is offline (last push failed) and this is true,
+  // subsequent Sync clicks fold into the latest pending batch instead
+  // of stacking. Eventual replay is one commit.
+  accumulateOfflineSyncs?: boolean;
+  // Sync2 conflict resolver (Etap 6.5): label baked into the
+  // sibling-file name `<base>.conflict-from-<deviceLabel>-<ts>.<ext>`
+  // and into the conflict-store metadata so a multi-device user can
+  // distinguish which device contributed which conflict copy. Pure
+  // local; never propagates through sync. Defaults to "this-device";
+  // users with multiple devices set it explicitly per device.
+  deviceLabel?: string;
 }
 
 export const DEFAULT_SETTINGS: GitHubSyncSettings = {
@@ -46,4 +66,16 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   showConflictsRibbonButton: true,
   enableLogging: false,
   deviceName: "Obsidian",
+  experimentalSync2: false,
+  // Templates handle the human-readable part. The deviceLabel is
+  // appended automatically as a fixed-position " (label)" suffix by
+  // appendDeviceSuffix(), so it's parseable from any commit on GitHub
+  // regardless of how the user edits these templates. Default
+  // deviceLabel = "Obsidian" reads naturally for single-device users
+  // ("Sync at <date> (Obsidian)" — synced from Obsidian, the app);
+  // multi-device users override it per machine ("Phone", "Desktop"…).
+  commitMessageAll: "Sync at {date}",
+  commitMessageFile: "Update {filename} at {date}",
+  accumulateOfflineSyncs: false,
+  deviceLabel: "Obsidian",
 };

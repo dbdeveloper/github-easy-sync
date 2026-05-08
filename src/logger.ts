@@ -1,6 +1,6 @@
 import { Vault, normalizePath } from "obsidian";
 
-export const LOG_FILE_NAME = "github-sync.log" as const;
+export const LOG_FILE_NAME = "github-easy-sync.log" as const;
 
 // Max serialized size of `data` we'll write per log entry. Anything larger
 // is replaced with a small summary (size + preview) so a single chatty

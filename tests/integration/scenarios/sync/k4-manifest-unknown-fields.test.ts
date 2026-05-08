@@ -66,7 +66,7 @@ describe.skipIf(!integrationEnabled())(
     it(
       "manifest with experimentalFeature key syncs cleanly",
       async () => {
-        const manifestPath = ".obsidian/github-sync-metadata.json";
+        const manifestPath = ".obsidian/github-easy-sync-metadata.json";
 
         client = createClient({ branch, deviceName: "k4-test" });
         await client.sync.loadMetadata();

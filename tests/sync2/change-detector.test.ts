@@ -1,0 +1,532 @@
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  vi,
+} from "vitest";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
+import * as crypto from "crypto";
+import GI from "../../src/gi";
+import SnapshotStore from "../../src/sync2/snapshot-store";
+import ChangeDetector from "../../src/sync2/change-detector";
+import { Vault } from "../../mock-obsidian";
+import { calculateGitBlobSHA } from "../../src/utils";
+
+const CONFIG_DIR = ".obsidian";
+const SELF_PLUGIN_ID = "github-easy-sync";
+
+function fixture(): {
+  root: string;
+  vault: Vault;
+  store: SnapshotStore;
+  gi: GI;
+  detector: ChangeDetector;
+} {
+  const root = path.join(
+    os.tmpdir(),
+    `change-detector-test-${crypto.randomBytes(4).toString("hex")}`,
+  );
+  fs.mkdirSync(path.join(root, CONFIG_DIR), { recursive: true });
+  const vault = new Vault(root);
+  const store = new SnapshotStore(
+    vault as unknown as import("obsidian").Vault,
+  );
+  const gi = new GI(root);
+  const detector = new ChangeDetector({
+    vault: vault as unknown as import("obsidian").Vault,
+    store,
+    gi,
+    configDir: CONFIG_DIR,
+    selfPluginId: SELF_PLUGIN_ID,
+    vaultRoot: root,
+  });
+  return { root, vault, store, gi, detector };
+}
+
+function writeFile(root: string, rel: string, content: string | Buffer): void {
+  const abs = path.join(root, rel);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, content);
+}
+
+async function shaOf(content: string): Promise<string> {
+  const buf = new TextEncoder().encode(content).buffer as ArrayBuffer;
+  return await calculateGitBlobSHA(buf);
+}
+
+// Helper to set a file's mtime to a specific timestamp so tests can
+// drive the watermark-filter deterministically.
+function setMtime(root: string, rel: string, msEpoch: number): void {
+  const abs = path.join(root, rel);
+  fs.utimesSync(abs, new Date(msEpoch), new Date(msEpoch));
+}
+
+describe("ChangeDetector", () => {
+  let f: ReturnType<typeof fixture>;
+
+  beforeEach(async () => {
+    f = fixture();
+    await f.store.load();
+  });
+
+  afterEach(() => {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  describe("findChanges() — first sync (no watermark)", () => {
+    it("emits added for every syncable file when watermark is null", async () => {
+      writeFile(f.root, "Notes/x.md", "hello");
+      writeFile(f.root, "Notes/y.md", "world");
+      const out = await f.detector.findChanges();
+      const paths = out.map((c) => c.path).sort();
+      expect(paths).toEqual(["Notes/x.md", "Notes/y.md"]);
+      expect(out.every((c) => c.kind === "added")).toBe(true);
+    });
+
+    it("hardcoded deny: skips sync2 manifest itself", async () => {
+      writeFile(
+        f.root,
+        `${CONFIG_DIR}/github-easy-sync-metadata.json`,
+        "{}",
+      );
+      const out = await f.detector.findChanges();
+      expect(out).toEqual([]);
+    });
+
+    it("hardcoded deny: skips legacy manifest artifact", async () => {
+      writeFile(f.root, `${CONFIG_DIR}/github-sync-metadata.json`, "{}");
+      const out = await f.detector.findChanges();
+      expect(out).toEqual([]);
+    });
+
+    it("hardcoded deny: skips our plugin's data.json", async () => {
+      writeFile(
+        f.root,
+        `${CONFIG_DIR}/plugins/${SELF_PLUGIN_ID}/data.json`,
+        "{}",
+      );
+      const out = await f.detector.findChanges();
+      expect(out).toEqual([]);
+    });
+
+    it("hardcoded deny: skips anything inside .git/", async () => {
+      writeFile(f.root, ".git/HEAD", "ref: refs/heads/main");
+      writeFile(f.root, ".git/objects/ab/cdef", "binary");
+      const out = await f.detector.findChanges();
+      expect(out).toEqual([]);
+    });
+
+    it("respects gitignore at root", async () => {
+      writeFile(f.root, ".gitignore", "*.log\n");
+      writeFile(f.root, "x.log", "noise");
+      writeFile(f.root, "x.md", "kept");
+      const out = await f.detector.findChanges();
+      // .gitignore itself is syncable — it propagates rules between
+      // devices, so it's expected to show up as added too.
+      const paths = out.map((c) => c.path).sort();
+      expect(paths).toEqual([".gitignore", "x.md"]);
+    });
+  });
+
+  describe("findChanges() — incremental (with watermark)", () => {
+    it("skips files whose mtime <= watermark (cache short-circuit)", async () => {
+      writeFile(f.root, "Notes/old.md", "untouched");
+      const oldStat = fs.statSync(path.join(f.root, "Notes/old.md"));
+      const sha = await shaOf("untouched");
+      f.store.set("Notes/old.md", {
+        path: "Notes/old.md",
+        remoteSha: sha,
+        mtime: oldStat.mtimeMs,
+        size: oldStat.size,
+      });
+      // Watermark equals the file's mtime → file is skipped.
+      f.store.setLastCommitMtime(oldStat.mtimeMs);
+
+      const adapter = f.vault.adapter as unknown as {
+        readBinary: (p: string) => Promise<Buffer>;
+      };
+      const original = adapter.readBinary;
+      const calls: string[] = [];
+      adapter.readBinary = async (p: string) => {
+        calls.push(p);
+        return original.call(adapter, p);
+      };
+      try {
+        const out = await f.detector.findChanges();
+        expect(out).toEqual([]);
+        expect(calls).toEqual([]);
+      } finally {
+        adapter.readBinary = original;
+      }
+    });
+
+    it("picks up files modified after the watermark", async () => {
+      // Old file: under watermark, snapshot in sync.
+      writeFile(f.root, "Notes/old.md", "v1");
+      setMtime(f.root, "Notes/old.md", 1_000_000_000_000);
+      const oldSha = await shaOf("v1");
+      f.store.set("Notes/old.md", {
+        path: "Notes/old.md",
+        remoteSha: oldSha,
+        mtime: 1_000_000_000_000,
+        size: 2,
+      });
+
+      // New file: ahead of watermark.
+      writeFile(f.root, "Notes/new.md", "fresh");
+      setMtime(f.root, "Notes/new.md", 2_000_000_000_000);
+
+      f.store.setLastCommitMtime(1_500_000_000_000);
+
+      const out = await f.detector.findChanges();
+      expect(out).toMatchObject([
+        { kind: "added", path: "Notes/new.md" },
+      ]);
+    });
+
+    it("emits modified when stat moved past watermark and content changed", async () => {
+      writeFile(f.root, "Notes/x.md", "v1");
+      setMtime(f.root, "Notes/x.md", 1_000_000_000_000);
+      const oldSha = await shaOf("v1");
+      f.store.set("Notes/x.md", {
+        path: "Notes/x.md",
+        remoteSha: oldSha,
+        mtime: 1_000_000_000_000,
+        size: 2,
+      });
+      f.store.setLastCommitMtime(1_000_000_000_000);
+
+      // Edit. mtime advances past watermark.
+      writeFile(f.root, "Notes/x.md", "v2-bigger");
+      setMtime(f.root, "Notes/x.md", 2_000_000_000_000);
+
+      const out = await f.detector.findChanges();
+      expect(out).toMatchObject([
+        {
+          kind: "modified",
+          path: "Notes/x.md",
+          previousRemoteSha: oldSha,
+        },
+      ]);
+    });
+
+    it("touched-but-unchanged: refreshes mtime in snapshot, emits nothing", async () => {
+      writeFile(f.root, "Notes/x.md", "same");
+      setMtime(f.root, "Notes/x.md", 1_000_000_000_000);
+      const sha = await shaOf("same");
+      f.store.set("Notes/x.md", {
+        path: "Notes/x.md",
+        remoteSha: sha,
+        mtime: 1_000_000_000_000,
+        size: 4,
+      });
+      f.store.setLastCommitMtime(1_000_000_000_000);
+
+      // Bump mtime without changing content.
+      setMtime(f.root, "Notes/x.md", 3_000_000_000_000);
+
+      const out = await f.detector.findChanges();
+      expect(out).toEqual([]);
+      const refreshed = f.store.get("Notes/x.md");
+      expect(refreshed?.mtime).toBe(3_000_000_000_000);
+    });
+  });
+
+  describe("findChanges() — Pass 2: snapshot-only paths", () => {
+    it("emits deleted when snapshot exists and file is gone", async () => {
+      f.store.set("Notes/gone.md", {
+        path: "Notes/gone.md",
+        remoteSha: "abc",
+        mtime: 1,
+        size: 1,
+      });
+      const out = await f.detector.findChanges();
+      expect(out).toMatchObject([
+        { kind: "deleted", path: "Notes/gone.md", previousRemoteSha: "abc" },
+      ]);
+    });
+
+    it("path now ignored: snapshot dropped silently, no delete emitted", async () => {
+      writeFile(f.root, "old.log", "still here");
+      writeFile(f.root, ".gitignore", "*.log\n");
+      f.store.set("old.log", {
+        path: "old.log",
+        remoteSha: "stalesha",
+        mtime: 1,
+        size: 10,
+      });
+
+      const out = await f.detector.findChanges();
+      expect(out.find((c) => c.path === "old.log")).toBeUndefined();
+      expect(f.store.get("old.log")).toBeUndefined();
+    });
+
+    it("path now syncable: surfaces as added on next findChanges", async () => {
+      writeFile(f.root, ".gitignore", "*.log\n");
+      writeFile(f.root, "kept.log", "ignored at first");
+
+      let out = await f.detector.findChanges();
+      expect(out.find((c) => c.path === "kept.log")).toBeUndefined();
+
+      // User edits .gitignore so *.log is no longer ignored.
+      fs.writeFileSync(path.join(f.root, ".gitignore"), "");
+      // Layer A: tell GI to refresh on next query (Sync2Manager wires
+      // this via gi.invalidate after a pulled .gitignore lands; tests
+      // simulate it directly).
+      f.gi.invalidate("");
+
+      out = await f.detector.findChanges();
+      const kept = out.find((c) => c.path === "kept.log");
+      expect(kept).toMatchObject({ kind: "added", path: "kept.log" });
+    });
+  });
+
+  describe("recordSync()", () => {
+    it("after a push, subsequent findChanges short-circuits", async () => {
+      writeFile(f.root, "Notes/x.md", "v1");
+      const out1 = await f.detector.findChanges();
+      expect(out1).toMatchObject([{ kind: "added", path: "Notes/x.md" }]);
+
+      const sha = await shaOf("v1");
+      await f.detector.recordSync("Notes/x.md", sha);
+
+      const out2 = await f.detector.findChanges();
+      expect(out2).toEqual([]);
+    });
+
+    it("if file vanished between push and recordSync, snapshot drops", async () => {
+      writeFile(f.root, "Notes/x.md", "v1");
+      await f.detector.recordSync("Notes/x.md", "abc");
+      fs.rmSync(path.join(f.root, "Notes/x.md"));
+      await f.detector.recordSync("Notes/x.md", "def");
+      expect(f.store.get("Notes/x.md")).toBeUndefined();
+    });
+  });
+
+  describe("recordDeletion()", () => {
+    it("snapshot is removed", () => {
+      f.store.set("Notes/x.md", {
+        path: "Notes/x.md",
+        remoteSha: "abc",
+        mtime: 1,
+        size: 1,
+      });
+      f.detector.recordDeletion("Notes/x.md");
+      expect(f.store.get("Notes/x.md")).toBeUndefined();
+    });
+  });
+
+  describe("findChangeForPath()", () => {
+    it("file present, no snapshot → added", async () => {
+      writeFile(f.root, "Notes/x.md", "v1");
+      const out = await f.detector.findChangeForPath("Notes/x.md");
+      expect(out).toMatchObject({ kind: "added", path: "Notes/x.md" });
+    });
+
+    it("file present, snapshot matches stat → null (cache hit)", async () => {
+      writeFile(f.root, "Notes/x.md", "v1");
+      const stat = fs.statSync(path.join(f.root, "Notes/x.md"));
+      f.store.set("Notes/x.md", {
+        path: "Notes/x.md",
+        remoteSha: await shaOf("v1"),
+        mtime: stat.mtimeMs,
+        size: stat.size,
+      });
+      expect(await f.detector.findChangeForPath("Notes/x.md")).toBeNull();
+    });
+
+    it("file present, mtime moved but content unchanged → null + snapshot mtime refreshed", async () => {
+      writeFile(f.root, "Notes/x.md", "v1");
+      const sha = await shaOf("v1");
+      f.store.set("Notes/x.md", {
+        path: "Notes/x.md",
+        remoteSha: sha,
+        mtime: 0,
+        size: 2,
+      });
+      expect(await f.detector.findChangeForPath("Notes/x.md")).toBeNull();
+      const stat = fs.statSync(path.join(f.root, "Notes/x.md"));
+      expect(f.store.get("Notes/x.md")?.mtime).toBe(stat.mtimeMs);
+    });
+
+    it("file present, content changed → modified", async () => {
+      writeFile(f.root, "Notes/x.md", "v1");
+      f.store.set("Notes/x.md", {
+        path: "Notes/x.md",
+        remoteSha: await shaOf("v1"),
+        mtime: 1,
+        size: 2,
+      });
+      writeFile(f.root, "Notes/x.md", "v2-different");
+      const out = await f.detector.findChangeForPath("Notes/x.md");
+      expect(out?.kind).toBe("modified");
+    });
+
+    it("file absent, snapshot exists → deleted", async () => {
+      f.store.set("Notes/gone.md", {
+        path: "Notes/gone.md",
+        remoteSha: "OLD",
+        mtime: 1,
+        size: 1,
+      });
+      const out = await f.detector.findChangeForPath("Notes/gone.md");
+      expect(out).toMatchObject({
+        kind: "deleted",
+        path: "Notes/gone.md",
+        previousRemoteSha: "OLD",
+      });
+    });
+
+    it("file absent, no snapshot → null", async () => {
+      expect(
+        await f.detector.findChangeForPath("Notes/never.md"),
+      ).toBeNull();
+    });
+
+    it("ignored path → null even if file changed", async () => {
+      writeFile(f.root, ".gitignore", "*.log\n");
+      writeFile(f.root, "noise.log", "growing");
+      expect(await f.detector.findChangeForPath("noise.log")).toBeNull();
+    });
+
+    it("hardcoded deny: data.json → null", async () => {
+      const dataJson = `${CONFIG_DIR}/plugins/${SELF_PLUGIN_ID}/data.json`;
+      writeFile(f.root, dataJson, "{}");
+      expect(await f.detector.findChangeForPath(dataJson)).toBeNull();
+    });
+  });
+
+  describe("rename × gitignore matrix", () => {
+    // The four matrix cases are observed end-to-end via findChanges:
+    // there is no rename hook, only state shifts that the algorithm
+    // reads naturally from getFiles() + snapshot store.
+
+    it("syncable → syncable: emits deleted(old) + added(new)", async () => {
+      writeFile(f.root, "drafts/a.md", "content");
+      const sha = await shaOf("content");
+      const stat = fs.statSync(path.join(f.root, "drafts/a.md"));
+      f.store.set("drafts/a.md", {
+        path: "drafts/a.md",
+        remoteSha: sha,
+        mtime: stat.mtimeMs,
+        size: stat.size,
+      });
+      f.store.setLastCommitMtime(stat.mtimeMs);
+
+      // Rename a.md → b.md. The new path's mtime is fresh (bumped on
+      // rename in most filesystems, but we set it explicitly to be
+      // robust on those that don't).
+      fs.renameSync(
+        path.join(f.root, "drafts/a.md"),
+        path.join(f.root, "drafts/b.md"),
+      );
+      setMtime(f.root, "drafts/b.md", stat.mtimeMs + 1000);
+
+      const out = await f.detector.findChanges();
+      const kinds = out.map((c) => `${c.kind}:${c.path}`).sort();
+      expect(kinds).toContain("added:drafts/b.md");
+      expect(kinds).toContain("deleted:drafts/a.md");
+    });
+
+    it("syncable → ignored: emits deleted(old) only", async () => {
+      writeFile(f.root, ".gitignore", "archive/\n");
+      writeFile(f.root, "drafts/note.md", "content");
+      const sha = await shaOf("content");
+      const stat = fs.statSync(path.join(f.root, "drafts/note.md"));
+      f.store.set("drafts/note.md", {
+        path: "drafts/note.md",
+        remoteSha: sha,
+        mtime: stat.mtimeMs,
+        size: stat.size,
+      });
+      // Snapshot also for .gitignore so the test starts from a "synced"
+      // baseline and we can isolate the rename effect.
+      const giStat = fs.statSync(path.join(f.root, ".gitignore"));
+      const giSha = await shaOf("archive/\n");
+      f.store.set(".gitignore", {
+        path: ".gitignore",
+        remoteSha: giSha,
+        mtime: giStat.mtimeMs,
+        size: giStat.size,
+      });
+      f.store.setLastCommitMtime(Math.max(stat.mtimeMs, giStat.mtimeMs));
+
+      fs.mkdirSync(path.join(f.root, "archive"), { recursive: true });
+      fs.renameSync(
+        path.join(f.root, "drafts/note.md"),
+        path.join(f.root, "archive/note.md"),
+      );
+
+      const out = await f.detector.findChanges();
+      const remoteAffecting = out.filter(
+        (c) => c.path === "drafts/note.md" || c.path === "archive/note.md",
+      );
+      expect(remoteAffecting).toMatchObject([
+        { kind: "deleted", path: "drafts/note.md" },
+      ]);
+    });
+
+    it("ignored → syncable: emits added(new) only", async () => {
+      writeFile(f.root, ".gitignore", "archive/\n");
+      writeFile(f.root, "archive/note.md", "content");
+      // Snapshot only .gitignore (archive/* never tracked).
+      const giStat = fs.statSync(path.join(f.root, ".gitignore"));
+      const giSha = await shaOf("archive/\n");
+      f.store.set(".gitignore", {
+        path: ".gitignore",
+        remoteSha: giSha,
+        mtime: giStat.mtimeMs,
+        size: giStat.size,
+      });
+      f.store.setLastCommitMtime(giStat.mtimeMs);
+
+      fs.mkdirSync(path.join(f.root, "drafts"), { recursive: true });
+      fs.renameSync(
+        path.join(f.root, "archive/note.md"),
+        path.join(f.root, "drafts/note.md"),
+      );
+      // Bump mtime so it exceeds the watermark deterministically.
+      setMtime(f.root, "drafts/note.md", giStat.mtimeMs + 5000);
+
+      const out = await f.detector.findChanges();
+      const remoteAffecting = out.filter(
+        (c) =>
+          c.path === "drafts/note.md" || c.path === "archive/note.md",
+      );
+      expect(remoteAffecting).toMatchObject([
+        { kind: "added", path: "drafts/note.md" },
+      ]);
+    });
+
+    it("ignored → ignored: emits nothing for the renamed file", async () => {
+      writeFile(f.root, ".gitignore", "trash/\narchive/\n");
+      writeFile(f.root, "archive/note.md", "content");
+      const giStat = fs.statSync(path.join(f.root, ".gitignore"));
+      const giSha = await shaOf("trash/\narchive/\n");
+      f.store.set(".gitignore", {
+        path: ".gitignore",
+        remoteSha: giSha,
+        mtime: giStat.mtimeMs,
+        size: giStat.size,
+      });
+      f.store.setLastCommitMtime(giStat.mtimeMs);
+
+      fs.mkdirSync(path.join(f.root, "trash"), { recursive: true });
+      fs.renameSync(
+        path.join(f.root, "archive/note.md"),
+        path.join(f.root, "trash/note.md"),
+      );
+
+      const out = await f.detector.findChanges();
+      const affected = out.filter(
+        (c) =>
+          c.path === "archive/note.md" || c.path === "trash/note.md",
+      );
+      expect(affected).toEqual([]);
+    });
+  });
+});

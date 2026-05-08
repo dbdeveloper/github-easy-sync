@@ -102,7 +102,7 @@ describe.skipIf(!integrationEnabled())(
 
         const manifestText = await readRemoteFile(
           branch,
-          ".obsidian/github-sync-metadata.json",
+          ".obsidian/github-easy-sync-metadata.json",
         );
         const manifest = JSON.parse(manifestText);
         for (const p of Object.keys(sharedFiles)) {

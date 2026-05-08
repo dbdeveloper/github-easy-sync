@@ -63,7 +63,7 @@ describe.skipIf(!integrationEnabled())(
     it(
       "JSON.parse failure surfaces; restoring manifest converges next sync",
       async () => {
-        const manifestPath = ".obsidian/github-sync-metadata.json";
+        const manifestPath = ".obsidian/github-easy-sync-metadata.json";
         const seedNote = "Notes/k1-prime.md";
         const seedContent = "prime.\n";
 

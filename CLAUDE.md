@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+1. Don’t assume. Don’t hide confusion. Surface tradeoffs.
+2. Minimum code that solves the problem. Nothing speculative.
+3. Touch only what you must. Clean up only your own mess.
+4. Define success criteria. Loop until verified.
+
 ## What this plugin is
 
 An Obsidian plugin that syncs a local vault with a GitHub repository using **only the GitHub REST API** — no `git` binary, no `isomorphic-git`. This constraint is deliberate so the plugin works identically on desktop and mobile. It means features like branching, merging, rebasing, or any non-GitHub host are out of scope.
@@ -9,6 +14,10 @@ An Obsidian plugin that syncs a local vault with a GitHub repository using **onl
 This branch (`init-state-machine-refactoring`) sits 30+ commits ahead of upstream main. Significant architectural changes vs upstream: state-machine routing, gitignore-driven filtering, atomic conflict resolution, resume markers, atomic bare-repo bootstrap, two-way manifest↔tree reconciliation for off-band edits/deletions on GitHub, transition-detection for vaults moving over from another sync tool, and a 46-test integration suite that pins the above against real GitHub round-trips. See `git log --oneline upstream/main..HEAD` for the chain.
 
 Behaviour described below is shaped first by an A→E manual test sweep, then locked in by the integration tests (`pnpm test:integration`). Test series A–K each correspond to a different concern — bootstrap, adoption, resume, incremental, atomic conflicts, special chars, multi-device stress, out-of-band drift, settings lifecycle, auth/API failures, manifest corruption. The conflict view UX is the one area still openly known to be primitive; everything else is intentional.
+
+## Active refactor
+
+A performance + UX redesign is in progress. The plan, including phases, manifest schema changes, the `.push-queue/` directory layout, and out-of-scope items, lives in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md). Read it before touching `sync-manager.ts`, `metadata-store.ts`, or anything in `settings/`. The architecture described in the rest of this file is the **pre-refactor** state; phases of the plan supersede it as they land.
 
 ## Commands
 
@@ -132,7 +141,7 @@ The `*.conflict-(local|remote)-*` pattern is in the seeded root `.gitignore`, so
 
 ### Logger backstop
 
-`Logger` (`src/logger.ts`) truncates `additional_data` to 64 KB if its serialized form exceeds that. Without this, a chatty callsite logging a full sync action list (tens of thousands of entries) used to balloon `<configDir>/github-sync.log` to hundreds of MB per sync. Targeted summaries at known-large callsites (`Actions to sync`, `Found conflicts`, `Remote manifest is missing`) keep the backstop from kicking in during normal operation.
+`Logger` (`src/logger.ts`) truncates `additional_data` to 64 KB if its serialized form exceeds that. Without this, a chatty callsite logging a full sync action list (tens of thousands of entries) used to balloon `<configDir>/github-easy-sync.log` to hundreds of MB per sync. Targeted summaries at known-large callsites (`Actions to sync`, `Found conflicts`, `Remote manifest is missing`) keep the backstop from kicking in during normal operation.
 
 ### GitHub client (`src/github/client.ts`)
 

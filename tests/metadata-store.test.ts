@@ -111,4 +111,46 @@ describe("MetadataStore.load()", () => {
     expect(store.data.files).toBeDefined();
     expect(store.data.files[manifestPath]).toBeDefined();
   });
+
+  it("migrates: defaults lastSyncCommitSha and lastSyncTreeSha to null when absent", async () => {
+    const stale = {
+      lastSync: 100,
+      files: {},
+    };
+    fs.mkdirSync(path.join(vaultRoot, CONFIG_DIR), { recursive: true });
+    fs.writeFileSync(
+      path.join(vaultRoot, manifestPath),
+      JSON.stringify(stale),
+    );
+
+    await store.load();
+
+    expect(store.data.lastSyncCommitSha).toBeNull();
+    expect(store.data.lastSyncTreeSha).toBeNull();
+  });
+
+  it("migrates: preserves existing lastSyncCommitSha and lastSyncTreeSha", async () => {
+    const stale = {
+      lastSync: 100,
+      files: {},
+      lastSyncCommitSha: "abc123def456",
+      lastSyncTreeSha: "fedcba654321",
+    };
+    fs.mkdirSync(path.join(vaultRoot, CONFIG_DIR), { recursive: true });
+    fs.writeFileSync(
+      path.join(vaultRoot, manifestPath),
+      JSON.stringify(stale),
+    );
+
+    await store.load();
+
+    expect(store.data.lastSyncCommitSha).toBe("abc123def456");
+    expect(store.data.lastSyncTreeSha).toBe("fedcba654321");
+  });
+
+  it("fresh metadata file has lastSyncCommitSha and lastSyncTreeSha set to null", async () => {
+    await store.load();
+    expect(store.data.lastSyncCommitSha).toBeNull();
+    expect(store.data.lastSyncTreeSha).toBeNull();
+  });
 });

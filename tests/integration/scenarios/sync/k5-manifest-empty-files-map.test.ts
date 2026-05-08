@@ -77,7 +77,7 @@ describe.skipIf(!integrationEnabled())(
     it(
       "files: {} is reconciled from the tree; subsequent sync repopulates the map",
       async () => {
-        const manifestPath = ".obsidian/github-sync-metadata.json";
+        const manifestPath = ".obsidian/github-easy-sync-metadata.json";
         const seedNote = "Notes/k5-prime.md";
         const seedContent = "prime.\n";
 

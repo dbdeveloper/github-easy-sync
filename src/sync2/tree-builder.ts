@@ -1,0 +1,123 @@
+import { arrayBufferToBase64, Vault } from "obsidian";
+import { NewTreeRequestItem } from "../github/client";
+import { hasTextExtension } from "../utils";
+import PushQueue from "./push-queue";
+import { QueueBatch } from "./types";
+
+// Minimal client surface TreeBuilder needs. Lets tests inject a stub
+// without dragging the full GithubClient (which carries settings,
+// retries, etc. that are irrelevant here).
+export interface TreeBuilderClient {
+  createBlob(args: {
+    content: string;
+    encoding?: "utf-8" | "base64";
+    retry?: boolean;
+  }): Promise<{ sha: string }>;
+}
+
+const VAULT_SUBDIR = "vault";
+const QUEUE_DIRNAME = ".push-queue";
+
+export interface TreeBuilderDeps {
+  vault: Vault;
+  queue: PushQueue;
+  client: TreeBuilderClient;
+  configDir: string;
+  selfPluginId: string;
+}
+
+export default class TreeBuilder {
+  private readonly vault: Vault;
+  private readonly queue: PushQueue;
+  private readonly client: TreeBuilderClient;
+  private readonly queueRoot: string;
+
+  constructor(deps: TreeBuilderDeps) {
+    this.vault = deps.vault;
+    this.queue = deps.queue;
+    this.client = deps.client;
+    this.queueRoot = `${deps.configDir}/plugins/${deps.selfPluginId}/${QUEUE_DIRNAME}`;
+  }
+
+  // Turn a queued batch into the tree[] array for createTree, plus the
+  // base_tree SHA the caller should pair with it. Caller is expected
+  // to feed the result straight into client.createTree({ tree: entries,
+  // base_tree }) and then build a commit on top.
+  //
+  // Files come from the batch's vault/ subdirectory, NOT from the live
+  // vault — the batch represents the user's intent at enqueue time and
+  // must not be re-read against current disk state.
+  async buildTreeEntries(
+    batchId: string,
+  ): Promise<{ entries: NewTreeRequestItem[]; baseTreeSha: string | null; batch: QueueBatch }> {
+    const batch = await this.queue.read(batchId);
+    const batchVaultDir = `${this.queueRoot}/${batchId}/${VAULT_SUBDIR}`;
+
+    // Group by handling: text files inline content; binary files need
+    // a createBlob round-trip first; deletions just set sha: null.
+    const textFiles: string[] = [];
+    const binaryFiles: string[] = [];
+    for (const path of batch.files) {
+      if (hasTextExtension(path)) textFiles.push(path);
+      else binaryFiles.push(path);
+    }
+
+    const entries: NewTreeRequestItem[] = [];
+
+    // Text files: read once, inline as `content`. GitHub stores it as
+    // the blob; we never touch createBlob for these.
+    for (const path of textFiles) {
+      const content = await this.vault.adapter.read(
+        `${batchVaultDir}/${path}`,
+      );
+      entries.push({
+        path,
+        mode: "100644",
+        type: "blob",
+        content,
+      });
+    }
+
+    // Binary files: createBlob in parallel for throughput. Each call
+    // returns a blob SHA; the tree entry references it. Concurrency
+    // is bounded by Promise.all (one per file) — fine on the small
+    // batches sync2 produces (single Sync click, 1–10 files typical).
+    const binaryEntries = await Promise.all(
+      binaryFiles.map(async (path) => {
+        const buf = await this.vault.adapter.readBinary(
+          `${batchVaultDir}/${path}`,
+        );
+        const blob = await this.client.createBlob({
+          content: arrayBufferToBase64(buf),
+          encoding: "base64",
+          retry: true,
+        });
+        return {
+          path,
+          mode: "100644",
+          type: "blob",
+          sha: blob.sha,
+        } satisfies NewTreeRequestItem;
+      }),
+    );
+    entries.push(...binaryEntries);
+
+    // Deletions: per GitHub's tree API, omit content+sha and explicitly
+    // set sha to null. The server interprets this as "remove this path
+    // from the tree".
+    for (const path of batch.deletions) {
+      entries.push({
+        path,
+        mode: "100644",
+        type: "blob",
+        sha: null,
+      });
+    }
+
+    return {
+      entries,
+      baseTreeSha: batch.parentTreeSha,
+      batch,
+    };
+  }
+}

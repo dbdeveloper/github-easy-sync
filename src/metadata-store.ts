@@ -1,6 +1,6 @@
 import { Vault, normalizePath } from "obsidian";
 
-export const MANIFEST_FILE_NAME = "github-sync-metadata.json" as const;
+export const MANIFEST_FILE_NAME = "github-easy-sync-metadata.json" as const;
 
 /**
  * A file metadata.
@@ -65,6 +65,17 @@ export interface Metadata {
   // Sticky on first rewrite (later auto-re-rewrites of our own block
   // don't overwrite the original). Per-device, stripped from remote.
   preExistingGitignoreShas?: { [path: string]: string };
+  // Commit SHA on the branch at the moment of this device's last
+  // successful sync. Drives the early-exit check at the top of
+  // syncImpl: if the remote head still equals this, no fetch is
+  // needed. Per-device — another device's lastSync points at its own
+  // commit. Stripped from the remote manifest copy.
+  lastSyncCommitSha?: string | null;
+  // Tree SHA of the same commit referenced by lastSyncCommitSha.
+  // Reused as `base_tree` for delta-tree pushes so a `POST tree`
+  // ships only the changed entries instead of the full vault. Same
+  // per-device semantics — stripped from remote.
+  lastSyncTreeSha?: string | null;
 }
 
 /**
@@ -101,10 +112,18 @@ export default class MetadataStore {
         files: {},
         firstSyncFromRemoteInProgress: false,
         firstSyncFromLocalInProgress: false,
+        lastSyncCommitSha: null,
+        lastSyncTreeSha: null,
       };
     }
     if (!this.data.files) {
       this.data.files = {};
+    }
+    if (this.data.lastSyncCommitSha === undefined) {
+      this.data.lastSyncCommitSha = null;
+    }
+    if (this.data.lastSyncTreeSha === undefined) {
+      this.data.lastSyncTreeSha = null;
     }
     const manifestRelativePath = normalizePath(
       `${this.vault.configDir}/${MANIFEST_FILE_NAME}`,
@@ -135,10 +154,12 @@ export default class MetadataStore {
 
   reset() {
     this.data = {
-        lastSync: 0,
-        files: {},
-        firstSyncFromRemoteInProgress: false,
-        firstSyncFromLocalInProgress: false,
-      };
+      lastSync: 0,
+      files: {},
+      firstSyncFromRemoteInProgress: false,
+      firstSyncFromLocalInProgress: false,
+      lastSyncCommitSha: null,
+      lastSyncTreeSha: null,
+    };
   }
 }

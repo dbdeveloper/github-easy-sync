@@ -73,6 +73,33 @@ export default class GithubClient {
     };
   }
 
+  // Wraps every requestUrl with timing + size instrumentation so a single
+  // sync run shows up in the log as a sequence of "HTTP …" entries with
+  // wall-clock duration, status, and body sizes. retryUntil calls fn()
+  // once per attempt, so each retry shows up as its own line — handy for
+  // pinning down whether a slow sync is one big call or a retry storm.
+  private async timed(
+    opts: Parameters<typeof requestUrl>[0],
+    label: string,
+  ): Promise<ReturnType<typeof requestUrl> extends Promise<infer R> ? R : never> {
+    const method = (opts as { method?: string }).method ?? "GET";
+    const body = (opts as { body?: string | ArrayBuffer }).body;
+    const reqBytes =
+      typeof body === "string"
+        ? body.length
+        : body instanceof ArrayBuffer
+        ? body.byteLength
+        : 0;
+    const t0 = Date.now();
+    const res = await requestUrl(opts);
+    const dt = Date.now() - t0;
+    const respBytes = res.arrayBuffer?.byteLength ?? 0;
+    void this.logger.info(
+      `HTTP ${method} ${label} duration=${dt}ms status=${res.status} reqKB=${(reqBytes / 1024).toFixed(1)} respKB=${(respBytes / 1024).toFixed(1)}`,
+    );
+    return res;
+  }
+
   /**
    * Gets the content of the repo.
    *
@@ -86,11 +113,14 @@ export default class GithubClient {
   } = {}): Promise<RepoContent> {
     const response = await retryUntil(
       async () => {
-        return requestUrl({
-          url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/trees/${this.settings.githubBranch}?recursive=1`,
-          headers: this.headers(),
-          throw: false,
-        });
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/trees/${this.settings.githubBranch}?recursive=1`,
+            headers: this.headers(),
+            throw: false,
+          },
+          "GET tree?recursive=1",
+        );
       },
       (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0, // Use 0 retries if retry is false
@@ -147,13 +177,16 @@ export default class GithubClient {
   }) {
     const response = await retryUntil(
       async () => {
-        return requestUrl({
-          url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/trees`,
-          headers: this.headers(),
-          method: "POST",
-          body: JSON.stringify(tree),
-          throw: false,
-        });
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/trees`,
+            headers: this.headers(),
+            method: "POST",
+            body: JSON.stringify(tree),
+            throw: false,
+          },
+          `POST tree (entries=${tree.tree.length})`,
+        );
       },
       (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,
@@ -196,17 +229,20 @@ export default class GithubClient {
   }): Promise<string> {
     const response = await retryUntil(
       async () => {
-        return requestUrl({
-          url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/commits`,
-          headers: this.headers(),
-          method: "POST",
-          body: JSON.stringify({
-            message: message,
-            tree: treeSha,
-            parents: parent ? [parent] : [],
-          }),
-          throw: false,
-        });
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/commits`,
+            headers: this.headers(),
+            method: "POST",
+            body: JSON.stringify({
+              message: message,
+              tree: treeSha,
+              parents: parent ? [parent] : [],
+            }),
+            throw: false,
+          },
+          "POST commit",
+        );
       },
       (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,
@@ -220,6 +256,171 @@ export default class GithubClient {
       );
     }
     return response.json.sha;
+  }
+
+  /**
+   * Fetch a single commit's metadata (we only need its tree SHA).
+   * Sync2 uses this during conflict reconciliation: after a HEAD
+   * drift, we re-target the in-flight batch onto the new head, which
+   * requires the head's tree SHA as `base_tree`.
+   */
+  async getCommit({
+    sha,
+    retry = false,
+    maxRetries = 5,
+  }: {
+    sha: string;
+    retry?: boolean;
+    maxRetries?: number;
+  }): Promise<{ tree: { sha: string }; committer: { date: string } }> {
+    const response = await retryUntil(
+      async () => {
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/commits/${sha}`,
+            headers: this.headers(),
+            throw: false,
+          },
+          "GET commit",
+        );
+      },
+      (res) => !isRetriableStatus(res.status),
+      retry ? maxRetries : 0,
+    );
+    if (response.status < 200 || response.status >= 400) {
+      await this.logger.error("Failed to get commit", response);
+      throw new GithubAPIError(
+        response.status,
+        `Failed to get commit, status ${response.status}`,
+      );
+    }
+    return {
+      tree: { sha: response.json.tree.sha },
+      committer: {
+        date:
+          response.json.committer?.date ??
+          response.json.author?.date ??
+          new Date(0).toISOString(),
+      },
+    };
+  }
+
+  /**
+   * Fetch the base64-encoded blob content at a specific commit ref.
+   * Sync2 uses this for both base (lastSyncCommitSha) and theirs
+   * (currentHead) sides of a 3-way merge during conflict
+   * reconciliation. Returns null on 404 (path absent at that commit
+   * — e.g. force-pushed history).
+   */
+  async getContentsAtRef({
+    path: filePath,
+    ref,
+    retry = false,
+    maxRetries = 5,
+  }: {
+    path: string;
+    ref: string;
+    retry?: boolean;
+    maxRetries?: number;
+  }): Promise<{ content: string; sha: string } | null> {
+    const response = await retryUntil(
+      async () => {
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/contents/${filePath}?ref=${ref}`,
+            headers: this.headers(),
+            throw: false,
+          },
+          `GET contents/${filePath}@${ref.slice(0, 7)}`,
+        );
+      },
+      (res) => !isRetriableStatus(res.status),
+      retry ? maxRetries : 0,
+    );
+    if (response.status === 404) return null;
+    if (response.status < 200 || response.status >= 400) {
+      await this.logger.error("Failed to get contents at ref", response);
+      throw new GithubAPIError(
+        response.status,
+        `Failed to get contents at ref, status ${response.status}`,
+      );
+    }
+    return {
+      content: response.json.content,
+      sha: response.json.sha,
+    };
+  }
+
+  /**
+   * Lists files changed between two refs. Sync2 uses this in the
+   * pull pass to discover remote-driven adds/modifies/deletes that
+   * landed since the last successful sync. Returns the list as-is
+   * from GitHub's compare API; the caller filters by gitignore /
+   * isSyncable.
+   */
+  async compare({
+    base,
+    head,
+    retry = false,
+    maxRetries = 5,
+  }: {
+    base: string;
+    head: string;
+    retry?: boolean;
+    maxRetries?: number;
+  }): Promise<{
+    status: "ahead" | "behind" | "identical" | "diverged";
+    files: Array<{
+      filename: string;
+      status:
+        | "added"
+        | "modified"
+        | "removed"
+        | "renamed"
+        | "copied"
+        | "changed"
+        | "unchanged";
+      sha: string | null;
+      previous_filename?: string;
+    }>;
+  }> {
+    const response = await retryUntil(
+      async () => {
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/compare/${base}...${head}`,
+            headers: this.headers(),
+            throw: false,
+          },
+          `GET compare ${base.slice(0, 7)}...${head.slice(0, 7)}`,
+        );
+      },
+      (res) => !isRetriableStatus(res.status),
+      retry ? maxRetries : 0,
+    );
+    if (response.status < 200 || response.status >= 400) {
+      await this.logger.error("Failed to compare refs", response);
+      throw new GithubAPIError(
+        response.status,
+        `Failed to compare ${base}...${head}, status ${response.status}`,
+      );
+    }
+    return {
+      status: response.json.status,
+      files: (response.json.files ?? []).map((f: Record<string, unknown>) => ({
+        filename: f.filename as string,
+        status: f.status as
+          | "added"
+          | "modified"
+          | "removed"
+          | "renamed"
+          | "copied"
+          | "changed"
+          | "unchanged",
+        sha: (f.sha as string | null) ?? null,
+        previous_filename: f.previous_filename as string | undefined,
+      })),
+    };
   }
 
   /**
@@ -241,13 +442,16 @@ export default class GithubClient {
   }): Promise<void> {
     const response = await retryUntil(
       async () => {
-        return requestUrl({
-          url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/refs`,
-          headers: this.headers(),
-          method: "POST",
-          body: JSON.stringify({ ref, sha }),
-          throw: false,
-        });
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/refs`,
+            headers: this.headers(),
+            method: "POST",
+            body: JSON.stringify({ ref, sha }),
+            throw: false,
+          },
+          "POST refs (create)",
+        );
       },
       (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,
@@ -272,11 +476,14 @@ export default class GithubClient {
   async getBranchHeadSha({ retry = false, maxRetries = 5 } = {}) {
     const response = await retryUntil(
       async () => {
-        return requestUrl({
-          url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/refs/heads/${this.settings.githubBranch}`,
-          headers: this.headers(),
-          throw: false,
-        });
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/refs/heads/${this.settings.githubBranch}`,
+            headers: this.headers(),
+            throw: false,
+          },
+          "GET branch head",
+        );
       },
       (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,
@@ -316,16 +523,19 @@ export default class GithubClient {
   }) {
     const response = await retryUntil(
       async () => {
-        return requestUrl({
-          url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/refs/heads/${this.settings.githubBranch}`,
-          headers: this.headers(),
-          method: "PATCH",
-          body: JSON.stringify({
-            sha: sha,
-            force,
-          }),
-          throw: false,
-        });
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/refs/heads/${this.settings.githubBranch}`,
+            headers: this.headers(),
+            method: "PATCH",
+            body: JSON.stringify({
+              sha: sha,
+              force,
+            }),
+            throw: false,
+          },
+          `PATCH branch head${force ? " (force)" : ""}`,
+        );
       },
       (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,
@@ -362,13 +572,16 @@ export default class GithubClient {
   }): Promise<CreatedBlob> {
     const response = await retryUntil(
       async () => {
-        return requestUrl({
-          url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/blobs`,
-          headers: this.headers(),
-          method: "POST",
-          body: JSON.stringify({ content, encoding }),
-          throw: false,
-        });
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/blobs`,
+            headers: this.headers(),
+            method: "POST",
+            body: JSON.stringify({ content, encoding }),
+            throw: false,
+          },
+          `POST blob (${encoding})`,
+        );
       },
       (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,
@@ -405,11 +618,14 @@ export default class GithubClient {
   }): Promise<BlobFile> {
     const response = await retryUntil(
       async () => {
-        return requestUrl({
-          url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/blobs/${sha}`,
-          headers: this.headers(),
-          throw: false,
-        });
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/blobs/${sha}`,
+            headers: this.headers(),
+            throw: false,
+          },
+          `GET blob ${sha.slice(0, 7)}`,
+        );
       },
       (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,
@@ -460,17 +676,20 @@ export default class GithubClient {
   }): Promise<{ blobSha: string; treeSha: string; commitSha: string }> {
     const response = await retryUntil(
       async () => {
-        return requestUrl({
-          url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/contents/${path}`,
-          headers: this.headers(),
-          method: "PUT",
-          body: JSON.stringify({
-            message: message,
-            content: content,
-            branch: this.settings.githubBranch,
-          }),
-          throw: false,
-        });
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/contents/${path}`,
+            headers: this.headers(),
+            method: "PUT",
+            body: JSON.stringify({
+              message: message,
+              content: content,
+              branch: this.settings.githubBranch,
+            }),
+            throw: false,
+          },
+          `PUT contents/${path}`,
+        );
       },
       (res) => !isRetriableStatus(res.status),
       retry ? maxRetries : 0,

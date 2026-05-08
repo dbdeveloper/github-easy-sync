@@ -60,12 +60,12 @@ describe.skipIf(!bootstrapEnabled())(
         const remoteFiles = await listRemoteFiles(branch, env);
         expect(remoteFiles).toContain(".gitignore");
         expect(remoteFiles).toContain(
-          ".obsidian/github-sync-metadata.json",
+          ".obsidian/github-easy-sync-metadata.json",
         );
 
         const manifestText = await readRemoteFile(
           branch,
-          ".obsidian/github-sync-metadata.json",
+          ".obsidian/github-easy-sync-metadata.json",
           env,
         );
         const manifest = JSON.parse(manifestText);

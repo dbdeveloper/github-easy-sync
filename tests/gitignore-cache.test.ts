@@ -5,7 +5,7 @@ const { stripInvariantRegion, prefixPatterns, INVARIANT_BLOCK, INVARIANT_BEGIN, 
 
 describe("INVARIANT_BLOCK contents", () => {
   it("contains the manifest must-include rule", () => {
-    expect(INVARIANT_BLOCK).toContain("!github-sync-metadata.json");
+    expect(INVARIANT_BLOCK).toContain("!github-easy-sync-metadata.json");
   });
 
   it("contains the .gitignore self-include rule", () => {

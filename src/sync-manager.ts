@@ -93,6 +93,7 @@ export default class SyncManager {
 
   private updateProgress(message: string) {
     this.progressNotice?.setMessage(message);
+    void this.logger.info(`PHASE ${message}`);
   }
 
   constructor(
@@ -400,6 +401,8 @@ export default class SyncManager {
     delete manifestForRemote.firstSyncFromLocalInProgress;
     delete manifestForRemote.pluginCreatedGitignores;
     delete manifestForRemote.preExistingGitignoreShas;
+    delete manifestForRemote.lastSyncCommitSha;
+    delete manifestForRemote.lastSyncTreeSha;
     const manifestContent = JSON.stringify(manifestForRemote);
     const manifestBlob = await this.client.createBlob({
       content: arrayBufferToBase64(
@@ -481,6 +484,8 @@ export default class SyncManager {
         lastModified: now,
       };
     }
+    this.metadataStore.data.lastSyncCommitSha = commitSha;
+    this.metadataStore.data.lastSyncTreeSha = treeSha;
     await this.metadataStore.save();
 
     // Construct the RemoteState the caller would have re-fetched.
@@ -642,6 +647,8 @@ export default class SyncManager {
     delete manifestForRemote.firstSyncFromLocalInProgress;
     delete manifestForRemote.pluginCreatedGitignores;
     delete manifestForRemote.preExistingGitignoreShas;
+    delete manifestForRemote.lastSyncCommitSha;
+    delete manifestForRemote.lastSyncTreeSha;
     const manifestContent = JSON.stringify(manifestForRemote);
     const manifestBlob = await this.client.createBlob({
       content: arrayBufferToBase64(
@@ -679,6 +686,8 @@ export default class SyncManager {
     });
     await this.client.updateBranchHead({ sha: commitSha, retry: true });
 
+    this.metadataStore.data.lastSyncCommitSha = commitSha;
+    this.metadataStore.data.lastSyncTreeSha = newTreeSha;
     await this.metadataStore.save();
     await this.logger.info("Adoption committed", {
       identical: analysis.identical.length,
@@ -1017,9 +1026,47 @@ export default class SyncManager {
     await this.logger.info("Starting incremental sync");
     // dispatchSync set "Analyzing repository state..." already; syncImpl
     // doesn't need to repeat it.
-    const { files, sha: treeSha } = await this.client.getRepoContent({
-      retry: true,
-    });
+
+    // Early-exit: if the remote branch head still points at the commit
+    // we observed at the end of the previous successful sync on this
+    // device, we know the remote tree and manifest blob can't have
+    // changed. Reconstruct both from our local manifest and skip the
+    // ~190 KB of tree+blob fetches.
+    const remoteHeadSha = await this.client.getBranchHeadSha({ retry: true });
+    const skipFetch =
+      this.metadataStore.data.lastSyncCommitSha !== null &&
+      this.metadataStore.data.lastSyncCommitSha !== undefined &&
+      this.metadataStore.data.lastSyncTreeSha !== null &&
+      this.metadataStore.data.lastSyncTreeSha !== undefined &&
+      remoteHeadSha === this.metadataStore.data.lastSyncCommitSha;
+
+    let files: { [key: string]: GetTreeResponseItem };
+    let treeSha: string;
+    if (skipFetch) {
+      await this.logger.info(
+        "Remote head unchanged — skipping tree and manifest fetch",
+        { commitSha: remoteHeadSha },
+      );
+      treeSha = this.metadataStore.data.lastSyncTreeSha as string;
+      files = {};
+      for (const [path, meta] of Object.entries(
+        this.metadataStore.data.files,
+      )) {
+        if (meta.deleted || meta.sha === null) continue;
+        files[path] = {
+          path,
+          mode: "100644",
+          type: "blob",
+          sha: meta.sha,
+          size: 0,
+          url: "",
+        };
+      }
+    } else {
+      const repoContent = await this.client.getRepoContent({ retry: true });
+      files = repoContent.files;
+      treeSha = repoContent.sha;
+    }
     const manifest = files[`${this.vault.configDir}/${MANIFEST_FILE_NAME}`];
 
     if (manifest === undefined) {
@@ -1043,10 +1090,27 @@ export default class SyncManager {
       delete files[`${this.vault.configDir}/${LOG_FILE_NAME}`];
     }
 
-    const blob = await this.client.getBlob({ sha: manifest.sha });
-    const remoteMetadata: Metadata = JSON.parse(
-      decodeBase64String(blob.content),
-    );
+    let remoteMetadata: Metadata;
+    if (skipFetch) {
+      // The manifest blob on remote is exactly what we wrote in the last
+      // commitSync — same as our local data minus the per-device fields
+      // we strip before pushing. Round-trip via JSON to get a clean
+      // deep-clone the reconcile loop can mutate without poisoning
+      // local state.
+      const cloned: Metadata = JSON.parse(
+        JSON.stringify(this.metadataStore.data),
+      );
+      delete cloned.firstSyncFromRemoteInProgress;
+      delete cloned.firstSyncFromLocalInProgress;
+      delete cloned.pluginCreatedGitignores;
+      delete cloned.preExistingGitignoreShas;
+      delete cloned.lastSyncCommitSha;
+      delete cloned.lastSyncTreeSha;
+      remoteMetadata = cloned;
+    } else {
+      const blob = await this.client.getBlob({ sha: manifest.sha });
+      remoteMetadata = JSON.parse(decodeBase64String(blob.content));
+    }
 
     // Reconcile manifest against the actual tree. Two cases the manifest
     // alone misses:
@@ -1957,6 +2021,8 @@ export default class SyncManager {
     delete manifestForRemote.firstSyncFromLocalInProgress;
     delete manifestForRemote.pluginCreatedGitignores;
     delete manifestForRemote.preExistingGitignoreShas;
+    delete manifestForRemote.lastSyncCommitSha;
+    delete manifestForRemote.lastSyncTreeSha;
     treeFiles[manifestPath] = {
       path: manifestPath,
       mode: "100644",
@@ -1985,6 +2051,9 @@ export default class SyncManager {
     });
 
     await this.client.updateBranchHead({ sha: commitSha, retry: true });
+
+    this.metadataStore.data.lastSyncCommitSha = commitSha;
+    this.metadataStore.data.lastSyncTreeSha = newTreeSha;
 
     // Update the local content of all files that had conflicts we resolved
     await Promise.all(

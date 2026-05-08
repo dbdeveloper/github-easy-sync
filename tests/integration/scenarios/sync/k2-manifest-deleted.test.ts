@@ -65,7 +65,7 @@ describe.skipIf(!integrationEnabled())(
     it(
       "post-deletion sync re-creates the manifest via silent adoption",
       async () => {
-        const manifestPath = ".obsidian/github-sync-metadata.json";
+        const manifestPath = ".obsidian/github-easy-sync-metadata.json";
         const seedNote = "Notes/k2-prime.md";
         const seedContent = "# k2 prime\nshould survive manifest deletion.\n";
 
