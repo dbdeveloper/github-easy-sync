@@ -554,9 +554,27 @@ export class Sync2Manager {
       retry: true,
     });
     let downloaded = 0;
+    let skippedAlreadyDownloaded = 0;
     for (const filePath of Object.keys(files)) {
       if (!(await this.detector.checkSyncable(filePath))) continue;
       const item = files[filePath];
+      // Resume-skip: a prior bootstrap attempt may have been
+      // interrupted (network drop, plugin disabled mid-sync, OS kill)
+      // after writing this file's blob to disk and recording its
+      // snapshot, but BEFORE setLastSync ran below. The snapshot match
+      // is our proof that the local copy is byte-equivalent to the
+      // remote blob, so re-downloading would just burn bandwidth. We
+      // still need the file to physically exist (a vault wipe between
+      // attempts would have removed it while leaving the snapshot).
+      const snap = this.store.get(filePath);
+      if (
+        snap &&
+        snap.remoteSha === item.sha &&
+        (await this.vault.adapter.exists(filePath))
+      ) {
+        skippedAlreadyDownloaded++;
+        continue;
+      }
       const blob = await this.client.getBlob({ sha: item.sha, retry: true });
       const bytes = base64ToArrayBuffer(blob.content);
       if (hasTextExtension(filePath)) {
@@ -598,6 +616,7 @@ export class Sync2Manager {
     await this.store.save();
     await this.logger.info("Sync2 bootstrap-from-remote done", {
       downloaded,
+      skippedAlreadyDownloaded,
       treeSha,
     });
   }
