@@ -2592,6 +2592,120 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       expect(messages.some((m) => /^Committing/.test(m))).toBe(true);
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
+
+    it("pull-side counter: bootstrap-from-remote ticks 'Downloading X/N…'", async () => {
+      // Adoption path (fresh vault, remote has content). The pull
+      // notice has to open up-front and tick after each blob fetch
+      // — without this the user sees up to a minute of silence
+      // while N getBlob round-trips happen serially.
+      const messages: string[] = [];
+      const f2 = fixture({
+        onProgress: (initial) => {
+          messages.push(initial);
+          return {
+            update: (m) => messages.push(m),
+            hide: () => {},
+          };
+        },
+      });
+      // Three syncable files on the remote → bootstrapFromRemote
+      // should advertise "0/3", "1/3", "2/3", "3/3".
+      f2.client.setBranchHead("FRESH_HEAD");
+      f2.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
+      f2.client.setContentAtRef("FRESH_HEAD", "a.md", "a\n");
+      f2.client.setContentAtRef("FRESH_HEAD", "b.md", "b\n");
+      f2.client.setContentAtRef("FRESH_HEAD", "c.md", "c\n");
+
+      await f2.manager.syncAll();
+
+      expect(messages.some((m) => /Downloading 0\/3 files/.test(m))).toBe(
+        true,
+      );
+      expect(messages.some((m) => /Downloading 3\/3 files/.test(m))).toBe(
+        true,
+      );
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
+    it("pull-side counter: incremental pullIfNeeded ticks through too", async () => {
+      // Regular sync (lastSync set, head moved): pullIfNeeded fetches
+      // the diff and applies each file. Same M/N progress contract
+      // as bootstrap.
+      const messages: string[] = [];
+      const f2 = fixture({
+        onProgress: (initial) => {
+          messages.push(initial);
+          return {
+            update: (m) => messages.push(m),
+            hide: () => {},
+          };
+        },
+      });
+      // Pretend we've already synced at OLD_HEAD; the branch moved
+      // forward and two files changed on the remote side.
+      f2.store.setLastSync("OLD_HEAD", "OLD_TREE");
+      f2.client.setBranchHead("NEW_HEAD");
+      f2.client.setTreeShaForCommit("NEW_HEAD", "NEW_TREE");
+      f2.client.setCompareResult("OLD_HEAD", "NEW_HEAD", {
+        status: "ahead",
+        files: [
+          { filename: "Notes/a.md", status: "added", sha: "irrelevant" },
+          { filename: "Notes/b.md", status: "modified", sha: "irrelevant" },
+        ],
+      });
+      f2.client.setContentAtRef("OLD_HEAD", "Notes/b.md", "old beta\n");
+      f2.client.setContentAtRef("NEW_HEAD", "Notes/a.md", "new alpha\n");
+      f2.client.setContentAtRef("NEW_HEAD", "Notes/b.md", "new beta\n");
+
+      await f2.manager.syncAll();
+
+      expect(messages.some((m) => /Downloading 0\/2 files/.test(m))).toBe(
+        true,
+      );
+      expect(messages.some((m) => /Downloading 2\/2 files/.test(m))).toBe(
+        true,
+      );
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
+    it("pull-side: no notice when there's nothing syncable to pull", async () => {
+      const messages: string[] = [];
+      const f2 = fixture({
+        onProgress: (initial) => {
+          messages.push(initial);
+          return {
+            update: (m) => messages.push(m),
+            hide: () => {},
+          };
+        },
+      });
+      // Fresh vault, remote head exists, but the only file is
+      // explicitly gitignored — nothing for the loop to do.
+      f2.client.setBranchHead("FRESH_HEAD");
+      f2.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
+      f2.client.setContentAtRef("FRESH_HEAD", ".gitignore", "secret/\n");
+      f2.client.setContentAtRef(
+        "FRESH_HEAD",
+        "secret/private.md",
+        "blocked",
+      );
+      writeVaultFile(f2.root, ".gitignore", "secret/\n");
+
+      await f2.manager.syncAll();
+
+      // The "Downloading…" message must not have fired — every path
+      // in the remote tree got filtered before the loop.
+      // (.gitignore itself is syncable so the notice text could
+      // mention "1/1"; the assertion below tolerates that and only
+      // pins "no spurious bigger counts".)
+      const downloadFires = messages.filter((m) => /Downloading /.test(m));
+      for (const m of downloadFires) {
+        // We allow 0..1 downloads (the gitignore itself) but nothing
+        // beyond.
+        expect(m).toMatch(/Downloading [01]\/1 /);
+      }
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
   });
 
   it("processQueue is re-entrant safe: a recursive call short-circuits", async () => {

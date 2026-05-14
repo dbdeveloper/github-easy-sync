@@ -567,40 +567,72 @@ export class Sync2Manager {
     const queuedPaths = await this.queue.collectAllPaths();
     let anyOverlapDeferred = false;
 
+    // Pre-filter syncable changes so the progress notice's "N"
+    // matches what the loop will actually touch — same pattern as
+    // bootstrapFromRemote. Each pulled file (added/modified/removed/
+    // renamed) takes one network round-trip (getBlob) so the user
+    // wants live feedback on per-file granularity, not "blob calls".
+    const syncableChanges = [] as typeof cmp.files;
     for (const f of cmp.files) {
-      if (!(await this.detector.checkSyncable(f.filename))) continue;
-
-      if (queuedPaths.has(f.filename)) {
-        // Defer: processBatch's Case 4 (expectedHead != currentHead)
-        // will run reconcileBatchAgainstHead on this path. We
-        // deliberately leave lastSync at the OLD expectedHead so
-        // processBatch sees the drift and triggers reconcile.
-        anyOverlapDeferred = true;
-        continue;
+      if (await this.detector.checkSyncable(f.filename)) {
+        syncableChanges.push(f);
       }
-
-      if (f.status === "removed") {
-        await this.applyRemoteDeletion(f.filename, expectedHead);
-        continue;
-      }
-
-      // added / modified / renamed / copied / changed → fetch and
-      // apply remote content. previous_filename only matters for
-      // renamed status; we treat it as a delete-of-old + add-of-new
-      // since GitHub's tree view does the same on its side.
-      if (
-        f.status === "renamed" &&
-        f.previous_filename &&
-        (await this.detector.checkSyncable(f.previous_filename))
-      ) {
-        await this.applyRemoteDeletion(f.previous_filename, expectedHead);
-      }
-      await this.applyRemoteAddOrModify(
-        f.filename,
-        currentHead,
-        expectedHead,
-        republishPaths,
+    }
+    let pullProgress: ProgressHandle | null = null;
+    if (this.onProgress && syncableChanges.length > 0) {
+      pullProgress = this.onProgress(
+        `Downloading 0/${syncableChanges.length} files from GitHub…`,
       );
+    }
+    let processed = 0;
+    const tickPull = (): void => {
+      processed += 1;
+      if (pullProgress) {
+        pullProgress.update(
+          `Downloading ${processed}/${syncableChanges.length} files from GitHub…`,
+        );
+      }
+    };
+
+    try {
+      for (const f of syncableChanges) {
+        if (queuedPaths.has(f.filename)) {
+          // Defer: processBatch's Case 4 (expectedHead != currentHead)
+          // will run reconcileBatchAgainstHead on this path. We
+          // deliberately leave lastSync at the OLD expectedHead so
+          // processBatch sees the drift and triggers reconcile.
+          anyOverlapDeferred = true;
+          tickPull();
+          continue;
+        }
+
+        if (f.status === "removed") {
+          await this.applyRemoteDeletion(f.filename, expectedHead);
+          tickPull();
+          continue;
+        }
+
+        // added / modified / renamed / copied / changed → fetch and
+        // apply remote content. previous_filename only matters for
+        // renamed status; we treat it as a delete-of-old + add-of-new
+        // since GitHub's tree view does the same on its side.
+        if (
+          f.status === "renamed" &&
+          f.previous_filename &&
+          (await this.detector.checkSyncable(f.previous_filename))
+        ) {
+          await this.applyRemoteDeletion(f.previous_filename, expectedHead);
+        }
+        await this.applyRemoteAddOrModify(
+          f.filename,
+          currentHead,
+          expectedHead,
+          republishPaths,
+        );
+        tickPull();
+      }
+    } finally {
+      pullProgress?.hide();
     }
 
     if (anyOverlapDeferred) {
@@ -739,51 +771,89 @@ export class Sync2Manager {
     });
     const remoteHeadDateMs = Date.parse(headCommit.committer.date);
 
+    // Pre-filter syncable paths so the progress notice's "N" matches
+    // what the loop will actually touch. Without this, a 500-file
+    // repo with a 300-file `.obsidian/` (toggle off) would advertise
+    // "0/500" while the real work is just 200 files.
+    const syncablePaths: string[] = [];
+    for (const filePath of Object.keys(files)) {
+      if (await this.detector.checkSyncable(filePath)) {
+        syncablePaths.push(filePath);
+      }
+    }
+    // Spin up the long-running notice once we know there's real work.
+    // Counter increments after every file pass (pull, identical-noop,
+    // local-kept, remote-overwrote) so the user sees uniform progress
+    // through the whole adoption, not just the slow paths. Same shape
+    // as the upload notice: total = files, not blob round-trips.
+    let pullProgress: ProgressHandle | null = null;
+    if (this.onProgress && syncablePaths.length > 0) {
+      pullProgress = this.onProgress(
+        `Downloading 0/${syncablePaths.length} files from GitHub…`,
+      );
+    }
+    let processed = 0;
+    const tickPull = (): void => {
+      processed += 1;
+      if (pullProgress) {
+        pullProgress.update(
+          `Downloading ${processed}/${syncablePaths.length} files from GitHub…`,
+        );
+      }
+    };
+
     let pulled = 0;
     let identical = 0;
     let localKept = 0;
     let remoteOverwrote = 0;
-    for (const filePath of Object.keys(files)) {
-      if (!(await this.detector.checkSyncable(filePath))) continue;
-      const item = files[filePath];
-      const localExists = await this.vault.adapter.exists(filePath);
-      if (!localExists) {
-        await this.adoptionPullAndRecord(filePath, item, republishPaths);
-        pulled++;
-        continue;
-      }
-
-      const localBuf = await this.vault.adapter.readBinary(filePath);
-      const localSha = await calculateGitBlobSHA(localBuf);
-
-      if (localSha === item.sha) {
-        // Identical content. Stat-cache the snapshot so subsequent
-        // syncs short-circuit via the watermark+stat-equality check.
-        const stat = await this.vault.adapter.stat(filePath);
-        if (stat) {
-          this.store.set(filePath, {
-            path: filePath,
-            remoteSha: item.sha,
-            mtime: stat.mtime,
-            size: stat.size,
-          });
+    try {
+      for (const filePath of syncablePaths) {
+        const item = files[filePath];
+        const localExists = await this.vault.adapter.exists(filePath);
+        if (!localExists) {
+          await this.adoptionPullAndRecord(filePath, item, republishPaths);
+          pulled++;
+          tickPull();
+          continue;
         }
-        identical++;
-        continue;
-      }
 
-      const stat = await this.vault.adapter.stat(filePath);
-      const localMtimeMs = stat?.mtime ?? 0;
-      if (localMtimeMs >= remoteHeadDateMs) {
-        // Local wins. Don't recordSync — findChanges will emit
-        // the file as "added" (no snapshot entry) and the next push
-        // will lift this local version onto the remote.
-        localKept++;
-        continue;
+        const localBuf = await this.vault.adapter.readBinary(filePath);
+        const localSha = await calculateGitBlobSHA(localBuf);
+
+        if (localSha === item.sha) {
+          // Identical content. Stat-cache the snapshot so subsequent
+          // syncs short-circuit via the watermark+stat-equality check.
+          const stat = await this.vault.adapter.stat(filePath);
+          if (stat) {
+            this.store.set(filePath, {
+              path: filePath,
+              remoteSha: item.sha,
+              mtime: stat.mtime,
+              size: stat.size,
+            });
+          }
+          identical++;
+          tickPull();
+          continue;
+        }
+
+        const stat = await this.vault.adapter.stat(filePath);
+        const localMtimeMs = stat?.mtime ?? 0;
+        if (localMtimeMs >= remoteHeadDateMs) {
+          // Local wins. Don't recordSync — findChanges will emit
+          // the file as "added" (no snapshot entry) and the next push
+          // will lift this local version onto the remote.
+          localKept++;
+          tickPull();
+          continue;
+        }
+        // Remote wins. Pull, overwriting the local copy in place.
+        await this.adoptionPullAndRecord(filePath, item, republishPaths);
+        remoteOverwrote++;
+        tickPull();
       }
-      // Remote wins. Pull, overwriting the local copy in place.
-      await this.adoptionPullAndRecord(filePath, item, republishPaths);
-      remoteOverwrote++;
+    } finally {
+      pullProgress?.hide();
     }
 
     this.store.setLastSync(currentHead, headCommit.tree.sha ?? treeSha);
