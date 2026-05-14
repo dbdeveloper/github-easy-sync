@@ -47,8 +47,21 @@ export default class TreeBuilder {
   // Files come from the batch's vault/ subdirectory, NOT from the live
   // vault — the batch represents the user's intent at enqueue time and
   // must not be re-read against current disk state.
+  //
+  // `hooks` are optional progress callbacks for the UI.
+  // `onUploadStart(total)` fires once before any file is processed
+  // (caller can show "0/N files"); `onFileProcessed(done, total)`
+  // fires after every file passes through the builder — text files
+  // count too, because the user thinks in terms of total files
+  // shipping to GitHub, not in terms of "blob round-trips happened".
+  // Both hooks are skipped when the batch is delete-only (no files
+  // to upload at all).
   async buildTreeEntries(
     batchId: string,
+    hooks?: {
+      onUploadStart?: (totalFiles: number) => void;
+      onFileProcessed?: (processed: number, total: number) => void;
+    },
   ): Promise<{ entries: NewTreeRequestItem[]; baseTreeSha: string | null; batch: QueueBatch }> {
     const batch = await this.queue.read(batchId);
     const batchVaultDir = `${this.queueRoot}/${batchId}/${VAULT_SUBDIR}`;
@@ -63,6 +76,13 @@ export default class TreeBuilder {
     }
 
     const entries: NewTreeRequestItem[] = [];
+    const totalFiles = textFiles.length + binaryFiles.length;
+    if (totalFiles > 0) hooks?.onUploadStart?.(totalFiles);
+    let processed = 0;
+    const tickProgress = (): void => {
+      processed += 1;
+      hooks?.onFileProcessed?.(processed, totalFiles);
+    };
 
     // Text files: read once, inline as `content`. GitHub stores it as
     // the blob; we never touch createBlob for these.
@@ -76,6 +96,7 @@ export default class TreeBuilder {
         type: "blob",
         content,
       });
+      tickProgress();
     }
 
     // Binary files: createBlob in parallel for throughput. Each call
@@ -103,6 +124,7 @@ export default class TreeBuilder {
       binaryFiles.map(async (path) => {
         const cachedSha = batch.uploadedBlobs[path];
         if (typeof cachedSha === "string") {
+          tickProgress();
           return {
             path,
             mode: "100644",
@@ -119,6 +141,7 @@ export default class TreeBuilder {
           retry: true,
         });
         await this.queue.recordBlobUpload(batchId, path, blob.sha);
+        tickProgress();
         return {
           path,
           mode: "100644",

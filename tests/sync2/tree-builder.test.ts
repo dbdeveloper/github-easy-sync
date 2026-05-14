@@ -257,4 +257,73 @@ describe("TreeBuilder", () => {
     expect(batch.parentCommitSha).toBe("abc");
     expect(batch.parentTreeSha).toBe("def");
   });
+
+  it("progress hooks: mixed text+binary batch ticks once per file, total spans both", async () => {
+    // Text files process synchronously in their own loop, binaries
+    // through Promise.allSettled. User-facing counter should treat
+    // them uniformly — "files going to GitHub", not "blob calls".
+    writeVaultFile(f.root, "a.md", "text 1");
+    writeVaultFile(f.root, "b.md", "text 2");
+    writeVaultFile(f.root, "c.png", Buffer.from([1]));
+    writeVaultFile(f.root, "d.png", Buffer.from([2]));
+    const id = await f.queue.enqueue(
+      [ADD("a.md"), ADD("b.md"), ADD("c.png"), ADD("d.png")],
+      {
+        commitMessage: "mixed",
+        parentCommitSha: null,
+        parentTreeSha: null,
+      },
+    );
+    const starts: number[] = [];
+    const ticks: Array<[number, number]> = [];
+    await f.builder.buildTreeEntries(id, {
+      onUploadStart: (total) => starts.push(total),
+      onFileProcessed: (done, total) => ticks.push([done, total]),
+    });
+    expect(starts).toEqual([4]);
+    expect(ticks).toHaveLength(4);
+    expect(ticks.map(([n]) => n).sort()).toEqual([1, 2, 3, 4]);
+    expect(ticks.every(([, total]) => total === 4)).toBe(true);
+  });
+
+  it("progress hooks: delete-only batch fires neither hook", async () => {
+    // Pre-write the file so the queue enqueue can capture its
+    // existence-then-delete intent, then immediately delete it from
+    // the vault so the queue records a deletion.
+    writeVaultFile(f.root, "x.md", "v");
+    const id = await f.queue.enqueue(
+      [{ kind: "deleted", path: "x.md", previousRemoteSha: "abc" }],
+      {
+        commitMessage: "del",
+        parentCommitSha: null,
+        parentTreeSha: null,
+      },
+    );
+    let upStartCalls = 0;
+    let blobCalls = 0;
+    await f.builder.buildTreeEntries(id, {
+      onUploadStart: () => upStartCalls++,
+      onFileProcessed: () => blobCalls++,
+    });
+    expect(upStartCalls).toBe(0);
+    expect(blobCalls).toBe(0);
+  });
+
+  it("progress hooks: cached blob (uploadedBlobs hit) still ticks", async () => {
+    writeVaultFile(f.root, "a.png", Buffer.from([1]));
+    writeVaultFile(f.root, "b.png", Buffer.from([2]));
+    const id = await f.queue.enqueue([ADD("a.png"), ADD("b.png")], {
+      commitMessage: "imgs",
+      parentCommitSha: null,
+      parentTreeSha: null,
+    });
+    await f.queue.recordBlobUpload(id, "a.png", "cachedSha");
+    const ticks: Array<[number, number]> = [];
+    await f.builder.buildTreeEntries(id, {
+      onFileProcessed: (u, t) => ticks.push([u, t]),
+    });
+    // Two ticks: one for the cache-hit path, one for the real upload.
+    expect(ticks).toHaveLength(2);
+    expect(ticks.map(([n]) => n).sort()).toEqual([1, 2]);
+  });
 });

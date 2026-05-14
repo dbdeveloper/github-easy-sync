@@ -2557,6 +2557,41 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       await f.manager.syncAll();
       // No assertion needed beyond completion.
     });
+
+    it("live N/M counter: progress messages tick through 'Uploading X/N files…'", async () => {
+      const messages: string[] = [];
+      const f2 = fixture({
+        onProgress: (initial) => {
+          messages.push(initial);
+          return {
+            update: (m) => messages.push(m),
+            hide: () => {},
+          };
+        },
+      });
+      await f2.store.load();
+      f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+      // Mixed batch: 2 text files + 2 binaries. The counter has to
+      // span all four, not just the binary uploads.
+      writeVaultFile(f2.root, "a.md", "one");
+      writeVaultFile(f2.root, "b.md", "two");
+      writeVaultFile(f2.root, "c.png", Buffer.from([1, 2, 3]));
+      writeVaultFile(f2.root, "d.png", Buffer.from([4, 5, 6]));
+
+      await f2.manager.syncAll();
+
+      // Initial broad notice + at least one "Uploading X/4 files…"
+      // line + the terminal "Committing…" notice.
+      expect(messages[0]).toMatch(/Syncing with GitHub/);
+      expect(messages.some((m) => /Uploading 0\/4 files/.test(m))).toBe(
+        true,
+      );
+      expect(messages.some((m) => /Uploading 4\/4 files/.test(m))).toBe(
+        true,
+      );
+      expect(messages.some((m) => /^Committing/.test(m))).toBe(true);
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
   });
 
   it("processQueue is re-entrant safe: a recursive call short-circuits", async () => {

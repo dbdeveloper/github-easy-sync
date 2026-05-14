@@ -1419,18 +1419,53 @@ export class Sync2Manager {
       // an assertion.
       const heavyThreshold = 5 * 1024 * 1024;
       const totalBytes = await this.estimateBatchBytes(id);
-      const isHeavy = totalBytes > heavyThreshold;
-      if (progress && isHeavy) {
-        const mb = (totalBytes / (1024 * 1024)).toFixed(1);
-        progress.update(
-          commitTotal > 1
-            ? `Syncing commit ${commitNum}/${commitTotal} with GitHub (~${mb} MB)…`
-            : `Syncing with GitHub (~${mb} MB)…`,
-        );
+      const sizeHint =
+        totalBytes > heavyThreshold
+          ? ` (~${(totalBytes / (1024 * 1024)).toFixed(1)} MB)`
+          : "";
+      // Prefix that names the active commit when there's more than
+      // one batch to drain. For a single batch we omit the prefix —
+      // saying "commit 1/1" is just noise.
+      const commitPrefix =
+        commitTotal > 1 ? `commit ${commitNum}/${commitTotal}, ` : "";
+
+      // Pre-blob phase: show the size hint immediately so the user
+      // knows something heavy is coming, even before buildTreeEntries
+      // starts hitting createBlob in parallel.
+      if (progress && sizeHint) {
+        progress.update(`Syncing${sizeHint} with GitHub…`);
       }
 
       const { entries, baseTreeSha, batch } =
-        await this.builder.buildTreeEntries(id);
+        await this.builder.buildTreeEntries(id, {
+          // Switch the notice to a live N/M counter the moment file
+          // processing begins. The counter advances on every file —
+          // text (read+inline) and binary (createBlob) alike — so
+          // the user sees the same "Uploading M/N files…" semantics
+          // regardless of how the batch is composed. Without this,
+          // a 200-file vault shows a frozen "Syncing…" notice for
+          // tens of seconds.
+          onUploadStart: (total) => {
+            if (!progress) return;
+            progress.update(
+              `Uploading ${commitPrefix}0/${total} files${sizeHint} to GitHub…`,
+            );
+          },
+          onFileProcessed: (done, total) => {
+            if (!progress) return;
+            progress.update(
+              `Uploading ${commitPrefix}${done}/${total} files${sizeHint} to GitHub…`,
+            );
+          },
+        });
+      // After all blobs settled, the work shifts to createTree +
+      // createCommit + updateBranchHead. That's typically a few
+      // seconds at most but the message would otherwise keep saying
+      // "Uploading N/N files…" through those steps. Switch to a
+      // dedicated phase label so the user sees we've moved on.
+      if (progress) {
+        progress.update(`Committing${sizeHint} to GitHub…`);
+      }
 
       // Build path → blob SHA map for snapshot updates after success.
       // Text entries have inline content but no SHA from buildTreeEntries
