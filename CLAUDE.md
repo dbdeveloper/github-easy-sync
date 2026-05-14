@@ -158,6 +158,27 @@ If you extend retry for a specific method, prefer using/extending `isWriteRetria
 - A failed batch is `attempted=true` → next click creates a fresh batch (not folded). Practical "accumulate" window: clicks that arrive WHILE a previous slow push is in-progress accumulate into a NEW second batch that the runner will pick up after the in-progress one finishes.
 - Covered by **L1–L4** in `tests/integration/scenarios/sync2/accumulate/`.
 
+### "Push plugins data.json to GitHub" toggle
+
+Settings-tab checkbox, **OFF by default**. Plugin `data.json` files routinely store secrets — API tokens, account credentials, license keys — that the user rarely intends to publish, and any GitHub repo can transition from private to public by accident or merge. Safe-by-default makes the safe choice the easy choice.
+
+**State lives in the gitignore, not in data.json.** The single source of truth is the literal line `!plugins/*/data.json` inside `<configDir>/.gitignore`:
+
+- Line **absent** → toggle reads OFF, all plugins' `data.json` files filter through `plugins/*/*` in the recommended block, blocked from sync.
+- Line **present** → toggle reads ON, the allow line overrides the block-all, `data.json` syncs.
+
+The gitignore IS synced across devices, so this toggle is implicitly **shared cross-device**: whichever device last pushed the gitignore wins, and on the next sync every other device's checkbox flips to match. No separate per-device field, no ping-pong, no drift.
+
+Implementation:
+- `GitignoreInvariants.getPushPluginsDataJson()` reads the file; returns `false` on read-error / missing file (safe default).
+- `GitignoreInvariants.setPushPluginsDataJson(enabled)` idempotently adds (after the `!plugins/*/styles.css` anchor) or removes the line, then refreshes the invariant-state cache so the next `enforce()` short-circuits.
+- The setting tab toggle starts at `false`, fires `getPushPluginsDataJson()` async, and updates its displayed value once the read resolves. No `pushPluginsDataJson` field in `GitHubSyncSettings`.
+- Pure helpers `matchAllowLine` / `insertAllowLine` / `removeAllowLine` are exported from `gitignore-invariants.ts` and covered by 6 unit specs.
+
+**OUR plugin's own `data.json` is ALWAYS blocked**, regardless of this toggle, by two redundant layers:
+1. The self-plugin gitignore at `<configDir>/plugins/github-gitless-sync/.gitignore` (auto-rewritten on every plugin load to `* / !main.js / !manifest.json / !styles.css / !.gitignore`) — `data.json` matches `*` with no allow exception.
+2. A hardcoded denylist in `isSyncable` (`change-detector.ts:29`) — defense in depth in case the self-plugin gitignore is tampered with. Our `data.json` carries the GitHub token; no toggle should ever expose it.
+
 ### Module layout (src/sync2/)
 
 ```
