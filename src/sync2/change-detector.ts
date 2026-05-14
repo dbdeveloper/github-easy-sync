@@ -15,9 +15,11 @@ const LEGACY_MANIFEST_FILE_NAME = "github-sync-metadata.json";
 // isSyncable for sync2: hardcoded deny list + per-device configDir
 // gate + gi.ignoredAsync. The configDir gate (`syncConfigDir`) is
 // per-device by design — see settings.ts where it lives. When OFF,
-// everything under `<configDir>/` is treated as ignored EXCEPT the
-// two invariant gitignores, which always sync because they carry
-// shared rules every device needs to agree on.
+// every path under `<configDir>/` is gated — symmetrically, so neither
+// push nor pull touches configDir. Invariant gitignore content stays
+// canonical on each device via GitignoreInvariants.enforce(), which
+// rewrites the two managed files locally on plugin load; nothing
+// about that mechanism depends on cross-device propagation.
 export async function isSyncable(
   path: string,
   configDir: string,
@@ -31,16 +33,9 @@ export async function isSyncable(
   if (path === `${configDir}/${SYNC2_MANIFEST_FILE_NAME}`) return false;
   if (path === `${configDir}/${LEGACY_MANIFEST_FILE_NAME}`) return false;
   if (path === `${configDir}/plugins/${selfPluginId}/data.json`) return false;
-  // Per-device configDir gate. The two invariant-gitignore paths
-  // bypass it: they carry policy that every device must agree on
-  // (toggle states, denylists, the "Push plugins data.json" rule),
-  // so they MUST propagate regardless of how this machine has the
-  // toggle set. Everything else under configDir is gated.
-  if (!syncConfigDir && path.startsWith(`${configDir}/`)) {
-    const cdGitignore = `${configDir}/.gitignore`;
-    const selfPluginGitignore = `${configDir}/plugins/${selfPluginId}/.gitignore`;
-    if (path !== cdGitignore && path !== selfPluginGitignore) return false;
-  }
+  // Per-device configDir gate — symmetric: OFF blocks the whole
+  // <configDir>/ subtree on both push and pull.
+  if (!syncConfigDir && path.startsWith(`${configDir}/`)) return false;
   // Anything under our own plugin's push-queue is sync2's internal
   // staging area; it sits inside the vault but must never be uploaded.
   // Without this rule, vault.getFiles() surfaces queued snapshots as
@@ -105,6 +100,15 @@ export interface PeekableQueue {
   peekPathSha(path: string): Promise<string | null>;
 }
 
+// Path + stat tuple findChanges' main loop consumes. Identical shape
+// for both sources (vault.getFiles() TFiles and adapter.list-derived
+// configDir entries). Kept as a private alias so future renames don't
+// have to chase TFile types through the loop body.
+type FileLike = {
+  path: string;
+  stat: { mtime: number; size: number };
+};
+
 export default class ChangeDetector {
   private readonly vault: Vault;
   private readonly store: SnapshotStore;
@@ -129,15 +133,36 @@ export default class ChangeDetector {
   // Walk the vault, return everything that needs to flow remote-ward,
   // and silently reconcile snapshot entries whose paths are now ignored.
   //
-  // Strategy: vault.getFiles() returns TFile[] with cached stat (no
-  // syscalls in real Obsidian). We filter candidates by stat.mtime
-  // against the lastCommitMtime watermark — files unchanged since the
-  // last sync stay out of the loop entirely. The narrow candidate set
-  // is what actually pays for isSyncable + read+SHA.
+  // Enumeration strategy: vault.getFiles() returns Obsidian's *indexed*
+  // file list — fast (in-memory) but excludes everything under
+  // <configDir>/ in production. (Confirmed against a real ~/otest5
+  // vault: getFiles returned Welcome.md but not .obsidian/.gitignore,
+  // even though the file existed on disk. Legacy used adapter.list()
+  // recursively for the same reason.)
+  //
+  // When syncConfigDir is ON, we additionally walk <configDir>/ via
+  // adapter.list() so push-side picks up snippets, theme files, etc.
+  // When OFF, we skip that walk entirely. The gate is symmetric:
+  // OFF means configDir is fully off-limits on BOTH push and pull
+  // (the isSyncable gate in pullIfNeeded filters incoming changes
+  // the same way). Each device keeps its own invariant gitignores
+  // canonical via GitignoreInvariants.enforce(), no cross-device
+  // propagation needed for that.
+  //
+  // Mtime watermark filters candidates from BOTH sources — files
+  // unchanged since the last sync stay out of the loop entirely;
+  // the narrow candidate set is what actually pays for isSyncable +
+  // read+SHA.
   async findChanges(): Promise<FileChange[]> {
     const out: FileChange[] = [];
     const watermark = this.store.getLastCommitMtime();
-    const allFiles = this.vault.getFiles();
+    const allFiles: FileLike[] = this.vault.getFiles().map((f) => ({
+      path: f.path,
+      stat: { mtime: f.stat.mtime, size: f.stat.size },
+    }));
+    if (this.syncConfigDir()) {
+      allFiles.push(...(await this.walkConfigDir()));
+    }
     // Track syncable paths we examined this pass so Pass 2 can tell
     // apart "snapshot points at a path that's still tracked but
     // unchanged" from "snapshot points at a path that's gone or
@@ -370,6 +395,34 @@ export default class ChangeDetector {
       this.gi,
       this.giReader,
     );
+  }
+
+  // Recursively enumerate `<configDir>/` via adapter.list(). Only
+  // called when syncConfigDir is ON — covers the gap where
+  // vault.getFiles() doesn't index configDir paths in production
+  // Obsidian. Returns FileLike entries shaped like vault.getFiles()
+  // so the main loop can treat them uniformly.
+  //
+  // Skips silently if the configDir doesn't exist (fresh vault before
+  // Obsidian wrote it; shouldn't happen in practice but cheap to guard).
+  private async walkConfigDir(): Promise<FileLike[]> {
+    const out: FileLike[] = [];
+    const stack: string[] = [this.configDir];
+    while (stack.length > 0) {
+      const dir = stack.pop() as string;
+      if (!(await this.vault.adapter.exists(dir))) continue;
+      const { files, folders } = await this.vault.adapter.list(dir);
+      for (const filePath of files) {
+        const stat = await this.vault.adapter.stat(filePath);
+        if (!stat) continue;
+        out.push({
+          path: filePath,
+          stat: { mtime: stat.mtime, size: stat.size },
+        });
+      }
+      stack.push(...folders);
+    }
+    return out;
   }
 
   // Reader for GI: resolves a `.gitignore` absolute path to its

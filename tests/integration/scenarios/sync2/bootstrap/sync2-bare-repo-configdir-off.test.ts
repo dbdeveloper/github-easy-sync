@@ -14,14 +14,12 @@ import {
 // A-cfg-off — bare-repo bootstrap with syncConfigDir = false.
 //
 // Companion to sync2-bare-repo-configdir-on. Pins the safer default:
-// non-invariant configDir content stays local. The two invariant
-// gitignores bypass the gate (they carry shared rules every device
-// must agree on, including the "Push plugins data.json" toggle line)
-// and still land on the remote.
-//
-// See the on-variant for the mock-vs-production caveat — the gate
-// itself is what this test pins; the detector-side enumeration is
-// a separate concern.
+// the whole <configDir>/ subtree is off-limits, symmetrically. NO
+// configDir paths land on remote — not even the invariant gitignores
+// (each device keeps them canonical locally via
+// GitignoreInvariants.enforce() on plugin load). Only the root
+// .gitignore (vault root, outside configDir) and root user files
+// propagate.
 
 (bootstrapEnabled() ? describe : describe.skip)(
   "sync2 A-cfg-off — bare-repo bootstrap with syncConfigDir = false",
@@ -40,7 +38,7 @@ import {
     });
 
     it(
-      "configDir snippet and app.json stay local; only invariant gitignores + user note land",
+      "configDir is entirely off-limits; only root .gitignore + Welcome.md land",
       async () => {
         const env = requireBootstrapEnv();
         client = await createSync2Client({
@@ -63,17 +61,19 @@ import {
         await sync2AllAndAssertNoErrors(client);
 
         const remoteFiles = await listRemoteFiles(branch, env);
-        // Invariant gitignores still propagate (bypass clause).
+        // Root-level .gitignore (outside configDir) and Welcome.md land.
         expect(remoteFiles).toContain(".gitignore");
-        expect(remoteFiles).toContain(".obsidian/.gitignore");
-        expect(remoteFiles).toContain(
+        expect(remoteFiles).toContain("Welcome.md");
+        // OFF: NOTHING under configDir lands — not even the invariant
+        // gitignores. The seed commit (root .gitignore) + a single
+        // follow-up commit with Welcome.md is the full set.
+        expect(remoteFiles).not.toContain(".obsidian/.gitignore");
+        expect(remoteFiles).not.toContain(
           ".obsidian/plugins/github-gitless-sync/.gitignore",
         );
-        // Root-level user note lands.
-        expect(remoteFiles).toContain("Welcome.md");
-        // OFF: non-invariant configDir content does NOT land.
         expect(remoteFiles).not.toContain(".obsidian/snippets/dark.css");
         expect(remoteFiles).not.toContain(".obsidian/app.json");
+        expect(remoteFiles).toHaveLength(2);
       },
       210_000,
     );

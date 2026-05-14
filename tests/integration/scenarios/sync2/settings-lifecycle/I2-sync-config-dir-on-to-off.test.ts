@@ -117,17 +117,18 @@ describe.skipIf(!integrationEnabled())(
     );
 
     it(
-      "OFF: invariant gitignores still sync (the bypass clause)",
+      "OFF: invariant gitignores DO NOT propagate either (symmetric gate)",
       async () => {
-        // Start OFF. Push a user note + an invariant gitignore edit.
+        // OFF is fully symmetric: configDir is off-limits in both
+        // directions. The two invariant gitignores are not exempt
+        // either — each device keeps them canonical locally via
+        // GitignoreInvariants.enforce().
         client = await createSync2Client({ branch, syncConfigDir: false });
         await client.vault.adapter.write("note.md", "n1\n");
         await sync2AllAndAssertNoErrors(client);
 
-        // After first sync, the invariant block is on disk via
-        // GitignoreInvariants.enforce(). Tweak the file so the next
-        // sync has something concrete to push for `.obsidian/.gitignore`
-        // (a trailing user-line that the toggle won't suppress).
+        // Tweak the invariant gitignore locally to make sure sync
+        // has something concrete to find under <configDir>/.
         const cdGitignore = ".obsidian/.gitignore";
         const before = await client.vault.adapter.read(cdGitignore);
         const tampered = before + "\n# user tail\n*.tmp\n";
@@ -135,10 +136,12 @@ describe.skipIf(!integrationEnabled())(
 
         await sync2AllAndAssertNoErrors(client);
 
-        // Even with OFF, the configDir gitignore still pushed.
-        const remote = await readRemoteFile(branch, cdGitignore);
-        expect(remote).toContain("*.tmp");
-        expect(remote).toContain("# user tail");
+        // OFF: the configDir gitignore did NOT push.
+        const remoteFiles = await listRemoteFiles(branch);
+        expect(remoteFiles).not.toContain(cdGitignore);
+        expect(remoteFiles).not.toContain(
+          ".obsidian/plugins/github-gitless-sync/.gitignore",
+        );
       },
       300_000,
     );

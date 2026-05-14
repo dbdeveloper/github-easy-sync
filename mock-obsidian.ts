@@ -63,9 +63,16 @@ export class Vault {
   // (TFile, never TFolder) under the vault, with `stat` pre-populated
   // from disk so callers can filter by mtime/size without doing their
   // own syscalls. Real Obsidian keeps an in-memory index updated by
-  // its FS-watcher; the mock recomputes from disk each call. That's
-  // slower than production but functionally equivalent — sync2's
-  // findChanges() doesn't care where the stat values came from.
+  // its FS-watcher; the mock recomputes from disk each call.
+  //
+  // CRITICAL: production Obsidian does NOT index files under
+  // <configDir>/ — getFiles() in a real vault skips the entire
+  // .obsidian/ tree. We mirror that here so tests catch any sync2
+  // code path that wrongly assumes getFiles() returns configDir
+  // content. (Earlier the walk also descended into configDir, which
+  // masked a real bug where findChanges silently skipped
+  // .obsidian/.gitignore in production. The fix lives in
+  // change-detector's walkConfigDir helper.)
   getFiles(): TFile[] {
     const out: TFile[] = [];
     const walk = (relDir: string) => {
@@ -77,6 +84,8 @@ export class Vault {
       for (const entry of entries as Array<{ isFile: () => boolean; isDirectory: () => boolean; name: string }>) {
         const childRel =
           relDir === "" ? entry.name : `${relDir}/${entry.name}`.replace(/\\/g, "/");
+        // Skip configDir to match real Obsidian's index behaviour.
+        if (childRel === this.configDir) continue;
         if (entry.isFile()) {
           const fullPath = path.join(this.rootPath, childRel);
           const s = statSync(fullPath);
