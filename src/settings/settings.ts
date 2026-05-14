@@ -73,8 +73,12 @@ export interface GitHubSyncSettings {
   // Obsidian configs and the other doesn't. data.json is hard-blocked
   // from sync, so there's no propagation channel for this preference.
   //
-  // Default `true` preserves the engine's prior (un-gated) behaviour
-  // for users upgrading without an explicit value in data.json.
+  // Default `false`: explicit opt-in. Obsidian configs include
+  // workspace state, theme settings, and plugin install state — many
+  // users (especially multi-device users) don't want one machine's
+  // layout to overwrite another's. The two invariant gitignores
+  // still sync regardless so shared rules (denylist, plugin-folder
+  // allowlist) converge across devices.
   syncConfigDir?: boolean;
 }
 
@@ -106,5 +110,5 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   commitMessageFile: "Update {filename} at {date} {time}",
   accumulateOfflineSyncs: false,
   deviceLabel: "Obsidian",
-  syncConfigDir: true,
+  syncConfigDir: false,
 };

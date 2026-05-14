@@ -239,7 +239,7 @@ Tests use **branch-per-test** on a persistent private int-test repo (fine-graine
 
 ### "Sync configs" toggle (`syncConfigDir`)
 
-Per-device gate for paths under `<configDir>/`. Lives in `data.json` (per-device by design — that file is hard-blocked from sync, so the setting can't propagate). Default `true` to preserve the engine's prior un-gated behaviour for users upgrading without an explicit value.
+Per-device gate for paths under `<configDir>/`. Lives in `data.json` (per-device by design — that file is hard-blocked from sync, so the setting can't propagate). **Default `false`** (explicit opt-in). Obsidian configs include workspace state, theme settings, and plugin install state; many users (especially multi-device users) don't want one machine's layout overwriting another's, so the safe default is OFF and the user opts in via the settings tab.
 
 When OFF, `isSyncable` returns `false` for every path under `<configDir>/` **except the two invariant gitignores** (`<configDir>/.gitignore` and `<configDir>/plugins/<self>/.gitignore`). Those two files always sync regardless of the toggle because they carry shared rules every device must agree on (the canonical invariant block, the "Push plugins data.json" allow-line, user-authored rules below the block).
 
