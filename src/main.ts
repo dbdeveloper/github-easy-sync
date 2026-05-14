@@ -119,6 +119,12 @@ export default class GitHubSyncPlugin extends Plugin {
       callback: this.syncCurrentFileWithMessage.bind(this),
     });
     this.addCommand({
+      id: "sync-files-with-message",
+      name: "Sync with GitHub (custom message)…",
+      icon: "refresh-cw",
+      callback: this.syncWithMessage.bind(this),
+    });
+    this.addCommand({
       id: "open-conflict-view",
       name: "Open sync conflicts",
       icon: "merge",
@@ -396,6 +402,32 @@ export default class GitHubSyncPlugin extends Plugin {
     this.resetSyncState();
     try {
       await this.sync2Manager.syncFile(path);
+    } catch (err) {
+      new Notice(`Error syncing. ${err}`);
+    }
+    this.afterSync();
+  }
+
+  // Whole-vault custom-message sync. Same shape as
+  // syncCurrentFileWithMessage but routes through Sync2Manager.syncAll
+  // with the user-typed message; the resulting batch is "isolated"
+  // (won't fold with later std-syncs, message survives intact).
+  async syncWithMessage(): Promise<void> {
+    if (!this.isConfigured()) {
+      new Notice("Sync plugin not configured");
+      return;
+    }
+    const tpl = this.settings.commitMessageAll ?? "Sync at {date} {time}";
+    const defaultMsg = applyTemplate(tpl, { date: new Date() });
+    const msg = await new CommitMessageModal(
+      this.app,
+      defaultMsg,
+      null,
+    ).prompt();
+    if (msg === null) return;
+    this.resetSyncState();
+    try {
+      await this.sync2Manager.syncAll(msg);
     } catch (err) {
       new Notice(`Error syncing. ${err}`);
     }

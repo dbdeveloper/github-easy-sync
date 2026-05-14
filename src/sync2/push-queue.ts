@@ -20,6 +20,11 @@ import { FileChange, QueueBatch } from "./types";
 const QUEUE_DIRNAME = ".push-queue";
 const META_FILE = ".meta.json";
 const IN_PROGRESS_FILE = ".in-progress";
+// Written by processBatch on first start; NEVER cleared on failure
+// (the only removal is the whole batch dir on commit success). Once
+// set, mergeIntoLatestPending skips this batch — see the "frozen on
+// first attempt" rule in QueueBatch.attempted's doc.
+const ATTEMPTED_FILE = ".attempted";
 const DELETIONS_FILE = "deleted-paths.txt";
 const VAULT_SUBDIR = "vault";
 
@@ -42,6 +47,12 @@ export type EnqueueMeta = {
   commitMessage: string;
   parentCommitSha: string | null;
   parentTreeSha: string | null;
+  // Defaults to false. When true, this batch is "isolated" — it
+  // never folds into another batch and another batch never folds
+  // into it. Used by custom-message syncs so the user's typed
+  // message survives intact and is never replaced by a group
+  // template.
+  isolated?: boolean;
 };
 
 export interface PushQueueDeps {
@@ -85,6 +96,7 @@ export default class PushQueue {
       parentCommitSha: meta.parentCommitSha,
       parentTreeSha: meta.parentTreeSha,
       createdAt: Date.now(),
+      isolated: meta.isolated ?? false,
     });
 
     const deletions: string[] = [];
@@ -122,18 +134,23 @@ export default class PushQueue {
     const inProgress = await this.vault.adapter.exists(
       `${batchDir}/${IN_PROGRESS_FILE}`,
     );
+    const attempted = await this.vault.adapter.exists(
+      `${batchDir}/${ATTEMPTED_FILE}`,
+    );
     const meta = await this.readMeta(batchDir);
     const files = await this.listVaultFiles(batchDir);
     const deletions = await this.readDeletions(batchDir);
     return {
       id,
       inProgress,
+      attempted,
       commitMessage: meta.commitMessage,
       parentCommitSha: meta.parentCommitSha,
       parentTreeSha: meta.parentTreeSha,
       files,
       deletions,
       uploadedBlobs: meta.uploadedBlobs,
+      isolated: meta.isolated,
     };
   }
 
@@ -223,6 +240,19 @@ export default class PushQueue {
     await this.vault.adapter.write(`${batchDir}/${IN_PROGRESS_FILE}`, "");
   }
 
+  // Mark this batch as "ever attempted" — call exactly once,
+  // typically right after markInProgress at the start of processBatch.
+  // The presence of this file freezes the batch against further
+  // mergeIntoLatestPending calls, modelling "in-progress OR failed
+  // is blocked from merges". The marker is only removed when the
+  // whole batch dir is deleted (commit success).
+  async markAttempted(id: string): Promise<void> {
+    const batchDir = `${this.queueRoot}/${id}`;
+    const markerPath = `${batchDir}/${ATTEMPTED_FILE}`;
+    if (await this.vault.adapter.exists(markerPath)) return;
+    await this.vault.adapter.write(markerPath, "");
+  }
+
   async clearInProgress(id: string): Promise<void> {
     const path = `${this.queueRoot}/${id}/${IN_PROGRESS_FILE}`;
     if (await this.vault.adapter.exists(path)) {
@@ -250,13 +280,22 @@ export default class PushQueue {
     const ids = await this.list();
     let target: string | null = null;
     for (let i = ids.length - 1; i >= 0; i--) {
+      const batchDir = `${this.queueRoot}/${ids[i]}`;
       const inProg = await this.vault.adapter.exists(
-        `${this.queueRoot}/${ids[i]}/${IN_PROGRESS_FILE}`,
+        `${batchDir}/${IN_PROGRESS_FILE}`,
       );
-      if (!inProg) {
-        target = ids[i];
-        break;
-      }
+      if (inProg) continue;
+      const attempted = await this.vault.adapter.exists(
+        `${batchDir}/${ATTEMPTED_FILE}`,
+      );
+      if (attempted) continue;
+      // Isolated batches (custom-message commits) keep their message
+      // intact and refuse to fold new changes in. Skip and keep
+      // looking; if none is mergeable, caller falls back to enqueue.
+      const meta = await this.readMeta(batchDir);
+      if (meta.isolated) continue;
+      target = ids[i];
+      break;
     }
     if (target === null) return null;
 
@@ -310,6 +349,29 @@ export default class PushQueue {
       `${batchDir}/${META_FILE}`,
       JSON.stringify(raw),
     );
+  }
+
+  // Replace the batch's commit message in .meta.json. Used by
+  // enqueueOrMerge after a successful accumulate-merge: the
+  // "accumulate group" should commit with the message of the LAST
+  // (most recent) sync click rather than the first, so the
+  // timestamp on GitHub reflects when the batch actually pushed.
+  // Routed through the same metaWriteQueue as recordBlobUpload so
+  // concurrent writers don't clobber each other.
+  async updateCommitMessage(
+    id: string,
+    commitMessage: string,
+  ): Promise<void> {
+    const next = this.metaWriteQueue.then(async () => {
+      const batchDir = `${this.queueRoot}/${id}`;
+      const meta = await this.readMeta(batchDir);
+      await this.writeMeta(batchDir, {
+        ...meta,
+        commitMessage,
+      });
+    });
+    this.metaWriteQueue = next.catch(() => undefined);
+    return next;
   }
 
   // Read a single file's bytes from inside the batch's vault/ snapshot.
@@ -430,11 +492,13 @@ export default class PushQueue {
       parentTreeSha: string | null;
       createdAt: number;
       uploadedBlobs?: Record<string, string>;
+      isolated?: boolean;
     },
   ): Promise<void> {
     const out = {
       ...meta,
       uploadedBlobs: meta.uploadedBlobs ?? {},
+      isolated: meta.isolated ?? false,
     };
     await this.vault.adapter.write(
       `${batchDir}/${META_FILE}`,
@@ -448,6 +512,7 @@ export default class PushQueue {
     parentTreeSha: string | null;
     createdAt: number;
     uploadedBlobs: Record<string, string>;
+    isolated: boolean;
   }> {
     const text = await this.vault.adapter.read(`${batchDir}/${META_FILE}`);
     const raw = JSON.parse(text) as Record<string, unknown>;
@@ -470,6 +535,7 @@ export default class PushQueue {
         typeof raw.parentTreeSha === "string" ? raw.parentTreeSha : null,
       createdAt: typeof raw.createdAt === "number" ? raw.createdAt : 0,
       uploadedBlobs,
+      isolated: raw.isolated === true,
     };
   }
 

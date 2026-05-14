@@ -450,6 +450,41 @@ export async function getBranchHead(
  * higher-level `/commits` endpoint, because the latter requires the
  * repo to have a default branch set — and a bare test repo doesn't.
  */
+/**
+ * Walk the branch's commit history (first-parent) and return each
+ * commit's message, newest first. Capped at 100 commits to avoid
+ * runaway walks. Used by tests that care about commit-message
+ * content (e.g. asserting that a custom-message commit appears
+ * verbatim somewhere in history).
+ */
+export async function getBranchCommitMessages(
+  branch: string,
+  env: RepoEnv = requireEnv(),
+): Promise<string[]> {
+  const { token, owner, repo } = env;
+  const head = await getBranchHead(branch, env);
+  if (head === null) return [];
+  const out: string[] = [];
+  let sha: string | null = head;
+  let count = 0;
+  while (sha !== null && count < 100) {
+    count += 1;
+    const res = await ghFetch(
+      `${GH}/repos/${owner}/${repo}/git/commits/${sha}`,
+      { token },
+    );
+    if (res.status !== 200) {
+      throw new Error(
+        `getBranchCommitMessages walk → ${res.status}: ${res.text}`,
+      );
+    }
+    out.push(res.json.message as string);
+    const parents = res.json.parents as Array<{ sha: string }>;
+    sha = parents.length > 0 ? parents[0].sha : null;
+  }
+  return out;
+}
+
 export async function countBranchCommits(
   branch: string,
   env: RepoEnv = requireEnv(),

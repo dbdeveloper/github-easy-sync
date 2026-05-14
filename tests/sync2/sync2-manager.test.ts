@@ -331,14 +331,6 @@ function fixture(opts?: {
     vault as unknown as import("obsidian").Vault,
   );
   const gi = new GI(root);
-  const detector = new ChangeDetector({
-    vault: vault as unknown as import("obsidian").Vault,
-    store,
-    gi,
-    configDir: CONFIG_DIR,
-    selfPluginId: SELF_PLUGIN_ID,
-    vaultRoot: root,
-  });
   let current = new Date("2026-05-03T09:38:23.000Z");
   const clock = {
     tick: () => {
@@ -353,6 +345,15 @@ function fixture(opts?: {
     configDir: CONFIG_DIR,
     selfPluginId: SELF_PLUGIN_ID,
     now: () => clock.tick(),
+  });
+  const detector = new ChangeDetector({
+    vault: vault as unknown as import("obsidian").Vault,
+    store,
+    gi,
+    configDir: CONFIG_DIR,
+    selfPluginId: SELF_PLUGIN_ID,
+    vaultRoot: root,
+    queue,
   });
   const client = makeFakeClient();
   const builder = new TreeBuilder({
@@ -2324,34 +2325,49 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
         }
         return orig(args);
       };
-      return { ...f, allowNextPush: () => (allowPush = true) };
+      return {
+        ...f,
+        allowNextPush: () => (allowPush = true),
+        allowAllPushes: () => (allowPush = true),
+      };
     }
 
-    it("offline + accumulate ON: second sync folds into the first batch", async () => {
+    it("offline + accumulate ON: failed batch is locked, second sync stacks a new one", async () => {
+      // Under the user's spec, a batch that's been attempted at all
+      // (even once, even if it failed) is frozen against further
+      // accumulate-merges. The .attempted marker enforces this: it
+      // gets written at the start of processBatch and is NEVER
+      // cleared on failure. So even with accumulateOfflineSyncs ON,
+      // a second sync click after a failed push creates a separate
+      // batch — symmetric to the accumulate=OFF behaviour below.
       const f2 = brokenNetworkFixture();
       writeVaultFile(f2.root, "a.md", "v1");
       await f2.store.load();
       f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
 
-      // First sync: queues a batch, push fails.
       await expect(f2.manager.syncAll()).rejects.toThrow(
         /simulated network outage/,
       );
       const idsAfter1 = await f2.queue.list();
       expect(idsAfter1).toHaveLength(1);
 
-      // User keeps editing.
+      // The first batch must be marked .attempted; mergeIntoLatestPending
+      // skips it on the next syncAll.
+      const b1 = await f2.queue.read(idsAfter1[0]);
+      expect(b1.attempted).toBe(true);
+
       writeVaultFile(f2.root, "b.md", "v2");
 
-      // Second sync: should NOT make a new batch — fold into the
-      // existing one.
       await expect(f2.manager.syncAll()).rejects.toThrow();
       const idsAfter2 = await f2.queue.list();
-      expect(idsAfter2).toEqual(idsAfter1);
+      expect(idsAfter2).toHaveLength(2);
 
-      // Both files now in the same batch.
-      const batch = await f2.queue.read(idsAfter1[0]);
-      expect(batch.files.sort()).toEqual(["a.md", "b.md"]);
+      // Each batch holds only the changes from its own sync click —
+      // b.md did NOT fold into B1.
+      const newId = idsAfter2.find((id) => !idsAfter1.includes(id));
+      expect(newId).toBeDefined();
+      const b2 = await f2.queue.read(newId!);
+      expect(b2.files).toEqual(["b.md"]);
 
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
@@ -2393,7 +2409,13 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 
-    it("accumulated batch eventually pushes once network is back", async () => {
+    it("queued batches drain FIFO once network is back, each as its own commit", async () => {
+      // With the attempted-marker locking failed batches, two failed
+      // sync clicks produce TWO batches in queue (B1 + B2), not one
+      // folded batch. When the network returns, processQueue drains
+      // them in order: B1 commits (carrying a.md), then B2 commits
+      // (carrying b.md). Two updateBranchHead calls succeed, queue
+      // ends empty.
       const f2 = brokenNetworkFixture();
       writeVaultFile(f2.root, "a.md", "v1");
       await f2.store.load();
@@ -2402,20 +2424,16 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       writeVaultFile(f2.root, "b.md", "v2");
       await expect(f2.manager.syncAll()).rejects.toThrow();
 
-      // Network is back.
-      f2.allowNextPush();
+      // Network restored; let every subsequent push through.
+      f2.allowAllPushes();
       await f2.manager.resumeQueue();
 
-      // Final tree: one commit succeeded after several failed
-      // attempts; the successful one carries both files in a single
-      // tree (proof the accumulate path folded them into one batch).
-      const tree = f2.client.state.lastTree!;
-      expect(tree.map((e) => e.path).sort()).toEqual(["a.md", "b.md"]);
-      // Only one updateBranchHead succeeded; queue is empty.
+      // Two commits landed in order. Each tree carries only its own
+      // batch's files — proof the merge step refused to fold them.
       const refUpdates = f2.client.calls.filter(
         (c) => c.op === "updateBranchHead",
       );
-      expect(refUpdates).toHaveLength(1);
+      expect(refUpdates).toHaveLength(2);
       expect(await f2.queue.list()).toEqual([]);
 
       fs.rmSync(f2.root, { recursive: true, force: true });

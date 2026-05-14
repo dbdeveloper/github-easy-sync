@@ -9,7 +9,10 @@ export class CommitMessageModal extends Modal {
   constructor(
     app: App,
     private defaultMessage: string,
-    private filePath: string,
+    // Single-file syncs pass the path so the modal title can show
+    // "Commit message for foo.md". Whole-vault custom-message syncs
+    // pass null and get a generic title.
+    private filePath: string | null,
   ) {
     super(app);
   }
@@ -23,7 +26,11 @@ export class CommitMessageModal extends Modal {
 
   onOpen() {
     const { contentEl, titleEl } = this;
-    titleEl.setText(`Commit message for ${this.filePath}`);
+    titleEl.setText(
+      this.filePath !== null
+        ? `Commit message for ${this.filePath}`
+        : "Commit message",
+    );
 
     const input: { el: HTMLInputElement | null } = { el: null };
     new Setting(contentEl).setName("Message").addText((t) => {

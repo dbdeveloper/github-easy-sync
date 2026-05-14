@@ -278,8 +278,10 @@ export class Sync2Manager {
   // The pull pass runs first so subsequent findChanges() classifies
   // local files against the freshly-updated snapshot, not against
   // a stale baseline.
-  async syncAll(): Promise<void> {
-    await this.logger.info("Sync2 syncAll start");
+  async syncAll(customMessage?: string): Promise<void> {
+    await this.logger.info("Sync2 syncAll start", {
+      customMessage: customMessage !== undefined,
+    });
     // Etap 6.6: track paths whose remote bytes were non-canonical and
     // got rewritten locally. After findChanges runs we'll synthesize
     // FileChange[modified] for any republish entry not already covered
@@ -311,7 +313,22 @@ export class Sync2Manager {
       await this.logger.info("Sync2 syncAll: nothing to sync");
       return;
     }
-    const enqueued = await this.enqueueOrMerge(combined, this.fullSyncMeta());
+    // Custom-message syncAll goes through enqueueOrMerge as an
+    // isolated batch — user's typed message must survive intact and
+    // must not absorb later std-syncs into its commit on GitHub.
+    const meta: EnqueueMeta =
+      customMessage !== undefined
+        ? {
+            commitMessage: appendDeviceSuffix(
+              customMessage,
+              this.deviceLabel,
+            ),
+            parentCommitSha: this.store.getLastSyncCommitSha(),
+            parentTreeSha: this.store.getLastSyncTreeSha(),
+            isolated: true,
+          }
+        : this.fullSyncMeta();
+    const enqueued = await this.enqueueOrMerge(combined, meta);
     if (enqueued > 0) this.onLocalCommitted?.(enqueued);
     await this.processQueue(headAfterPull);
   }
@@ -371,10 +388,16 @@ export class Sync2Manager {
     // Apply the device suffix to BOTH the templated path and a
     // user-typed customMessage — uniform parseability on GitHub.
     const message = appendDeviceSuffix(baseMessage, this.deviceLabel);
+    // Custom-message syncs always get an isolated batch: the user's
+    // typed message must survive intact (no accumulate-group rename
+    // to a template) and must not absorb unrelated subsequent
+    // changes. enqueueOrMerge sees `isolated: true` and skips its
+    // mergeIntoLatestPending path.
     const enqueued = await this.enqueueOrMerge([change], {
       commitMessage: message,
       parentCommitSha: this.store.getLastSyncCommitSha(),
       parentTreeSha: this.store.getLastSyncTreeSha(),
+      isolated: customMessage !== undefined,
     });
     if (enqueued > 0) this.onLocalCommitted?.(enqueued);
     await this.processQueue(headAfterPull);
@@ -1023,9 +1046,19 @@ export class Sync2Manager {
   ): Promise<number> {
     const filtered = this.dropPendingConflictPaths(changes);
     if (filtered.length === 0) return 0;
-    if (this.accumulateOfflineSyncs) {
+    // Custom-message ("isolated") batches always stand alone — never
+    // try to fold them into a prior batch. Standard syncs still
+    // honour accumulateOfflineSyncs.
+    if (this.accumulateOfflineSyncs && !meta.isolated) {
       const target = await this.queue.mergeIntoLatestPending(filtered);
-      if (target !== null) return filtered.length;
+      if (target !== null) {
+        // Refresh the merged batch's commit message to the latest
+        // template render. "Last std-sync in the group wins" — the
+        // timestamp on GitHub then reflects when the batch actually
+        // shipped, not when the first click happened.
+        await this.queue.updateCommitMessage(target, meta.commitMessage);
+        return filtered.length;
+      }
     }
     await this.queue.enqueue(filtered, meta);
     return filtered.length;
@@ -1119,6 +1152,11 @@ export class Sync2Manager {
   ): Promise<void> {
     await this.logger.info(`Sync2 push batch ${id}`);
     await this.queue.markInProgress(id);
+    // Freeze this batch against further merges. The marker survives a
+    // failure (in-progress is cleared in the catch below, attempted is
+    // not), so a follow-up sync click can't accumulate new changes
+    // into a batch we already tried to push. See PushQueue.markAttempted.
+    await this.queue.markAttempted(id);
     try {
       // Four states for the head before push:
       //   1. expectedHead = null, currentHead = null → bare repo.

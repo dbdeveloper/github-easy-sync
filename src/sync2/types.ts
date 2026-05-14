@@ -41,6 +41,14 @@ export type QueueBatch = {
   // Whether the runner is currently uploading this batch. Persisted as
   // an ".in-progress" marker file inside the batch directory.
   inProgress: boolean;
+  // Whether the runner has ever started pushing this batch — set
+  // when processBatch begins and NEVER cleared (the only cleanup is
+  // queue.delete on commit success). Once set, the batch is
+  // "frozen": mergeIntoLatestPending refuses to fold new changes
+  // into it even when accumulateOfflineSyncs is on. Models the
+  // user's rule "in-progress OR failed batch is blocked from
+  // merges; new sync clicks create a new batch instead".
+  attempted: boolean;
   // Commit message to use for this batch's commit. Templated at enqueue
   // time so subsequent settings edits can't change a queued message.
   commitMessage: string;
@@ -57,6 +65,17 @@ export type QueueBatch = {
   // Paths to delete on the remote, listed verbatim from
   // deleted-paths.txt.
   deletions: string[];
+  // Whether this batch was created with a user-supplied commit
+  // message that must not be folded with subsequent syncs. Set true
+  // by the "Sync (custom message)..." commands and false by every
+  // standard-message sync. Isolated batches:
+  //   - never accept merges (mergeIntoLatestPending skips them when
+  //     looking for an accumulate target);
+  //   - never themselves merge into a prior batch (enqueueOrMerge
+  //     creates a fresh batch even if accumulateOfflineSyncs is on).
+  // The effect is "custom-message commit breaks the accumulate group
+  // cleanly", matching the user-facing intent.
+  isolated: boolean;
   // Per-file blob SHAs that `createBlob` already returned for this
   // batch in a prior (possibly crashed) attempt. Resume of an
   // interrupted push consults this map before issuing another
