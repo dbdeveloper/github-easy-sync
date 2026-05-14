@@ -1079,6 +1079,26 @@ export class Sync2Manager {
       ) {
         // Case 4.
         await this.reconcileBatchAgainstHead(id, expectedHead, currentHead);
+      } else if (currentHead !== null) {
+        // Case 3 (expectedHead set + currentHead matches), but the
+        // batch's recorded parent may be stale: if an earlier batch
+        // in this same processQueue drain already committed, this
+        // batch's parentCommitSha now lags behind reality. Without
+        // a re-target, createCommit would build on the stale parent
+        // and updateBranchHead would reject the non-fast-forward
+        // with 422. Re-fetching head's tree is cheap (one GET) and
+        // keeps the rest of the flow building on the right base.
+        const peek = await this.queue.read(id);
+        if (peek.parentCommitSha !== currentHead) {
+          const headCommit = await this.client.getCommit({
+            sha: currentHead,
+            retry: true,
+          });
+          await this.queue.updateMeta(id, {
+            parentCommitSha: currentHead,
+            parentTreeSha: headCommit.tree.sha,
+          });
+        }
       }
 
       // Estimate aggregate transfer size for the progress UI hint.

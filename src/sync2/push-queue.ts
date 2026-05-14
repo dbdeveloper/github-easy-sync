@@ -1,5 +1,5 @@
 import { Vault } from "obsidian";
-import { hasTextExtension } from "../utils";
+import { calculateGitBlobSHA, hasTextExtension } from "../utils";
 import { normalizeText } from "./text-normalize";
 import { FileChange, QueueBatch } from "./types";
 
@@ -56,6 +56,12 @@ export default class PushQueue {
   private readonly vault: Vault;
   private readonly queueRoot: string;
   private readonly now: () => Date;
+  // Serializes meta-file rewrites so concurrent `recordBlobUpload`
+  // callers (parallel `createBlob` callbacks in TreeBuilder) don't
+  // clobber each other's appends. Each call awaits the previous one
+  // — overall throughput stays parallel for the network upload, only
+  // the tiny meta-write turn is sequential.
+  private metaWriteQueue: Promise<void> = Promise.resolve();
 
   constructor(deps: PushQueueDeps) {
     this.vault = deps.vault;
@@ -127,7 +133,71 @@ export default class PushQueue {
       parentTreeSha: meta.parentTreeSha,
       files,
       deletions,
+      uploadedBlobs: meta.uploadedBlobs,
     };
+  }
+
+  // Return the Git blob SHA of `path` as it sits in any queued batch
+  // (any state — pending available, in-progress, attempted). Used by
+  // ChangeDetector.findChanges to suppress duplicate enqueue when a
+  // file the user "already committed locally" (= already snapshotted
+  // into the queue) hasn't been mutated since: the batch will push
+  // its content when its turn comes, no need to enqueue again.
+  //
+  // Resolution order per batch:
+  //   1. If `uploadedBlobs[path]` exists, return it — that's the SHA
+  //      GitHub already validated (the byte upload happened in a
+  //      prior attempt). No disk read needed.
+  //   2. Otherwise read `vault/<path>` from the batch directory and
+  //      compute the Git blob SHA from those bytes.
+  //
+  // Returns the first match found across batches (oldest first, by
+  // FIFO ordering — but since duplicates across batches are an
+  // invariant we don't preserve, just the first match is enough).
+  async peekPathSha(path: string): Promise<string | null> {
+    const ids = await this.list();
+    for (const id of ids) {
+      const batchDir = `${this.queueRoot}/${id}`;
+      const meta = await this.readMeta(batchDir);
+      const cached = meta.uploadedBlobs[path];
+      if (typeof cached === "string") return cached;
+      const snapshotPath = `${batchDir}/${VAULT_SUBDIR}/${path}`;
+      if (!(await this.vault.adapter.exists(snapshotPath))) continue;
+      const buf = await this.vault.adapter.readBinary(snapshotPath);
+      return await calculateGitBlobSHA(buf);
+    }
+    return null;
+  }
+
+  // Record that `createBlob` succeeded for `path` in this batch.
+  // Serialized through metaWriteQueue so concurrent callers (parallel
+  // createBlob callbacks in TreeBuilder) can't clobber each other's
+  // entries. On resume of an interrupted batch, TreeBuilder consults
+  // this map BEFORE issuing createBlob — present paths skip the
+  // network call entirely, the cached SHA goes straight into the
+  // tree entry.
+  async recordBlobUpload(
+    id: string,
+    path: string,
+    sha: string,
+  ): Promise<void> {
+    const next = this.metaWriteQueue.then(async () => {
+      const batchDir = `${this.queueRoot}/${id}`;
+      const meta = await this.readMeta(batchDir);
+      const updated = { ...meta.uploadedBlobs, [path]: sha };
+      await this.writeMeta(batchDir, {
+        commitMessage: meta.commitMessage,
+        parentCommitSha: meta.parentCommitSha,
+        parentTreeSha: meta.parentTreeSha,
+        createdAt: meta.createdAt,
+        uploadedBlobs: updated,
+      });
+    });
+    // Swallow errors on the chained queue value (so one failure
+    // doesn't poison every subsequent enqueue) but propagate this
+    // call's own outcome to its caller.
+    this.metaWriteQueue = next.catch(() => undefined);
+    return next;
   }
 
   async markInProgress(id: string): Promise<void> {
@@ -341,11 +411,16 @@ export default class PushQueue {
       parentCommitSha: string | null;
       parentTreeSha: string | null;
       createdAt: number;
+      uploadedBlobs?: Record<string, string>;
     },
   ): Promise<void> {
+    const out = {
+      ...meta,
+      uploadedBlobs: meta.uploadedBlobs ?? {},
+    };
     await this.vault.adapter.write(
       `${batchDir}/${META_FILE}`,
-      JSON.stringify(meta),
+      JSON.stringify(out),
     );
   }
 
@@ -353,9 +428,21 @@ export default class PushQueue {
     commitMessage: string;
     parentCommitSha: string | null;
     parentTreeSha: string | null;
+    createdAt: number;
+    uploadedBlobs: Record<string, string>;
   }> {
     const text = await this.vault.adapter.read(`${batchDir}/${META_FILE}`);
     const raw = JSON.parse(text) as Record<string, unknown>;
+    let uploadedBlobs: Record<string, string> = {};
+    if (raw.uploadedBlobs && typeof raw.uploadedBlobs === "object") {
+      // Coerce to Record<string, string>, dropping any non-string
+      // entries silently. Pre-existing batches written before this
+      // field landed deserialize with the empty default.
+      const candidate = raw.uploadedBlobs as Record<string, unknown>;
+      for (const [path, sha] of Object.entries(candidate)) {
+        if (typeof sha === "string") uploadedBlobs[path] = sha;
+      }
+    }
     return {
       commitMessage:
         typeof raw.commitMessage === "string" ? raw.commitMessage : "",
@@ -363,6 +450,8 @@ export default class PushQueue {
         typeof raw.parentCommitSha === "string" ? raw.parentCommitSha : null,
       parentTreeSha:
         typeof raw.parentTreeSha === "string" ? raw.parentTreeSha : null,
+      createdAt: typeof raw.createdAt === "number" ? raw.createdAt : 0,
+      uploadedBlobs,
     };
   }
 

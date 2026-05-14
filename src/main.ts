@@ -225,6 +225,11 @@ export default class GitHubSyncPlugin extends Plugin {
     const store = new SnapshotStore(this.app.vault);
     await store.load();
     const gi = new GI(vaultRoot);
+    const queue = new PushQueue({
+      vault: this.app.vault,
+      configDir: this.app.vault.configDir,
+      selfPluginId: manifest.id,
+    });
     const detector = new ChangeDetector({
       vault: this.app.vault,
       store,
@@ -232,11 +237,7 @@ export default class GitHubSyncPlugin extends Plugin {
       configDir: this.app.vault.configDir,
       selfPluginId: manifest.id,
       vaultRoot,
-    });
-    const queue = new PushQueue({
-      vault: this.app.vault,
-      configDir: this.app.vault.configDir,
-      selfPluginId: manifest.id,
+      queue,
     });
     const builder = new TreeBuilder({
       vault: this.app.vault,

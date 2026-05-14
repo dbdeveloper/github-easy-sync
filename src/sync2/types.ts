@@ -33,7 +33,8 @@ export type FileChange =
 
 // One push-queue batch waiting on disk. Always represents the user's
 // intent at the moment the batch was enqueued; later edits do not
-// retroactively mutate it.
+// retroactively mutate it. The one writable slot is `uploadedBlobs`,
+// which tracks per-file `createBlob` results for resume — see below.
 export type QueueBatch = {
   // Timestamp-suffixed directory name, e.g. "20260503093823777".
   id: string;
@@ -56,6 +57,16 @@ export type QueueBatch = {
   // Paths to delete on the remote, listed verbatim from
   // deleted-paths.txt.
   deletions: string[];
+  // Per-file blob SHAs that `createBlob` already returned for this
+  // batch in a prior (possibly crashed) attempt. Resume of an
+  // interrupted push consults this map before issuing another
+  // createBlob — if `path` is present, the SHA is reused inline in
+  // the tree entry and the network call is skipped. Empty on first
+  // attempt; populated incrementally as `createBlob` calls succeed.
+  // Survives across plugin reloads because it lives in .meta.json.
+  // Cleared implicitly when the batch dir is deleted on commit
+  // success — staleness is impossible by construction.
+  uploadedBlobs: Record<string, string>;
 };
 
 // Outcome of a 3-way merge attempt.

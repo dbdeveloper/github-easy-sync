@@ -80,10 +80,36 @@ export default class TreeBuilder {
 
     // Binary files: createBlob in parallel for throughput. Each call
     // returns a blob SHA; the tree entry references it. Concurrency
-    // is bounded by Promise.all (one per file) — fine on the small
-    // batches sync2 produces (single Sync click, 1–10 files typical).
-    const binaryEntries = await Promise.all(
+    // is bounded by Promise.allSettled (one per file) — fine on the
+    // small batches sync2 produces (single Sync click, 1–10 files
+    // typical).
+    //
+    // Resume optimisation: `batch.uploadedBlobs` holds path→SHA pairs
+    // from prior crashed attempts at this batch. Each map hit skips
+    // the entire createBlob round-trip — the recorded SHA goes
+    // straight into the tree entry. Misses upload as normal, then
+    // persist via `recordBlobUpload` so the next resume sees them.
+    // The metaWriteQueue inside PushQueue serializes those persists
+    // so parallel callbacks don't clobber each other.
+    //
+    // We use allSettled rather than `Promise.all` so a single failure
+    // doesn't abandon sibling callbacks while their createBlob+
+    // recordBlobUpload are still mid-flight — that race would leave
+    // uploadedBlobs out of sync with the actual GitHub-side blob set
+    // and break resume. With allSettled, every sibling either lands
+    // its recordBlobUpload or fails cleanly before we re-throw the
+    // first error.
+    const settled = await Promise.allSettled(
       binaryFiles.map(async (path) => {
+        const cachedSha = batch.uploadedBlobs[path];
+        if (typeof cachedSha === "string") {
+          return {
+            path,
+            mode: "100644",
+            type: "blob",
+            sha: cachedSha,
+          } satisfies NewTreeRequestItem;
+        }
         const buf = await this.vault.adapter.readBinary(
           `${batchVaultDir}/${path}`,
         );
@@ -92,6 +118,7 @@ export default class TreeBuilder {
           encoding: "base64",
           retry: true,
         });
+        await this.queue.recordBlobUpload(batchId, path, blob.sha);
         return {
           path,
           mode: "100644",
@@ -100,7 +127,13 @@ export default class TreeBuilder {
         } satisfies NewTreeRequestItem;
       }),
     );
-    entries.push(...binaryEntries);
+    const firstReject = settled.find((r) => r.status === "rejected");
+    if (firstReject && firstReject.status === "rejected") {
+      throw firstReject.reason;
+    }
+    for (const r of settled) {
+      if (r.status === "fulfilled") entries.push(r.value);
+    }
 
     // Deletions: per GitHub's tree API, omit content+sha and explicitly
     // set sha to null. The server interprets this as "remove this path

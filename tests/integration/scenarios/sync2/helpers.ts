@@ -111,6 +111,11 @@ export async function createSync2Client(
   const store = new SnapshotStore(vault);
   await store.load();
   const gi = new GI(vaultPath);
+  const queue = new PushQueue({
+    vault,
+    configDir: CONFIG_DIR,
+    selfPluginId: SELF_PLUGIN_ID,
+  });
   const detector = new ChangeDetector({
     vault,
     store,
@@ -118,11 +123,7 @@ export async function createSync2Client(
     configDir: CONFIG_DIR,
     selfPluginId: SELF_PLUGIN_ID,
     vaultRoot: vaultPath,
-  });
-  const queue = new PushQueue({
-    vault,
-    configDir: CONFIG_DIR,
-    selfPluginId: SELF_PLUGIN_ID,
+    queue,
   });
   const builder = new TreeBuilder({
     vault,

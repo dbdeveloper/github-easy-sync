@@ -70,6 +70,20 @@ export interface ChangeDetectorDeps {
   configDir: string;
   selfPluginId: string;
   vaultRoot: string;
+  // Optional: when set, findChanges bridges the snapshot store with
+  // the live push-queue. A file whose local bytes match what some
+  // pending batch already holds is treated as "committed locally"
+  // (= waiting for its batch to push) and skipped from re-emission.
+  // Without this dep, the detector falls back to snapshot-only
+  // behaviour — fine for unit tests that don't build a queue.
+  queue?: PeekableQueue;
+}
+
+// Minimal surface ChangeDetector consumes from PushQueue. Lets
+// tests inject a stub without dragging the full queue (which would
+// also drag its disk layout).
+export interface PeekableQueue {
+  peekPathSha(path: string): Promise<string | null>;
 }
 
 export default class ChangeDetector {
@@ -79,6 +93,7 @@ export default class ChangeDetector {
   private readonly configDir: string;
   private readonly selfPluginId: string;
   private readonly vaultRoot: string;
+  private readonly queue: PeekableQueue | undefined;
 
   constructor(deps: ChangeDetectorDeps) {
     this.vault = deps.vault;
@@ -87,6 +102,7 @@ export default class ChangeDetector {
     this.configDir = deps.configDir;
     this.selfPluginId = deps.selfPluginId;
     this.vaultRoot = deps.vaultRoot;
+    this.queue = deps.queue;
   }
 
   // Walk the vault, return everything that needs to flow remote-ward,
@@ -145,6 +161,19 @@ export default class ChangeDetector {
 
       const snap = this.store.get(file.path);
       if (!snap) {
+        // Candidate "added". Before emitting, check whether the file
+        // is already represented in any pending queue batch with the
+        // exact same bytes — if so, it's "committed locally" (waiting
+        // for its batch to push) and re-emitting would duplicate work
+        // on the very next enqueue. Reading + hashing the bytes is
+        // the same cost the upcoming push would pay; we just bring
+        // it forward.
+        if (this.queue) {
+          const buf = await this.vault.adapter.readBinary(file.path);
+          const localSha = await calculateGitBlobSHA(buf);
+          const inQueueSha = await this.queue.peekPathSha(file.path);
+          if (inQueueSha === localSha) continue;
+        }
         out.push({
           kind: "added",
           path: file.path,
@@ -178,6 +207,15 @@ export default class ChangeDetector {
           size: file.stat.size,
         });
         continue;
+      }
+
+      // Same "in-flight in queue" check as the "added" branch above —
+      // covers the case where a previous syncAll enqueued this path
+      // (without modifying snapshot yet) and the user did NOT edit it
+      // between the failed push and this retry.
+      if (this.queue) {
+        const inQueueSha = await this.queue.peekPathSha(file.path);
+        if (inQueueSha === sha) continue;
       }
 
       out.push({
