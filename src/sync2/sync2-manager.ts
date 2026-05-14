@@ -507,14 +507,27 @@ export class Sync2Manager {
       });
     } catch (err) {
       // compare returns 404 when the base commit is unreachable
-      // (force-pushed history). Don't crash — the next push will
-      // reconcile against currentHead.
+      // (force-pushed history, GC'd commit, manifest corruption that
+      // landed a bogus SHA). The unreachable base means we can't
+      // diff and can't 3-way-merge against it later — so advance
+      // lastSync to the live head right now. The upcoming
+      // enqueueOrMerge picks up that fresh parent and processBatch
+      // hits the Case 3 fast-path (head matches), skipping the
+      // reconcile branch that would try to fetch blobs at the
+      // bogus base SHA. Pinned by K3.
       const status = (err as { status?: number }).status;
       if (status === 404) {
         await this.logger.warn("Sync2 pull: compare base unreachable", {
           expectedHead,
           currentHead,
         });
+        const headCommit = await this.client.getCommit({
+          sha: currentHead,
+          retry: true,
+        });
+        this.store.setLastSync(currentHead, headCommit.tree.sha);
+        this.store.setLastCommitMtime(this.now());
+        await this.store.save();
         return currentHead;
       }
       throw err;
