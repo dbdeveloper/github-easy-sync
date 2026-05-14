@@ -181,6 +181,11 @@ export async function createSync2Client(
     commitMessageAll: () => settings.commitMessageAll ?? "Sync2 test {date}",
     commitMessageFile: () => settings.commitMessageFile ?? "Update {filename}",
     deviceLabel: () => settings.deviceLabel ?? "sync2-int-test",
+    remoteIdentity: () => ({
+      owner: settings.githubOwner,
+      repo: settings.githubRepo,
+      branch: settings.githubBranch,
+    }),
     conflictStore,
     onConflict,
     accumulateOfflineSyncs: opts.accumulateOfflineSyncs ?? false,

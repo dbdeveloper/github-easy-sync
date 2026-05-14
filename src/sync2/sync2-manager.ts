@@ -11,7 +11,7 @@ import {
 import ChangeDetector from "./change-detector";
 import GitignoreInvariants from "./gitignore-invariants";
 import PushQueue, { EnqueueMeta } from "./push-queue";
-import SnapshotStore from "./snapshot-store";
+import SnapshotStore, { RemoteIdentity } from "./snapshot-store";
 import TreeBuilder from "./tree-builder";
 import { mergeText } from "./three-way-merge";
 import {
@@ -223,6 +223,15 @@ export interface Sync2ManagerDeps {
   // changes into the latest pending batch instead of stacking. The
   // eventual replay produces one commit instead of N.
   accumulateOfflineSyncs?: boolean;
+  // (owner, repo, branch) currently configured in settings. Read live
+  // at the start of every syncAll: if it differs from the triplet the
+  // snapshot was last reconciled against, the manager treats the
+  // current state as "wrong remote", wipes snapshot + push-queue +
+  // conflict-store, and routes through adoption-from-remote (the
+  // bootstrap path) so the new repo is cloned cleanly. Optional —
+  // unit tests that don't care about remote-identity tracking can
+  // omit it; mismatch detection is skipped when undefined.
+  remoteIdentity?: () => RemoteIdentity;
   // Override the clock for deterministic tests.
   now?: () => number;
 }
@@ -249,6 +258,7 @@ export class Sync2Manager {
     | ((filesCount: number) => void)
     | undefined;
   private readonly onNoLocalChanges: (() => void) | undefined;
+  private readonly remoteIdentity: (() => RemoteIdentity) | undefined;
   private readonly now: () => number;
   // Guard against re-entrant processQueue. The runner only loops one
   // batch at a time; if a second syncAll() lands while the first is
@@ -285,6 +295,7 @@ export class Sync2Manager {
     this.onProgress = deps.onProgress;
     this.onLocalCommitted = deps.onLocalCommitted;
     this.onNoLocalChanges = deps.onNoLocalChanges;
+    this.remoteIdentity = deps.remoteIdentity;
     this.now = deps.now ?? (() => Date.now());
   }
 
@@ -301,6 +312,13 @@ export class Sync2Manager {
     await this.logger.info("Sync2 syncAll start", {
       customMessage: customMessage !== undefined,
     });
+    // Remote-identity drift check runs FIRST — before bootstrapIfNeeded
+    // and pullIfNeeded. If the user pointed the plugin at a different
+    // (owner, repo, branch), we wipe local state here so the rest of
+    // syncAll naturally routes through adoption-from-remote against
+    // the new remote (lastSyncCommitSha is null after the wipe →
+    // bootstrapIfNeeded sees the new branch and clones it).
+    await this.reconcileRemoteIdentity();
     // Etap 6.6: track paths whose remote bytes were non-canonical and
     // got rewritten locally. After findChanges runs we'll synthesize
     // FileChange[modified] for any republish entry not already covered
@@ -364,6 +382,11 @@ export class Sync2Manager {
   // notice and returns silently. No queue batch is created.
   async syncFile(path: string, customMessage?: string): Promise<void> {
     await this.logger.info(`Sync2 syncFile start`, { path });
+    // Remote-identity drift check first — same reason as syncAll. If
+    // settings now point at a different remote, the snapshot is
+    // useless and we'd be pushing single-file content to the wrong
+    // repo if we kept going.
+    await this.reconcileRemoteIdentity();
     // Etap 6.6: pull-side normalization may rewrite OTHER paths besides
     // the syncFile target. We only push the target in this batch (the
     // user asked to sync one file, not the whole vault); the rest stay
@@ -446,6 +469,7 @@ export class Sync2Manager {
   // suppressConflictModals flag before calling pullOnly().
   async pullOnly(): Promise<void> {
     await this.logger.info("Sync2 pullOnly start");
+    await this.reconcileRemoteIdentity();
     const republishPaths = new Set<string>();
     const headAfterBootstrap = await this.bootstrapIfNeeded(republishPaths);
     if (headAfterBootstrap === null) {
@@ -605,6 +629,53 @@ export class Sync2Manager {
   // local snapshot store. Runs at most once per device — when sync2
   // sees lastSyncCommitSha=null but the branch has commits, this is
   // the only honest way to align local state with remote without
+  // Check the (owner, repo, branch) the snapshot was last reconciled
+  // against. If it matches current settings: record (no-op when
+  // already recorded) and proceed. If it differs: the user pointed
+  // the plugin at a different remote (or branch); wipe snapshot +
+  // push-queue + conflict-store so the rest of syncAll routes through
+  // bootstrapIfNeeded → bootstrapFromRemote (adoption) against the
+  // new remote. The pending batches in the queue carry the previous
+  // repo's parent SHAs and would push wrong content if we kept them.
+  //
+  // First-observation case (recordedRemote === null on a vault that
+  // has been synced before — e.g. an upgrade from an older sync2
+  // version): record current settings without resetting.
+  //
+  // No-op when the manager wasn't given a remoteIdentity getter
+  // (unit tests that don't care about this surface).
+  private async reconcileRemoteIdentity(): Promise<void> {
+    if (!this.remoteIdentity) return;
+    const current = this.remoteIdentity();
+    const recorded = this.store.getRemoteIdentity();
+    if (recorded === null) {
+      // First-ever observation. Record and continue — don't treat
+      // this as a mismatch (an upgrade from an older sync2 version
+      // would land here once and shouldn't wipe state).
+      this.store.setRemoteIdentity(current);
+      await this.store.save();
+      return;
+    }
+    if (
+      recorded.owner === current.owner &&
+      recorded.repo === current.repo &&
+      recorded.branch === current.branch
+    ) {
+      return;
+    }
+    await this.logger.warn(
+      "Sync2 remote identity changed; wiping local state",
+      { from: recorded, to: current },
+    );
+    this.store.clear();
+    this.store.setRemoteIdentity(current);
+    await this.store.save();
+    await this.queue.clearAll();
+    if (this.conflictStore) {
+      await this.conflictStore.clearAll();
+    }
+  }
+
   // letting the user's first push silently overwrite history.
   //
   // Returns the head SHA observed (so callers can pass it as a hint

@@ -241,6 +241,24 @@ export default class ConflictStore {
     this.unindexRecord(r);
   }
 
+  // Drop every pending conflict + sibling file. Used by Sync2Manager
+  // when it detects the user pointed the plugin at a different remote
+  // (the sibling files reference snapshots from the previous repo)
+  // and by the "Reset" settings button.
+  async clearAll(): Promise<void> {
+    for (const record of this.byId.values()) {
+      if (await this.vault.adapter.exists(record.siblingPath)) {
+        await this.vault.adapter.remove(record.siblingPath);
+      }
+    }
+    if (await this.vault.adapter.exists(this.conflictsRoot)) {
+      await this.vault.adapter.rmdir(this.conflictsRoot, true);
+    }
+    this.byId.clear();
+    this.byVaultPath.clear();
+    this.bySiblingPath.clear();
+  }
+
   // Vault listener entry point: when the user deletes a sibling file
   // through Obsidian's file tree, fire this with the deleted path so
   // the conflict closes itself. Returns true if a record matched and

@@ -304,6 +304,15 @@ function fixture(opts?: {
   progressMessages?: string[];
   onLocalCommitted?: (count: number) => void;
   onNoLocalChanges?: () => void;
+  // Getter for the current (owner, repo, branch). When omitted the
+  // manager's reconcile-remote-identity step is a no-op — fine for
+  // tests that don't care. Tests that DO care pass a closure that
+  // reads a mutable handle so the test can swap it mid-run.
+  remoteIdentity?: () => {
+    owner: string;
+    repo: string;
+    branch: string;
+  };
 }): {
   root: string;
   vault: Vault;
@@ -404,6 +413,7 @@ function fixture(opts?: {
     onProgress: opts?.onProgress,
     onLocalCommitted: opts?.onLocalCommitted,
     onNoLocalChanges: opts?.onNoLocalChanges,
+    remoteIdentity: opts?.remoteIdentity,
     now: () => clock.nowMs(),
   });
   return {
@@ -2563,5 +2573,117 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
     expect(
       f.client.calls.filter((c) => c.op === "createCommit").length,
     ).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("Sync2Manager — reconcileRemoteIdentity", () => {
+  // The reconcile step is what runs at the very start of syncAll —
+  // exercised here in isolation (cast to any) so the assertions
+  // don't have to model the rest of syncAll's bootstrap/pull flow
+  // re-populating `lastSyncCommitSha`. Public syncAll is exercised
+  // by integration tests downstream.
+  type ReconcilableManager = { reconcileRemoteIdentity(): Promise<void> };
+  const reconcile = (m: Sync2Manager): Promise<void> =>
+    (m as unknown as ReconcilableManager).reconcileRemoteIdentity();
+
+  it("first observation: records identity, doesn't reset (upgrade-safe)", async () => {
+    const handle = { owner: "alice", repo: "vault", branch: "main" };
+    const f = fixture({ remoteIdentity: () => handle });
+    f.store.setLastSync("EXISTING_SHA", "EXISTING_TREE");
+    expect(f.store.getRemoteIdentity()).toBeNull();
+
+    await reconcile(f.manager);
+
+    expect(f.store.getRemoteIdentity()).toEqual(handle);
+    // lastSync untouched — no reset happened.
+    expect(f.store.getLastSyncCommitSha()).toBe("EXISTING_SHA");
+  });
+
+  it("matching identity: no-op", async () => {
+    const handle = { owner: "alice", repo: "vault", branch: "main" };
+    const f = fixture({ remoteIdentity: () => handle });
+    f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+    f.store.setRemoteIdentity({ ...handle });
+
+    await reconcile(f.manager);
+
+    expect(f.store.getRemoteIdentity()).toEqual(handle);
+    expect(f.store.getLastSyncCommitSha()).toBe("BRANCH_HEAD_INIT");
+  });
+
+  it("repo change: wipes snapshot + push-queue, records new identity", async () => {
+    const handle = { owner: "alice", repo: "vault", branch: "main" };
+    const f = fixture({ remoteIdentity: () => handle });
+    f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+    f.store.setRemoteIdentity({ ...handle });
+    // Leave a pending batch on disk (a failed earlier push).
+    writeVaultFile(f.root, "stale.md", "from old repo");
+    const id = await f.queue.enqueue(
+      [
+        {
+          kind: "added",
+          path: "stale.md",
+          size: 13,
+          mtime: f.clock.nowMs(),
+        },
+      ],
+      {
+        commitMessage: "old commit",
+        parentCommitSha: "OLD_PARENT",
+        parentTreeSha: "OLD_PARENT_TREE",
+      },
+    );
+    expect(await f.queue.list()).toContain(id);
+
+    // User edits settings → new repo.
+    handle.repo = "different-vault";
+
+    await reconcile(f.manager);
+
+    expect(f.store.getRemoteIdentity()).toEqual({
+      owner: "alice",
+      repo: "different-vault",
+      branch: "main",
+    });
+    expect(f.store.getLastSyncCommitSha()).toBeNull();
+    expect(await f.queue.list()).not.toContain(id);
+  });
+
+  it("branch change: also triggers reset (treated same as repo change)", async () => {
+    const handle = { owner: "alice", repo: "vault", branch: "main" };
+    const f = fixture({ remoteIdentity: () => handle });
+    f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+    f.store.setRemoteIdentity({ ...handle });
+
+    handle.branch = "dev";
+
+    await reconcile(f.manager);
+
+    expect(f.store.getLastSyncCommitSha()).toBeNull();
+    expect(f.store.getRemoteIdentity()?.branch).toBe("dev");
+  });
+
+  it("owner change: also triggers reset", async () => {
+    const handle = { owner: "alice", repo: "vault", branch: "main" };
+    const f = fixture({ remoteIdentity: () => handle });
+    f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+    f.store.setRemoteIdentity({ ...handle });
+
+    handle.owner = "bob";
+
+    await reconcile(f.manager);
+
+    expect(f.store.getLastSyncCommitSha()).toBeNull();
+    expect(f.store.getRemoteIdentity()?.owner).toBe("bob");
+  });
+
+  it("no remoteIdentity getter: reconcile is a no-op", async () => {
+    const f = fixture(); // no opts.remoteIdentity
+    f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+
+    await reconcile(f.manager);
+
+    expect(f.store.getRemoteIdentity()).toBeNull();
+    expect(f.store.getLastSyncCommitSha()).toBe("BRANCH_HEAD_INIT");
   });
 });

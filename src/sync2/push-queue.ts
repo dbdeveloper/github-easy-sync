@@ -269,6 +269,15 @@ export default class PushQueue {
     await this.vault.adapter.rmdir(batchDir, true);
   }
 
+  // Drop every batch on disk. Used by Sync2Manager when it detects
+  // the user pointed the plugin at a different remote — the pending
+  // batches reference the previous repo's parent SHAs and would push
+  // wrong content. Also used by the "Reset" settings button.
+  async clearAll(): Promise<void> {
+    if (!(await this.vault.adapter.exists(this.queueRoot))) return;
+    await this.vault.adapter.rmdir(this.queueRoot, true);
+  }
+
   // Append `changes` into the most recent pending (not in-progress)
   // batch. Used by the offline-accumulate path so a streak of Sync
   // clicks while disconnected coalesces into a single commit. Returns

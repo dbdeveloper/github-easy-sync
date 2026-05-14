@@ -226,7 +226,7 @@ sync2/
 ├── edges/                 # F: special chars in paths + content edge cases
 ├── multi-device/          # G1–G4: rotation, disjoint edits, same-line, binary atomic
 ├── drift/                 # H1–H4: web-UI modify, PATCH retry, concurrent syncAll, OOB rename
-├── settings-lifecycle/    # I1–I4: reset metadata, syncConfigDir toggle, deviceLabel change
+├── settings-lifecycle/    # I1–I6: reset metadata, syncConfigDir toggle, deviceLabel change, pull-side OFF, repo-switch auto-detect
 ├── api-failures/          # J1–J4: invalid token, 429 retry, wrong repo, network drop
 ├── manifest-corruption/   # K1–K5: invalid JSON, deleted, stale lastSync, unknown fields, empty files map
 ├── accumulate/            # L1–L4: accumulate semantics + attempted-marker
@@ -248,6 +248,29 @@ Threaded through as a live getter — `() => settings.syncConfigDir` — so flip
 **Enumeration**: production Obsidian's `vault.getFiles()` does NOT index files under `<configDir>/` (legacy bug confirmed against a real vault: `getFiles()` returned `Welcome.md` but skipped `.obsidian/.gitignore`). When the toggle is ON, `findChanges` additionally walks `<configDir>/` via `adapter.list()` recursively to surface those paths. When OFF, the walk is skipped entirely — no extra syscalls.
 
 **OFF → ON is forward-looking.** When OFF, a remote change to a configDir path is filtered by the gate but `lastSync` still advances to current `HEAD` (the gate filters the file, not the commit). Toggling ON later does NOT retroactively pull configDir paths that drifted on remote during the OFF window — `compare(lastSync, HEAD)` returns empty. The next remote change to those paths after toggle ON does pull as normal. Matches a `git update-index --skip-worktree` analogue: unskipping doesn't retroactively pull, only forward changes do. Covered by I3.
+
+### Remote identity tracking
+
+The snapshot store records the `(owner, repo, branch)` triplet it was last reconciled against. `Sync2Manager.reconcileRemoteIdentity()` runs at the very start of every `syncAll`/`syncFile`/`pullOnly` — BEFORE `bootstrapIfNeeded` and `pullIfNeeded` — and compares the recorded triplet to current settings:
+
+- **First observation** (`remoteIdentity == null`, e.g. an upgrade from an older sync2 version): record current settings, don't reset. Existing `lastSync` state stays intact.
+- **Matching triplet**: no-op.
+- **Mismatch** (user edited owner/repo/branch in the settings tab): wipe `SnapshotStore` + `PushQueue` + `ConflictStore`, record new identity. The rest of `syncAll` then routes through `bootstrapFromRemote` (adoption) against the new remote because `lastSyncCommitSha` is null.
+
+All three components — owner, repo, branch — are treated equally. A bare branch change triggers the same wipe as a full repo change: the previous `lastSync` commit isn't on the new branch and `compare` would 404 or return wrong diff. This intentionally trades "branch switching costs a full re-adopt" against "branch switching never silently leaks content from one branch to another". Covered by I6 + unit tests in `tests/sync2/sync2-manager.test.ts` under `reconcileRemoteIdentity`.
+
+Why "wipe push-queue too": pending batches on disk reference the *previous* repo's parent SHAs. If we kept them across a repo switch, the next push would either fail (wrong parent on the new repo) or silently push wrong content. Wiping the queue is the only safe option.
+
+### "Reset" settings button
+
+Panic-button in the settings tab under "Danger zone". Two-step confirmation modal (user types `RESET` to enable the confirm button). On confirm: wipes `settings` to `DEFAULT_SETTINGS` (clears GitHub token, owner, repo, branch, etc.) + `SnapshotStore.clear()` + `PushQueue.clearAll()` + `ConflictStore.clearAll()`. Local vault files are NOT touched.
+
+Use cases the design supports:
+- Token rotation after a suspected leak — kills the in-flight push before the new owner of the token can intercept it.
+- Manual fresh-clone setup before reconfiguring against a different repo (the auto-detect handles the common case; Reset is for "I want to nuke everything").
+- Troubleshooting "something feels wrong" without uninstalling.
+
+Implemented in `main.ts:resetPluginState()` (the action) + `src/settings/tab.ts:ResetConfirmModal` (the confirmation).
 
 ### Things sync2 deliberately does NOT do
 
@@ -500,7 +523,7 @@ The bucket form takes a glob — `tests/integration/scenarios/sync2/conflicts*` 
 | `edges/F-special-chars-and-content.test.ts` | F | Cyrillic paths + content, spaces/brackets in filenames, empty files, 1 MB long-line, 150-char filename, remote-side Cyrillic path pulled into fresh vault. 6 `it()` sub-cases in one file. |
 | `multi-device/G1-three-device-rotation.test.ts` … `G4-binary-atomic-across-devices.test.ts` | G1–G4 | Three-device rotation A→B→C→A (G1), two-device disjoint same-file edits → 3-way merge (G2), same-line conflict resolved on the second pusher (G3), binary atomic mtime across two real sync2 devices (G4). |
 | `drift/H1-out-of-band-modify.test.ts` … `H4-out-of-band-rename.test.ts` | H1–H4 | Web-UI edit between syncs (H1), PATCH `/git/refs` transient retry + hard-fail recovery (H2), concurrent syncAll serialized via `running` flag (H3), out-of-band delete+create rename (H4). |
-| `settings-lifecycle/I1-reset-metadata.test.ts` … `I4-device-label-change.test.ts` | I1–I4 | Snapshot reset (I1), syncConfigDir ON→OFF (I2), OFF→ON forward-looking (I3), deviceLabel change mid-session reflected in next commit message (I4). |
+| `settings-lifecycle/I1-reset-metadata.test.ts` … `I6-repo-switch-auto-detect.test.ts` | I1–I6 | Snapshot reset (I1), syncConfigDir ON→OFF (I2), OFF→ON forward-looking (I3), deviceLabel change reflected in next commit message (I4), pull-side OFF blocks incoming configDir changes (I5), owner/repo/branch change in settings auto-wipes snapshot + queue and re-adopts from new remote (I6). |
 | `api-failures/J1-invalid-token.test.ts` … `J4-network-drop.test.ts` | J1–J4 | Invalid token 401 (J1), 429 backoff (J2), wrong repo 404 (J3), simulated network drop on first call (J4). Each pins fail-fast + batch persistence + recovery on next sync. |
 | `manifest-corruption/K1-invalid-json.test.ts` … `K5-empty-files-map.test.ts` | K1–K5 | Garbage JSON in snapshot manifest (K1), file deleted (K2), bogus `lastSyncCommitSha` → `compare` 404 → auto-advance to live head (K3), unknown top-level + per-file fields ignored (K4), files: {} with lastSync intact (K5). |
 | `accumulate/L1-sequential-clicks.test.ts` … `L4-attempted-locks-merge.test.ts` | L1–L4 | Sequential clicks fold (L1), custom-message stays isolated (L2), syncAll with custom message (L3), attempted-marker locks a failed batch out of merge (L4). |

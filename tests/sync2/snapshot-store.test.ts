@@ -184,6 +184,58 @@ describe("SnapshotStore", () => {
     expect(store.getLastSyncTreeSha()).toBe("newT");
   });
 
+  it("remoteIdentity: starts null, round-trips through save+load", async () => {
+    const store = newStore(vault);
+    await store.load();
+    expect(store.getRemoteIdentity()).toBeNull();
+    store.setRemoteIdentity({
+      owner: "alice",
+      repo: "vault",
+      branch: "main",
+    });
+    await store.save();
+
+    const reloaded = newStore(vault);
+    await reloaded.load();
+    expect(reloaded.getRemoteIdentity()).toEqual({
+      owner: "alice",
+      repo: "vault",
+      branch: "main",
+    });
+  });
+
+  it("remoteIdentity: tolerates missing/malformed values in raw JSON", async () => {
+    // Pre-write a manifest with a partial remoteIdentity (missing repo).
+    // migrate() must drop it as malformed rather than throw.
+    fs.writeFileSync(
+      manifestAbs,
+      JSON.stringify({
+        lastSyncCommitSha: "abc",
+        files: {},
+        remoteIdentity: { owner: "alice" /* repo + branch missing */ },
+      }),
+    );
+    const store = newStore(vault);
+    await store.load();
+    expect(store.getRemoteIdentity()).toBeNull();
+    // Other fields still loaded fine.
+    expect(store.getLastSyncCommitSha()).toBe("abc");
+  });
+
+  it("clear() drops remoteIdentity too (panic-button reset)", async () => {
+    const store = newStore(vault);
+    await store.load();
+    store.setLastSync("c", "t");
+    store.setRemoteIdentity({
+      owner: "alice",
+      repo: "vault",
+      branch: "main",
+    });
+    store.clear();
+    expect(store.getLastSyncCommitSha()).toBeNull();
+    expect(store.getRemoteIdentity()).toBeNull();
+  });
+
   it("save() serialises concurrent writes", async () => {
     const store = newStore(vault);
     await store.load();

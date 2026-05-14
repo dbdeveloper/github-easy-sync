@@ -4,6 +4,7 @@ import {
   Setting,
   TextComponent,
   Notice,
+  Modal,
 } from "obsidian";
 import GitHubSyncPlugin from "src/main";
 import { copyToClipboard } from "src/utils";
@@ -421,6 +422,105 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           await this.plugin.logger.clean();
         });
       });
+
+    // ── Danger zone ─────────────────────────────────────────────────
+    new Setting(containerEl).setName("Danger zone").setHeading();
+
+    new Setting(containerEl)
+      .setName("Reset plugin")
+      .setDesc(
+        "Wipe ALL plugin state: GitHub token, repository settings, sync " +
+          "history, pending push queue, pending conflicts. Local vault " +
+          "files are untouched. Use this when rotating a leaked token, " +
+          "when troubleshooting, or to fully sever the link to a " +
+          "repository before pointing the plugin at a different one. " +
+          "Irreversible.",
+      )
+      .addButton((button) => {
+        button
+          .setButtonText("Reset")
+          .setWarning()
+          .onClick(() => {
+            new ResetConfirmModal(this.app, async () => {
+              try {
+                await this.plugin.resetPluginState();
+                new Notice(
+                  "Plugin reset complete. Re-enter your GitHub settings.",
+                  10000,
+                );
+                this.display();
+              } catch (err) {
+                new Notice(`Reset failed: ${err}`, 10000);
+              }
+            }).open();
+          });
+      });
+  }
+}
+
+// Two-step confirmation for the Reset button. Requires the user to
+// type a fixed phrase before "Confirm reset" becomes clickable —
+// stops the user from one-clicking a destructive action by accident.
+class ResetConfirmModal extends Modal {
+  private readonly onConfirm: () => Promise<void> | void;
+  private readonly phrase = "RESET";
+
+  constructor(app: App, onConfirm: () => Promise<void> | void) {
+    super(app);
+    this.onConfirm = onConfirm;
+  }
+
+  onOpen(): void {
+    const { contentEl, titleEl } = this;
+    titleEl.setText("Reset plugin?");
+
+    contentEl.createEl("p", {
+      text:
+        "This will wipe the GitHub token, repository settings, sync " +
+        "history, pending push queue, and pending conflicts. Local " +
+        "vault files are NOT touched. This cannot be undone.",
+    });
+    contentEl.createEl("p", {
+      text: `Type ${this.phrase} below to confirm.`,
+    });
+
+    let confirmButton: HTMLButtonElement | null = null;
+    const inputEl = contentEl.createEl("input", {
+      attr: {
+        type: "text",
+        placeholder: this.phrase,
+      },
+    });
+    inputEl.style.width = "100%";
+    inputEl.style.padding = "8px";
+    inputEl.style.marginBottom = "12px";
+    inputEl.addEventListener("input", () => {
+      if (confirmButton) {
+        confirmButton.disabled = inputEl.value.trim() !== this.phrase;
+      }
+    });
+
+    const buttonRow = contentEl.createDiv();
+    buttonRow.style.display = "flex";
+    buttonRow.style.gap = "8px";
+    buttonRow.style.justifyContent = "flex-end";
+
+    const cancelButton = buttonRow.createEl("button", { text: "Cancel" });
+    cancelButton.addEventListener("click", () => this.close());
+
+    confirmButton = buttonRow.createEl("button", { text: "Confirm reset" });
+    confirmButton.disabled = true;
+    confirmButton.classList.add("mod-warning");
+    confirmButton.addEventListener("click", async () => {
+      this.close();
+      await this.onConfirm();
+    });
+
+    inputEl.focus();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
   }
 }
 

@@ -232,6 +232,35 @@ export default class GitHubSyncPlugin extends Plugin {
     );
   }
 
+  // "Reset" button in Settings. Panic button: wipes credentials,
+  // snapshot, push-queue, conflict-store. Use cases:
+  //   - token rotation after a suspected leak (kill any pending push
+  //     before the new owner of the token can intercept it),
+  //   - clean slate before reconfiguring against a different repo,
+  //   - troubleshooting "something feels wrong" without uninstalling.
+  //
+  // Irreversible — the settings tab gates this behind a confirmation
+  // modal. Settings are restored to DEFAULT_SETTINGS; the user has to
+  // re-enter the GitHub token, owner, repo, branch before the next
+  // sync will reach a remote.
+  async resetPluginState(): Promise<void> {
+    if (this.sync2Manager) {
+      const store = (this.sync2Manager as unknown as { store: SnapshotStore })
+        .store;
+      const queue = (this.sync2Manager as unknown as { queue: PushQueue })
+        .queue;
+      store.clear();
+      await store.save();
+      await queue.clearAll();
+    }
+    if (this.conflictStore) {
+      await this.conflictStore.clearAll();
+    }
+    this.settings = Object.assign({}, DEFAULT_SETTINGS);
+    await this.saveSettings();
+    this.refreshConflictStatusBar();
+  }
+
   // ── engine init ─────────────────────────────────────────────────────
 
   private async initSync2(): Promise<void> {
@@ -307,6 +336,14 @@ export default class GitHubSyncPlugin extends Plugin {
       commitMessageFile: () =>
         this.settings.commitMessageFile ?? "Update {filename} at {date} {time}",
       deviceLabel: () => this.settings.deviceLabel ?? "Obsidian",
+      // Remote identity read live so the manager catches a mid-session
+      // settings change (user edits the repo coords in the settings
+      // tab between two Sync clicks).
+      remoteIdentity: () => ({
+        owner: this.settings.githubOwner,
+        repo: this.settings.githubRepo,
+        branch: this.settings.githubBranch,
+      }),
       conflictStore,
       onConflict: (args) => this.handleSync2Conflict(args),
       accumulateOfflineSyncs: this.settings.accumulateOfflineSyncs ?? false,

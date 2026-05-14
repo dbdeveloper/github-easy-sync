@@ -24,6 +24,17 @@ export interface Sync2InvariantState {
   rootGitignore?: InvariantFileState;
 }
 
+// (owner, repo, branch) the snapshot was built against. Sync2Manager
+// compares this to current settings at the start of every syncAll; a
+// mismatch means the user pointed the plugin at a different remote
+// (or branch) and the snapshot is no longer authoritative — the
+// manager wipes state and routes through adoption-from-remote.
+export interface RemoteIdentity {
+  owner: string;
+  repo: string;
+  branch: string;
+}
+
 export interface Sync2Metadata {
   // Branch state at the moment of this device's last successful sync.
   lastSyncCommitSha: string | null;
@@ -43,6 +54,13 @@ export interface Sync2Metadata {
   // Used by GitignoreInvariants.enforce() to skip rewrite when on-disk
   // state matches what we last left there.
   invariantState: Sync2InvariantState;
+
+  // (owner, repo, branch) the snapshot was last reconciled against.
+  // null until the first sync records it; used by Sync2Manager to
+  // detect "user switched the repo in settings" and route through
+  // adoption-from-remote instead of pushing stale local state at the
+  // new remote.
+  remoteIdentity: RemoteIdentity | null;
 }
 
 function freshMetadata(): Sync2Metadata {
@@ -52,6 +70,7 @@ function freshMetadata(): Sync2Metadata {
     lastCommitMtime: null,
     files: {},
     invariantState: {},
+    remoteIdentity: null,
   };
 }
 
@@ -107,6 +126,20 @@ function migrate(raw: unknown): Sync2Metadata {
       // bare path won't help findChanges classify them.
       if (sha === null) continue;
       out.files[path] = { path, remoteSha: sha, mtime, size };
+    }
+  }
+  if (r.remoteIdentity && typeof r.remoteIdentity === "object") {
+    const ri = r.remoteIdentity as Record<string, unknown>;
+    if (
+      typeof ri.owner === "string" &&
+      typeof ri.repo === "string" &&
+      typeof ri.branch === "string"
+    ) {
+      out.remoteIdentity = {
+        owner: ri.owner,
+        repo: ri.repo,
+        branch: ri.branch,
+      };
     }
   }
   return out;
@@ -196,6 +229,14 @@ export default class SnapshotStore {
 
   setLastCommitMtime(mtime: number): void {
     this.data.lastCommitMtime = mtime;
+  }
+
+  getRemoteIdentity(): RemoteIdentity | null {
+    return this.data.remoteIdentity;
+  }
+
+  setRemoteIdentity(identity: RemoteIdentity): void {
+    this.data.remoteIdentity = identity;
   }
 
   // Invariant gitignore freshness cache. Read by GitignoreInvariants
