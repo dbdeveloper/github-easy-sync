@@ -13,9 +13,8 @@ import GitignoreInvariants, {
   INVARIANT_BEGIN,
   INVARIANT_END,
   spliceInvariantBlock,
-  matchAllowLine,
-  insertAllowLine,
-  removeAllowLine,
+  extractInvariantBlock,
+  blockHasAllowLine,
 } from "../../src/sync2/gitignore-invariants";
 import SnapshotStore from "../../src/sync2/snapshot-store";
 import { Vault } from "../../mock-obsidian";
@@ -231,58 +230,68 @@ describe("GitignoreInvariants.enforce", () => {
   });
 });
 
-describe("matchAllowLine / insertAllowLine / removeAllowLine (pure)", () => {
-  const seedWithout = [
-    "plugins/*/*",
-    "!plugins/*/",
-    "!plugins/*/main.js",
-    "!plugins/*/manifest.json",
-    "!plugins/*/styles.css",
-    "",
+describe("extractInvariantBlock / blockHasAllowLine (pure)", () => {
+  // Canonical OFF block: data.json line present WITHOUT leading `!`
+  // → block rule. Canonical ON block: same line WITH leading `!`
+  // → allow rule. The line is ALWAYS in our block; only the
+  // prefix flips.
+  const blockOff = [
+    INVARIANT_BEGIN,
+    "# stuff",
+    "github-easy-sync-metadata.json",
+    "plugins/*/data.json",
+    INVARIANT_END,
+  ].join("\n");
+  const blockOn = [
+    INVARIANT_BEGIN,
+    "# stuff",
+    "github-easy-sync-metadata.json",
+    "!plugins/*/data.json",
+    INVARIANT_END,
   ].join("\n");
 
-  it("matchAllowLine: detects exact line", () => {
-    expect(matchAllowLine(seedWithout)).toBe(false);
+  it("extractInvariantBlock: returns body between markers, exclusive", () => {
+    const body = extractInvariantBlock(blockOff);
+    expect(body).not.toBeNull();
+    expect(body).toContain("github-easy-sync-metadata.json");
+    expect(body).not.toContain(INVARIANT_BEGIN);
+    expect(body).not.toContain(INVARIANT_END);
+  });
+
+  it("extractInvariantBlock: returns null when markers missing or out-of-order", () => {
+    expect(extractInvariantBlock("no markers anywhere")).toBeNull();
+    expect(extractInvariantBlock(INVARIANT_BEGIN + "\nno end")).toBeNull();
     expect(
-      matchAllowLine(`${seedWithout}!plugins/*/data.json\n`),
-    ).toBe(true);
-    // Variants are NOT detected — the toggle owns the exact byte
-    // sequence or nothing.
-    expect(
-      matchAllowLine(`${seedWithout}!plugins/**/data.json\n`),
-    ).toBe(false);
+      extractInvariantBlock(INVARIANT_END + "\nmiddle\n" + INVARIANT_BEGIN),
+    ).toBeNull();
   });
 
-  it("insertAllowLine: appends after the !plugins/*/styles.css anchor", () => {
-    const out = insertAllowLine(seedWithout);
-    expect(matchAllowLine(out)).toBe(true);
-    // Ordering: data.json should land right after styles.css.
-    const stylesIdx = out.indexOf("!plugins/*/styles.css");
-    const dataIdx = out.indexOf("!plugins/*/data.json");
-    expect(stylesIdx).toBeGreaterThan(-1);
-    expect(dataIdx).toBeGreaterThan(stylesIdx);
+  it("blockHasAllowLine: true for ON block (with !)", () => {
+    expect(blockHasAllowLine(extractInvariantBlock(blockOn)!)).toBe(true);
   });
 
-  it("insertAllowLine: idempotent when line already present", () => {
-    const withLine = `${seedWithout}!plugins/*/data.json\n`;
-    expect(insertAllowLine(withLine)).toBe(withLine);
+  it("blockHasAllowLine: false for OFF block (without !)", () => {
+    expect(blockHasAllowLine(extractInvariantBlock(blockOff)!)).toBe(false);
   });
 
-  it("insertAllowLine: falls back to end-of-file when anchor missing", () => {
-    const noAnchor = "user content\n";
-    const out = insertAllowLine(noAnchor);
-    expect(out.endsWith("!plugins/*/data.json\n")).toBe(true);
+  it("blockHasAllowLine: variants are NOT matched (toggle owns the exact line)", () => {
+    // Deeper glob — user-style hand-edit inside our block. Treated
+    // as "not ON"; the next enforce() rewrites the block back to
+    // canonical and clobbers it.
+    const fancier = [
+      INVARIANT_BEGIN,
+      "!plugins/**/data.json",
+      INVARIANT_END,
+    ].join("\n");
+    expect(blockHasAllowLine(extractInvariantBlock(fancier)!)).toBe(false);
   });
 
-  it("removeAllowLine: strips matching line, collapses blank cluster", () => {
-    const withLine = `${seedWithout}!plugins/*/data.json\n`;
-    expect(matchAllowLine(removeAllowLine(withLine))).toBe(false);
-    // No accumulating empty paragraphs from repeated toggling.
-    const messy = "block A\n\n!plugins/*/data.json\n\nblock B\n";
-    expect(removeAllowLine(messy)).toBe("block A\n\nblock B\n");
-  });
-
-  it("removeAllowLine: idempotent when line missing", () => {
-    expect(removeAllowLine(seedWithout)).toBe(seedWithout);
+  it("blockHasAllowLine: matching line OUTSIDE the block is irrelevant", () => {
+    // The caller passes the EXTRACTED body. A matching line OUTSIDE
+    // our block is user territory and stays untouched.
+    const fileWithOutsideMatch =
+      blockOff + "\n\nplugins/*/*\n!plugins/*/data.json\n";
+    const body = extractInvariantBlock(fileWithOutsideMatch);
+    expect(blockHasAllowLine(body!)).toBe(false);
   });
 });

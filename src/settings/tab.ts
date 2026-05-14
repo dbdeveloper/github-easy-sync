@@ -293,27 +293,36 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Push plugins data.json to GitHub")
       .setDesc(
-        "OFF by default. data.json files for OTHER plugins often store " +
-          "secrets (API tokens, account credentials, license keys) that the " +
-          "user typically does NOT want published. Turning this on appends " +
-          "`!plugins/*/data.json` to <configDir>/.gitignore, which propagates " +
-          "to all devices via the synced gitignore — there's no separate " +
-          "per-device field. NOTE: THIS plugin's own data.json is ALWAYS " +
-          "blocked from sync (it carries the GitHub token); this toggle " +
-          "never affects that.",
+        "ENABLE WITH CAUTION! Plugin data.json files may contain " +
+        "sensitive data (API tokens, credentials, license keys) that you " +
+        "usually don't want to make public. " +
+        "The data.json file for THIS plugin is ALWAYS blocked from syncing (it contains " +
+        "a GitHub token); this toggle never affects that.",
       )
       .addToggle((toggle) => {
-        // Initial value comes asynchronously from <configDir>/.gitignore
-        // — the file is the single source of truth. Render with a
-        // safe-default `false` first, then update once the read
-        // resolves. UI race-free because addToggle resolves synchronously.
-        toggle.setValue(false);
-        void this.plugin.invariants
-          ?.getPushPluginsDataJson()
-          .then((v) => toggle.setValue(v));
-        toggle.onChange(async (value) => {
-          await this.plugin.invariants?.setPushPluginsDataJson(value);
-        });
+        // Read the cached state synchronously — calling setValue from
+        // an async .then() resolution triggers an infinite re-entry
+        // inside Obsidian's settings pipeline that freezes the
+        // renderer. The cache is primed once at onload in initSync2()
+        // and kept in sync on every successful toggle change below.
+        toggle.setValue(this.plugin.pushPluginsDataJsonCached);
+        const inv = this.plugin.invariants;
+        if (inv) {
+          toggle.onChange(async (value) => {
+            try {
+              await inv.setPushPluginsDataJson(value);
+              this.plugin.pushPluginsDataJsonCached = value;
+            } catch (err) {
+              // Don't call toggle.setValue here to revert — it's an
+              // async setValue and we proved that triggers the
+              // Obsidian re-entry hang. The visual toggle may show
+              // the wrong state until the user re-opens settings;
+              // the Notice tells them the persisted state didn't
+              // change.
+              new Notice(`Could not update gitignore: ${err}`);
+            }
+          });
+        }
       });
 
     // ── Interface ───────────────────────────────────────────────────

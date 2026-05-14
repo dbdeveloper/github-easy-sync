@@ -160,20 +160,35 @@ If you extend retry for a specific method, prefer using/extending `isWriteRetria
 
 ### "Push plugins data.json to GitHub" toggle
 
-Settings-tab checkbox, **OFF by default**. Plugin `data.json` files routinely store secrets — API tokens, account credentials, license keys — that the user rarely intends to publish, and any GitHub repo can transition from private to public by accident or merge. Safe-by-default makes the safe choice the easy choice.
+Settings-tab checkbox, **OFF by default**. Plugin `data.json` files routinely store secrets — API tokens, account credentials, license keys — that the user rarely intends to publish, and any GitHub repo can transition from private to public by accident. Safe-by-default makes the safe choice the easy choice.
 
-**State lives in the gitignore, not in data.json.** The single source of truth is the literal line `!plugins/*/data.json` inside `<configDir>/.gitignore`:
+**State lives inside our invariant block**, not in `data.json`, not in user-editable gitignore territory. The block ALWAYS contains a `data.json` rule — the toggle just flips the leading `!`:
 
-- Line **absent** → toggle reads OFF, all plugins' `data.json` files filter through `plugins/*/*` in the recommended block, blocked from sync.
-- Line **present** → toggle reads ON, the allow line overrides the block-all, `data.json` syncs.
+```
+# ===== github-easy-sync invariants — DO NOT EDIT =====
+# Editing this block triggers a rewrite to canonical on next load.
+
+# Per-device state — never propagate between machines.
+github-easy-sync-metadata.json
+workspace.json
+workspace-mobile.json
+community-plugins.json
+plugins/*/data.json          ← OFF (block rule, no !)
+# !plugins/*/data.json       ← ON  (allow rule, with !)
+# ===== end of invariants =====
+```
+
+The line is stand-alone — it does NOT depend on `plugins/*/*` existing elsewhere in the file. The recommended-defaults section is only seeded when WE create the gitignore from scratch; if the user already had an `.obsidian/.gitignore` before installing sync2, only our invariant block goes in at the top and nothing else is added below. So OFF state has to carry an explicit block rule, not rely on a sibling catch-all.
 
 The gitignore IS synced across devices, so this toggle is implicitly **shared cross-device**: whichever device last pushed the gitignore wins, and on the next sync every other device's checkbox flips to match. No separate per-device field, no ping-pong, no drift.
 
 Implementation:
-- `GitignoreInvariants.getPushPluginsDataJson()` reads the file; returns `false` on read-error / missing file (safe default).
-- `GitignoreInvariants.setPushPluginsDataJson(enabled)` idempotently adds (after the `!plugins/*/styles.css` anchor) or removes the line, then refreshes the invariant-state cache so the next `enforce()` short-circuits.
-- The setting tab toggle starts at `false`, fires `getPushPluginsDataJson()` async, and updates its displayed value once the read resolves. No `pushPluginsDataJson` field in `GitHubSyncSettings`.
-- Pure helpers `matchAllowLine` / `insertAllowLine` / `removeAllowLine` are exported from `gitignore-invariants.ts` and covered by 6 unit specs.
+- `configDirInvariantBlock({ pushPluginsDataJson })` is the single function that builds the canonical block — both for `enforce()` and for the toggle. The block is ALWAYS rewritten in place via `spliceInvariantBlock`; it can't multiply, drift, or end up in user territory.
+- `GitignoreInvariants.getPushPluginsDataJson()` reads the file, extracts the body between BEGIN/END markers via `extractInvariantBlock`, and tests for the `!`-prefixed line via `blockHasAllowLine`. Returns `false` (OFF) on missing file or malformed block.
+- `GitignoreInvariants.setPushPluginsDataJson(enabled)` builds the canonical block with the requested state, splices it into the file. Idempotent — if the spliced result equals the existing content, no write happens.
+- `enforce()` preserves the toggle state on every rewrite: it reads the current state from the existing block first, then writes the canonical version with that same state. Without this, a routine enforce() would clobber the user's toggle.
+
+Settings-tab UI peculiarity: `toggle.setValue(v)` called from an **async** context (a `.then()` callback) triggers an infinite re-entry inside Obsidian's settings pipeline that freezes the renderer at 100% CPU. The cause is in Obsidian internals, not our code (verified by replacing the I/O with a static `Promise.resolve(true).then(toggle.setValue)` — still froze). Workaround: read the toggle state ONCE at `onload` and cache on `plugin.pushPluginsDataJsonCached`; the settings tab uses the cached value **synchronously** in `display()`. The cache stays fresh because every successful `setPushPluginsDataJson` call from `onChange` also updates the cache. The drawback — if a peer device pushes a toggled gitignore between sessions, our cache is stale until the next `onload` — is acceptable; the user re-opens settings to see the propagated state.
 
 **OUR plugin's own `data.json` is ALWAYS blocked**, regardless of this toggle, by two redundant layers:
 1. The self-plugin gitignore at `<configDir>/plugins/github-gitless-sync/.gitignore` (auto-rewritten on every plugin load to `* / !main.js / !manifest.json / !styles.css / !.gitignore`) — `data.json` matches `*` with no allow exception.

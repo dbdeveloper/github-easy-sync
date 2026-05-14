@@ -53,6 +53,14 @@ export default class GitHubSyncPlugin extends Plugin {
   // Exposed for the settings tab's "Push plugins data.json" toggle,
   // which reads/writes the allow line directly via this owner.
   invariants!: GitignoreInvariants;
+  // Cached value of the toggle for synchronous use in the settings
+  // tab. Refreshed at onload from invariants.getPushPluginsDataJson()
+  // and after every successful set from the tab's onChange. Settings
+  // tab must NOT call toggle.setValue() from an async context — for
+  // reasons we don't fully understand, doing so triggers an infinite
+  // re-entry inside Obsidian's settings pipeline and freezes the
+  // renderer. Synchronous read of this cache sidesteps the issue.
+  pushPluginsDataJsonCached: boolean = false;
 
   // UI elements that come and go with toggle settings.
   statusBarItem: HTMLElement | null = null;
@@ -261,6 +269,15 @@ export default class GitHubSyncPlugin extends Plugin {
       configDir: this.app.vault.configDir,
       selfPluginId: manifest.id,
     });
+    // Prime the toggle cache once, here, so the settings tab can
+    // read it synchronously without re-entering Obsidian via an
+    // async setValue (see field doc above).
+    try {
+      this.pushPluginsDataJsonCached =
+        await this.invariants.getPushPluginsDataJson();
+    } catch {
+      this.pushPluginsDataJsonCached = false;
+    }
     const deviceLabel = this.settings.deviceLabel ?? "Obsidian";
     const conflictStore = new ConflictStore({
       vault: this.app.vault,

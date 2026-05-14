@@ -12,7 +12,38 @@ export const INVARIANT_END =
 // Body of the invariant block in <configDir>/.gitignore. The plugin
 // rewrites this block in place; the user keeps full ownership of any
 // content above or below it.
-const CONFIG_DIR_INVARIANT_BLOCK = `${INVARIANT_BEGIN}
+// The data.json rule the toggle owns. ALWAYS present inside the
+// invariant block — only the leading `!` flips with the toggle:
+//
+//   OFF (default, safe): `plugins/*/data.json`     ← block rule
+//   ON  (user opted in): `!plugins/*/data.json`    ← allow rule
+//
+// We don't rely on `plugins/*/*` (the seeded recommended catch-all)
+// being in the file at all: if the user's gitignore pre-existed
+// when our plugin first ran, only the invariant block was prepended
+// and the recommended-defaults section never got seeded. Our block
+// must stand alone, so the OFF state has to carry an explicit block
+// rule (without `!`), not rely on a sibling rule below.
+//
+// Toggle state is read by checking whether the line starts with `!`
+// (allow) or not (block). If neither variant is present in the
+// block — defensive: e.g. malformed/hand-edited block — we report
+// the safe-default OFF and let the next enforce() fix the block.
+const DATA_JSON_BLOCK_LINE = "plugins/*/data.json";
+const DATA_JSON_ALLOW_LINE = "!plugins/*/data.json";
+
+// Build the canonical contents of the invariant block in
+// <configDir>/.gitignore. The block is rewritten in place by
+// spliceInvariantBlock on every enforce() and on every toggle, so
+// this function is the SINGLE place that decides what the block
+// looks like — no duplication, no per-call drift.
+function configDirInvariantBlock(opts: {
+  pushPluginsDataJson: boolean;
+}): string {
+  const dataJsonLine = opts.pushPluginsDataJson
+    ? DATA_JSON_ALLOW_LINE
+    : DATA_JSON_BLOCK_LINE;
+  return `${INVARIANT_BEGIN}
 # Editing this block triggers a rewrite to canonical on next load.
 
 # Per-device state — never propagate between machines.
@@ -20,40 +51,27 @@ github-easy-sync-metadata.json
 workspace.json
 workspace-mobile.json
 community-plugins.json
+${dataJsonLine}
 ${INVARIANT_END}`;
+}
 
 // Recommended defaults seeded ONLY when sync2 first creates
 // <configDir>/.gitignore. Pre-existing files keep the user's content
 // untouched below the invariant block.
-//
-// NOTE: `!plugins/*/data.json` is INTENTIONALLY MISSING from this
-// seed. Plugin data.json files often carry secrets (API tokens,
-// account credentials, license keys), so safe-by-default is to
-// block them. The settings-tab toggle "Push plugins data.json to
-// GitHub" adds/removes that single allow line — see
-// `getPushPluginsDataJson` / `setPushPluginsDataJson` below.
 const CONFIG_DIR_RECOMMENDED_DEFAULTS = `# Recommended defaults — feel free to edit.
 
 # Logs (covers the plugin's own github-easy-sync.log and any other *.log).
 *.log
 
-# Plugin folder allowlist — by default sync only the three canonical
-# always-public files. data.json is excluded by default because
-# plugins routinely store API keys / credentials there; the
-# settings-tab toggle "Push plugins data.json to GitHub" appends
-# \`!plugins/*/data.json\` to this file when the user opts in.
+# Plugin folder allowlist — by default sync only the four canonical
+# files (main.js, manifest.json, styles.css; data.json is governed
+# by the settings-tab toggle "Push plugins data.json to GitHub",
+# which lives in the invariant block above).
 plugins/*/*
 !plugins/*/
 !plugins/*/main.js
 !plugins/*/manifest.json
 !plugins/*/styles.css`;
-
-// The exact line that, when present anywhere in
-// <configDir>/.gitignore, signals "Push plugins data.json: ON".
-// Both the getter and setter key off this exact byte sequence so
-// users who hand-edit a variant (e.g. `!plugins/**/data.json`)
-// don't desync the checkbox state.
-const DATA_JSON_ALLOW_LINE = "!plugins/*/data.json";
 
 // Canonical content of <configDir>/plugins/<self>/.gitignore. Unlike
 // the configDir gitignore, the plugin owns this file outright — full
@@ -149,12 +167,11 @@ export default class GitignoreInvariants {
     await this.enforceRootGitignore();
   }
 
-  // True iff `!plugins/*/data.json` is currently present anywhere in
-  // <configDir>/.gitignore. This file is the single source of truth
-  // for the toggle — no parallel field in data.json, so devices
-  // converge on the same policy automatically once the gitignore is
-  // synced. Returns false on read errors / missing file (the
-  // safe-by-default position).
+  // True iff the allow line is currently inside the invariant
+  // block of <configDir>/.gitignore. The block is the only place
+  // we ever write that line — anywhere else in the file would be
+  // user-territory the toggle deliberately ignores. Returns false
+  // on missing file (safe-by-default position).
   async getPushPluginsDataJson(): Promise<boolean> {
     const exists = await this.vault.adapter.exists(
       this.configDirGitignorePath,
@@ -163,29 +180,33 @@ export default class GitignoreInvariants {
     const content = await this.vault.adapter.read(
       this.configDirGitignorePath,
     );
-    return matchAllowLine(content);
+    const block = extractInvariantBlock(content);
+    if (block === null) return false;
+    return blockHasAllowLine(block);
   }
 
-  // Toggle the allow line on or off. Idempotent — calling with the
-  // current state is a no-op (no file rewrite, no mtime bump).
-  // Refreshes the invariant state cache after a write so
-  // enforceConfigDirGitignore's next stat/hash check sees the
-  // post-toggle file as canonical.
+  // Toggle the allow line on or off by rewriting the canonical
+  // invariant block (with or without the line) via the existing
+  // splice mechanism. Idempotent: a no-change call short-circuits
+  // before touching disk. Refreshes the invariant state cache so
+  // the next enforceConfigDirGitignore short-circuits cleanly.
   async setPushPluginsDataJson(enabled: boolean): Promise<void> {
     const exists = await this.vault.adapter.exists(
       this.configDirGitignorePath,
     );
     if (!exists) {
-      // Seed the file first; without it there's nothing to splice
-      // into. enforceConfigDirGitignore writes the default body.
-      await this.enforceConfigDirGitignore();
+      // No file yet — let enforce() seed the full template using
+      // the requested toggle state, then return.
+      await this.enforceConfigDirGitignoreWith(enabled);
+      return;
     }
     const before = await this.vault.adapter.read(
       this.configDirGitignorePath,
     );
-    const after = enabled
-      ? insertAllowLine(before)
-      : removeAllowLine(before);
+    const after = spliceInvariantBlock(
+      before,
+      configDirInvariantBlock({ pushPluginsDataJson: enabled }),
+    );
     if (after === before) return;
     await this.write(this.configDirGitignorePath, after);
     await this.refreshState("configDirGitignore", this.configDirGitignorePath);
@@ -207,6 +228,20 @@ export default class GitignoreInvariants {
   // ── internal ────────────────────────────────────────────────────────
 
   private async enforceConfigDirGitignore(): Promise<void> {
+    // No explicit toggle preference — preserve whatever's currently
+    // in the on-disk block. Other callers that want to force a
+    // specific state pass it via enforceConfigDirGitignoreWith.
+    return this.enforceConfigDirGitignoreWith(undefined);
+  }
+
+  // `desiredPushPluginsDataJson`:
+  //   undefined → preserve the toggle state read from the existing
+  //               on-disk invariant block (or false if the file
+  //               doesn't exist yet / the block is missing).
+  //   true/false → use that exact state.
+  private async enforceConfigDirGitignoreWith(
+    desiredPushPluginsDataJson: boolean | undefined,
+  ): Promise<void> {
     const slot = "configDirGitignore" as const;
     const path = this.configDirGitignorePath;
     const recorded = this.store.getInvariantState()[slot];
@@ -214,8 +249,13 @@ export default class GitignoreInvariants {
     const stat = await this.vault.adapter.stat(path);
     if (!stat) {
       // Fresh install: file doesn't exist. Seed the full template
-      // (invariant block + recommended defaults) once.
-      const content = `${CONFIG_DIR_INVARIANT_BLOCK}\n\n${CONFIG_DIR_RECOMMENDED_DEFAULTS}\n`;
+      // with the requested toggle state (defaults to OFF when the
+      // caller didn't supply one).
+      const seedPush = desiredPushPluginsDataJson ?? false;
+      const block = configDirInvariantBlock({
+        pushPluginsDataJson: seedPush,
+      });
+      const content = `${block}\n\n${CONFIG_DIR_RECOMMENDED_DEFAULTS}\n`;
       await this.write(path, content);
       await this.refreshState(slot, path);
       return;
@@ -232,12 +272,24 @@ export default class GitignoreInvariants {
       return;
     }
 
-    // Real edit somewhere in the file. If the user kept the invariant
-    // block intact, this is a no-op rewrite below the markers — the
-    // splice produces the same content. If they tampered with the
-    // block, the splice restores it; the rest of their edits are
-    // preserved verbatim.
-    const fixed = spliceInvariantBlock(content, CONFIG_DIR_INVARIANT_BLOCK);
+    // The block's "push plugins data.json" toggle survives this
+    // rewrite. If the caller asked for a specific state, use it;
+    // otherwise read whatever the user (or a peer device, via a
+    // synced gitignore) put in the existing block. This is the
+    // mechanism that lets the toggle stay shared cross-device:
+    // the gitignore is the only source of truth.
+    let pushPluginsDataJson: boolean;
+    if (desiredPushPluginsDataJson !== undefined) {
+      pushPluginsDataJson = desiredPushPluginsDataJson;
+    } else {
+      const existingBlock = extractInvariantBlock(content);
+      pushPluginsDataJson =
+        existingBlock !== null && blockHasAllowLine(existingBlock);
+    }
+    const fixed = spliceInvariantBlock(
+      content,
+      configDirInvariantBlock({ pushPluginsDataJson }),
+    );
     if (fixed === content) {
       // Nothing to change on disk; just refresh the cache.
       this.store.setInvariantState(slot, { mtime: stat.mtime, hash });
@@ -374,45 +426,32 @@ async function sha1Of(content: string): Promise<string> {
   return await calculateGitBlobSHA(buf);
 }
 
-// Pure helpers for the "Push plugins data.json" toggle. All work
-// on the literal `!plugins/*/data.json` line — variants like
-// `!plugins/**/data.json` or hand-edited comments next to it are
-// deliberately NOT recognised: the toggle owns this exact string
-// or nothing at all. Users who want a more flexible rule should
-// edit the file directly and leave the checkbox alone.
+// Pure helpers for the "Push plugins data.json" toggle. Both work
+// on the invariant block (between BEGIN/END markers) only — the
+// toggle never touches anything outside that block, so whatever
+// the user wrote in their recommended-defaults area or below is
+// theirs to keep.
 
-const DATA_JSON_LINE_PATTERN = /^!plugins\/\*\/data\.json[ \t]*$/m;
-
-export function matchAllowLine(content: string): boolean {
-  return DATA_JSON_LINE_PATTERN.test(content);
+// Extract the body of the invariant block from `fileContent`
+// (everything between INVARIANT_BEGIN and INVARIANT_END,
+// markers excluded). Returns null when the markers are missing or
+// malformed — the caller treats that as "toggle is OFF, the file
+// will be re-seeded with the canonical block on the next enforce".
+export function extractInvariantBlock(fileContent: string): string | null {
+  const beginIdx = fileContent.indexOf(INVARIANT_BEGIN);
+  const endIdx = fileContent.indexOf(INVARIANT_END);
+  if (beginIdx === -1 || endIdx === -1 || endIdx < beginIdx) return null;
+  return fileContent.substring(beginIdx + INVARIANT_BEGIN.length, endIdx);
 }
 
-// Insert the allow line if it's missing. Drops it just after the
-// existing `!plugins/*/styles.css` line (preserving the seed
-// ordering); if styles.css isn't there either, appends at end of
-// file. Trailing newline preserved.
-export function insertAllowLine(content: string): string {
-  if (DATA_JSON_LINE_PATTERN.test(content)) return content;
-  const anchor = /^!plugins\/\*\/styles\.css[ \t]*$/m;
-  if (anchor.test(content)) {
-    return content.replace(anchor, (m) => `${m}\n${DATA_JSON_ALLOW_LINE}`);
-  }
-  const trailingNewline = content.endsWith("\n") ? "" : "\n";
-  return `${content}${trailingNewline}${DATA_JSON_ALLOW_LINE}\n`;
-}
-
-// Remove the allow line if present. Collapses any leftover blank-
-// line cluster so the file doesn't accumulate empty paragraphs on
-// repeated toggling.
-export function removeAllowLine(content: string): string {
-  if (!DATA_JSON_LINE_PATTERN.test(content)) return content;
-  // Drop the matching line PLUS exactly one trailing newline so
-  // surrounding context joins cleanly.
-  const stripped = content.replace(
-    /^!plugins\/\*\/data\.json[ \t]*\n?/m,
-    "",
-  );
-  // Collapse triple-or-more blank-line runs that can arise when
-  // the removed line sat between two blank-separated blocks.
-  return stripped.replace(/\n{3,}/g, "\n\n");
+// Returns the toggle state encoded in `blockContent`:
+//   true  → block contains `!plugins/*/data.json` (allow / ON)
+//   false → block contains `plugins/*/data.json` (block / OFF)
+//   false → neither variant present (malformed; safe default)
+//
+// Caller passes the body returned by extractInvariantBlock, NOT
+// the whole file — the toggle deliberately ignores any matching
+// line outside our block (that's user territory).
+export function blockHasAllowLine(blockContent: string): boolean {
+  return /^!plugins\/\*\/data\.json[ \t]*$/m.test(blockContent);
 }
