@@ -12,13 +12,17 @@ import { FileChange } from "./types";
 // don't write it, don't sync it — silently invisible to sync2.
 const LEGACY_MANIFEST_FILE_NAME = "github-sync-metadata.json";
 
-// Minimal isSyncable for sync2: hardcoded deny list + gi.ignoredAsync.
-// Conscientiously *not* the legacy isSyncable — sync2 doesn't need its
-// configDir gating, manifest allow rule, or plugin folder gymnastics.
+// isSyncable for sync2: hardcoded deny list + per-device configDir
+// gate + gi.ignoredAsync. The configDir gate (`syncConfigDir`) is
+// per-device by design — see settings.ts where it lives. When OFF,
+// everything under `<configDir>/` is treated as ignored EXCEPT the
+// two invariant gitignores, which always sync because they carry
+// shared rules every device needs to agree on.
 export async function isSyncable(
   path: string,
   configDir: string,
   selfPluginId: string,
+  syncConfigDir: boolean,
   gi: GI,
   asyncReader: (
     abs: string,
@@ -27,6 +31,16 @@ export async function isSyncable(
   if (path === `${configDir}/${SYNC2_MANIFEST_FILE_NAME}`) return false;
   if (path === `${configDir}/${LEGACY_MANIFEST_FILE_NAME}`) return false;
   if (path === `${configDir}/plugins/${selfPluginId}/data.json`) return false;
+  // Per-device configDir gate. The two invariant-gitignore paths
+  // bypass it: they carry policy that every device must agree on
+  // (toggle states, denylists, the "Push plugins data.json" rule),
+  // so they MUST propagate regardless of how this machine has the
+  // toggle set. Everything else under configDir is gated.
+  if (!syncConfigDir && path.startsWith(`${configDir}/`)) {
+    const cdGitignore = `${configDir}/.gitignore`;
+    const selfPluginGitignore = `${configDir}/plugins/${selfPluginId}/.gitignore`;
+    if (path !== cdGitignore && path !== selfPluginGitignore) return false;
+  }
   // Anything under our own plugin's push-queue is sync2's internal
   // staging area; it sits inside the vault but must never be uploaded.
   // Without this rule, vault.getFiles() surfaces queued snapshots as
@@ -70,6 +84,11 @@ export interface ChangeDetectorDeps {
   configDir: string;
   selfPluginId: string;
   vaultRoot: string;
+  // Per-device gate for configDir paths. Read live from settings so
+  // toggling the UI checkbox takes effect on the very next syncAll.
+  // The getter pattern (vs. a fixed boolean) keeps the manager from
+  // re-instantiating the detector on every settings change.
+  syncConfigDir: () => boolean;
   // Optional: when set, findChanges bridges the snapshot store with
   // the live push-queue. A file whose local bytes match what some
   // pending batch already holds is treated as "committed locally"
@@ -93,6 +112,7 @@ export default class ChangeDetector {
   private readonly configDir: string;
   private readonly selfPluginId: string;
   private readonly vaultRoot: string;
+  private readonly syncConfigDir: () => boolean;
   private readonly queue: PeekableQueue | undefined;
 
   constructor(deps: ChangeDetectorDeps) {
@@ -102,6 +122,7 @@ export default class ChangeDetector {
     this.configDir = deps.configDir;
     this.selfPluginId = deps.selfPluginId;
     this.vaultRoot = deps.vaultRoot;
+    this.syncConfigDir = deps.syncConfigDir;
     this.queue = deps.queue;
   }
 
@@ -345,6 +366,7 @@ export default class ChangeDetector {
       path,
       this.configDir,
       this.selfPluginId,
+      this.syncConfigDir(),
       this.gi,
       this.giReader,
     );

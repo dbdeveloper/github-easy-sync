@@ -231,12 +231,21 @@ sync2/
 
 Tests use **branch-per-test** on a persistent private int-test repo (fine-grained PAT). The bootstrap suite is the exception — it needs delete+recreate to regain bare state, so it uses a public ephemeral repo with a classic PAT. See `tests/integration/helpers.ts` for env-var wiring (`integrationEnabled` / `bootstrapEnabled`).
 
+### "Sync configs" toggle (`syncConfigDir`)
+
+Per-device gate for paths under `<configDir>/`. Lives in `data.json` (per-device by design — that file is hard-blocked from sync, so the setting can't propagate). Default `true` to preserve the engine's prior un-gated behaviour for users upgrading without an explicit value.
+
+When OFF, `isSyncable` returns `false` for every path under `<configDir>/` **except the two invariant gitignores** (`<configDir>/.gitignore` and `<configDir>/plugins/<self>/.gitignore`). Those two files always sync regardless of the toggle because they carry shared rules every device must agree on (the canonical invariant block, the "Push plugins data.json" allow-line, user-authored rules below the block).
+
+Threaded through as a live getter — `() => settings.syncConfigDir` — so flipping the toggle in the settings tab takes effect on the very next `syncAll` without rebuilding the manager. The detector consults it via `checkSyncable(path)` for both push (`findChanges`) and pull (`applyRemoteAddOrModify`) — one gate covers both directions naturally.
+
+**OFF → ON is forward-looking.** When the user toggles OFF, pulls a remote change that the gate blocks, and the device sync still advances `lastSync` to current `HEAD` (the gate filters the file, not the commit). Toggling ON later does NOT retroactively pull configDir paths that drifted on remote during the OFF window — `compare(lastSync, HEAD)` returns empty. The next remote change to those paths after toggle ON does pull as normal. Matches a `git update-index --skip-worktree` analogue: unskipping doesn't retroactively pull, only forward changes do. Covered by I3.
+
 ### Things sync2 deliberately does NOT do
 
 - No event-listener (polling is enough and simpler; no missed-events failure mode).
 - No legacy-manifest migration on adoption (anything that needs sync history must run a sync via the previous tool first).
 - No state-machine routing (`decideInitAction` and friends are gone). Branching lives inside `processBatch` (Cases 1–4) and `applyRemoteAddOrModify`.
-- No `syncConfigDir` gating in `isSyncable` today (per-device toggle planned — see memory `feedback_sync_configs_per_device.md`).
 - No legacy "atomic plugin .js + conflict-sibling backup" `.conflict-(local|remote)-…` files (sync2 has Etap 6.5 conflict-sibling files with a different naming scheme: `.conflict-from-<label>-<iso-no-colons>Z<ext>`; these stay strictly local via the root gitignore invariant block).
 
 ## Legacy architecture (pre-cutover, historical only — code is gone from src/)

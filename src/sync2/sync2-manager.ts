@@ -181,13 +181,17 @@ export interface Sync2ManagerDeps {
   configDir: string;
   selfPluginId: string;
   // Templates with `{date}` / `{filename}` / `{path}` placeholders.
-  commitMessageAll: string;
-  commitMessageFile: string;
+  // Accept string OR getter so callers that read live from settings
+  // can pass a closure; the manager re-reads on every use, so a
+  // settings-tab edit propagates without rebuilding the manager.
+  commitMessageAll: string | (() => string);
+  commitMessageFile: string | (() => string);
   // Per-device label appended to every commit message as a fixed
   // " (label)" suffix and recorded in conflict-store metadata. One
   // setting drives both surfaces — see commit-templates.ts /
-  // conflict-store.ts for the consumers.
-  deviceLabel: string;
+  // conflict-store.ts for the consumers. Live-readable for the same
+  // reason as the templates above.
+  deviceLabel: string | (() => string);
   // Optional ConflictStore for Etap 6.5 deferred / sibling-file
   // workflow. Plugin code passes a real one; unit tests that stick
   // entirely to the "resolved" callback return shape can omit it.
@@ -234,9 +238,9 @@ export class Sync2Manager {
   private readonly invariants: GitignoreInvariants | undefined;
   private readonly configDir: string;
   private readonly selfPluginId: string;
-  private readonly commitMessageAll: string;
-  private readonly commitMessageFile: string;
-  private readonly deviceLabel: string;
+  private readonly commitMessageAll: () => string;
+  private readonly commitMessageFile: () => string;
+  private readonly deviceLabel: () => string;
   private readonly conflictStore: ConflictStore | undefined;
   private readonly onConflict: OnConflictCallback;
   private readonly accumulateOfflineSyncs: boolean;
@@ -263,9 +267,18 @@ export class Sync2Manager {
     this.invariants = deps.invariants;
     this.configDir = deps.configDir;
     this.selfPluginId = deps.selfPluginId;
-    this.commitMessageAll = deps.commitMessageAll;
-    this.commitMessageFile = deps.commitMessageFile;
-    this.deviceLabel = deps.deviceLabel;
+    this.commitMessageAll =
+      typeof deps.commitMessageAll === "function"
+        ? deps.commitMessageAll
+        : () => deps.commitMessageAll as string;
+    this.commitMessageFile =
+      typeof deps.commitMessageFile === "function"
+        ? deps.commitMessageFile
+        : () => deps.commitMessageFile as string;
+    this.deviceLabel =
+      typeof deps.deviceLabel === "function"
+        ? deps.deviceLabel
+        : () => deps.deviceLabel as string;
     this.conflictStore = deps.conflictStore;
     this.onConflict = deps.onConflict;
     this.accumulateOfflineSyncs = deps.accumulateOfflineSyncs ?? false;
@@ -327,7 +340,7 @@ export class Sync2Manager {
         ? {
             commitMessage: appendDeviceSuffix(
               customMessage,
-              this.deviceLabel,
+              this.deviceLabel(),
             ),
             parentCommitSha: this.store.getLastSyncCommitSha(),
             parentTreeSha: this.store.getLastSyncTreeSha(),
@@ -386,14 +399,14 @@ export class Sync2Manager {
     const baseMessage =
       customMessage !== undefined
         ? customMessage
-        : applyTemplate(this.commitMessageFile, {
+        : applyTemplate(this.commitMessageFile(), {
             date: new Date(this.now()),
             filename: path.split("/").pop() ?? path,
             path,
           });
     // Apply the device suffix to BOTH the templated path and a
     // user-typed customMessage — uniform parseability on GitHub.
-    const message = appendDeviceSuffix(baseMessage, this.deviceLabel);
+    const message = appendDeviceSuffix(baseMessage, this.deviceLabel());
     // Custom-message syncs always get an isolated batch: the user's
     // typed message must survive intact (no accumulate-group rename
     // to a template) and must not absorb unrelated subsequent
@@ -1174,7 +1187,7 @@ export class Sync2Manager {
   }
 
   private fullSyncMeta(): EnqueueMeta {
-    const base = applyTemplate(this.commitMessageAll, {
+    const base = applyTemplate(this.commitMessageAll(), {
       date: new Date(this.now()),
     });
     return {
@@ -1182,7 +1195,7 @@ export class Sync2Manager {
       // (Etap 8 file-history) read the source-device off any sync2
       // commit on GitHub regardless of how the user customized the
       // template. See commit-templates.ts → appendDeviceSuffix.
-      commitMessage: appendDeviceSuffix(base, this.deviceLabel),
+      commitMessage: appendDeviceSuffix(base, this.deviceLabel()),
       parentCommitSha: this.store.getLastSyncCommitSha(),
       parentTreeSha: this.store.getLastSyncTreeSha(),
     };
@@ -1437,7 +1450,7 @@ export class Sync2Manager {
       applyTemplate(DEFAULT_INIT_COMMIT_MESSAGE, {
         date: new Date(this.now()),
       }),
-      this.deviceLabel,
+      this.deviceLabel(),
     );
     await this.logger.info(`Sync2 seed bare repo`, { path, message });
     const seed = await this.client.createFile({

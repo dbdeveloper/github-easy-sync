@@ -60,6 +60,22 @@ export interface GitHubSyncSettings {
   // ("Sync at <date> (Obsidian)" — synced from Obsidian, the app).
   // Multi-device users override per machine ("Phone", "Desktop"…).
   deviceLabel?: string;
+
+  // Per-device gate for paths under `<configDir>/`. When OFF, the
+  // sync engine treats every configDir path as ignored EXCEPT the
+  // two invariant gitignores (`<configDir>/.gitignore` and
+  // `<configDir>/plugins/<self>/.gitignore`) — those propagate
+  // regardless, because they encode shared rules every device must
+  // agree on (including the "Push plugins data.json" toggle line).
+  //
+  // Stored here (per-device data.json) rather than the gitignore
+  // because, by design, devices may disagree: one machine syncs its
+  // Obsidian configs and the other doesn't. data.json is hard-blocked
+  // from sync, so there's no propagation channel for this preference.
+  //
+  // Default `true` preserves the engine's prior (un-gated) behaviour
+  // for users upgrading without an explicit value in data.json.
+  syncConfigDir?: boolean;
 }
 
 // NOTE: "Push plugins data.json to GitHub" is NOT a per-device
@@ -90,4 +106,5 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   commitMessageFile: "Update {filename} at {date} {time}",
   accumulateOfflineSyncs: false,
   deviceLabel: "Obsidian",
+  syncConfigDir: true,
 };

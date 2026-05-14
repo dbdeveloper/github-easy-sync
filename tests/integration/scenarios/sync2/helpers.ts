@@ -60,6 +60,11 @@ export interface Sync2ClientOpts {
   >;
   accumulateOfflineSyncs?: boolean;
   enableLogging?: boolean;
+  // Per-device configDir gate. Defaults to true (matches the
+  // production default in settings.ts) so existing tests keep
+  // syncing configDir paths the way they did before the toggle
+  // landed. I-series tests opt into false explicitly.
+  syncConfigDir?: boolean;
 }
 
 export interface Sync2TestClient {
@@ -77,6 +82,9 @@ export interface Sync2TestClient {
   // it directly to assert on pending records / sibling files.
   conflictStore: ConflictStore;
   branch: string;
+  // Live settings reference — same object the detector reads
+  // through. I-series tests mutate fields here (e.g. syncConfigDir,
+  // deviceLabel) between syncs and the next syncAll picks them up.
   settings: GitHubSyncSettings;
   cleanup(): void;
 }
@@ -103,6 +111,7 @@ export async function createSync2Client(
     showStatusBarItem: false,
     showSyncRibbonButton: false,
     accumulateOfflineSyncs: opts.accumulateOfflineSyncs ?? false,
+    syncConfigDir: opts.syncConfigDir ?? true,
   };
 
   const logger = new Logger(vault, opts.enableLogging ?? false);
@@ -123,6 +132,7 @@ export async function createSync2Client(
     configDir: CONFIG_DIR,
     selfPluginId: SELF_PLUGIN_ID,
     vaultRoot: vaultPath,
+    syncConfigDir: () => settings.syncConfigDir ?? true,
     queue,
   });
   const builder = new TreeBuilder({
@@ -165,9 +175,12 @@ export async function createSync2Client(
     invariants,
     configDir: CONFIG_DIR,
     selfPluginId: SELF_PLUGIN_ID,
-    commitMessageAll: "Sync2 test {date}",
-    commitMessageFile: "Update {filename}",
-    deviceLabel: "sync2-int-test",
+    // Pass through live getters so I-series tests can mutate
+    // `settings.deviceLabel` / `settings.commitMessage*` between
+    // syncs and the next push picks up the new value.
+    commitMessageAll: () => settings.commitMessageAll ?? "Sync2 test {date}",
+    commitMessageFile: () => settings.commitMessageFile ?? "Update {filename}",
+    deviceLabel: () => settings.deviceLabel ?? "sync2-int-test",
     conflictStore,
     onConflict,
     accumulateOfflineSyncs: opts.accumulateOfflineSyncs ?? false,

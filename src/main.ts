@@ -254,6 +254,7 @@ export default class GitHubSyncPlugin extends Plugin {
       configDir: this.app.vault.configDir,
       selfPluginId: manifest.id,
       vaultRoot,
+      syncConfigDir: () => this.settings.syncConfigDir ?? true,
       queue,
     });
     const builder = new TreeBuilder({
@@ -298,10 +299,14 @@ export default class GitHubSyncPlugin extends Plugin {
       invariants: this.invariants,
       configDir: this.app.vault.configDir,
       selfPluginId: manifest.id,
-      commitMessageAll: this.settings.commitMessageAll ?? "Sync at {date} {time}",
-      commitMessageFile:
+      // Templates + label read live from settings so the user can
+      // change them in the settings tab and the next syncAll picks
+      // up the new value — no plugin reload needed.
+      commitMessageAll: () =>
+        this.settings.commitMessageAll ?? "Sync at {date} {time}",
+      commitMessageFile: () =>
         this.settings.commitMessageFile ?? "Update {filename} at {date} {time}",
-      deviceLabel,
+      deviceLabel: () => this.settings.deviceLabel ?? "Obsidian",
       conflictStore,
       onConflict: (args) => this.handleSync2Conflict(args),
       accumulateOfflineSyncs: this.settings.accumulateOfflineSyncs ?? false,

@@ -43,6 +43,7 @@ function fixture(): {
     configDir: CONFIG_DIR,
     selfPluginId: SELF_PLUGIN_ID,
     vaultRoot: root,
+    syncConfigDir: () => true,
   });
   return { root, vault, store, gi, detector };
 }

@@ -164,6 +164,14 @@ export default class SnapshotStore {
     delete this.data.files[path];
   }
 
+  // Drop everything sync2 knows about prior pushes. Equivalent to a
+  // "Reset metadata" button: the next syncAll re-aligns with remote
+  // (files whose SHA already matches stay quiet thanks to the no-op
+  // tree skip; truly drifted files re-emit). Disk content untouched.
+  clear(): void {
+    this.data = freshMetadata();
+  }
+
   paths(): string[] {
     return Object.keys(this.data.files);
   }

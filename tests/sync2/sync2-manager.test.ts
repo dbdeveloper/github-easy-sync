@@ -353,6 +353,7 @@ function fixture(opts?: {
     configDir: CONFIG_DIR,
     selfPluginId: SELF_PLUGIN_ID,
     vaultRoot: root,
+    syncConfigDir: () => true,
     queue,
   });
   const client = makeFakeClient();

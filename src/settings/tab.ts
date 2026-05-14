@@ -291,6 +291,26 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Sync configs (Obsidian + plugins)")
+      .setDesc(
+        "Sync everything under your vault's config folder (Obsidian settings, " +
+          "installed plugins, snippets). This setting is per-device and never " +
+          "propagates: one machine can sync configs while another doesn't. " +
+          "When OFF, only the two invariant gitignores under the config folder " +
+          "still sync (they carry shared rules every device must agree on, " +
+          "including the toggle below). The data.json for THIS plugin is " +
+          "ALWAYS blocked regardless.",
+      )
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.syncConfigDir ?? true)
+          .onChange(async (value) => {
+            this.plugin.settings.syncConfigDir = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
       .setName("Push plugins data.json to GitHub")
       .setDesc(
         "ENABLE WITH CAUTION! Plugin data.json files may contain " +
