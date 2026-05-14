@@ -478,8 +478,27 @@ export class Sync2Manager {
       throw err;
     }
 
+    // Identify which remote-changed paths overlap with files the user
+    // has already queued for push. Those overlapping paths must NOT be
+    // mutated in the live vault here — the batch's snapshot is the
+    // user's source-of-truth and gets reconciled at push time via
+    // `reconcileBatchAgainstHead`. Touching them now would clobber
+    // batch intent (the batch's snapshot would stay stale and still
+    // get pushed, undoing the merge we just wrote into the vault).
+    const queuedPaths = await this.queue.collectAllPaths();
+    let anyOverlapDeferred = false;
+
     for (const f of cmp.files) {
       if (!(await this.detector.checkSyncable(f.filename))) continue;
+
+      if (queuedPaths.has(f.filename)) {
+        // Defer: processBatch's Case 4 (expectedHead != currentHead)
+        // will run reconcileBatchAgainstHead on this path. We
+        // deliberately leave lastSync at the OLD expectedHead so
+        // processBatch sees the drift and triggers reconcile.
+        anyOverlapDeferred = true;
+        continue;
+      }
 
       if (f.status === "removed") {
         await this.applyRemoteDeletion(f.filename, expectedHead);
@@ -505,8 +524,18 @@ export class Sync2Manager {
       );
     }
 
-    // Bring lastSync forward so subsequent push doesn't try to merge
-    // against the already-applied head.
+    if (anyOverlapDeferred) {
+      // At least one remote path overlaps with our queue. Keep lastSync
+      // at expectedHead so processBatch enters reconcile and resolves
+      // the overlap against the batch's snapshot. Non-overlap files
+      // were applied above and their per-file snapshots are current —
+      // the commit-level lastSync just hasn't caught up yet.
+      return currentHead;
+    }
+
+    // No overlap: every remote change has been applied to the vault.
+    // Safe to advance lastSync so the upcoming push (if any) sees a
+    // clean Case 3 fast-path head match.
     const headCommit = await this.client.getCommit({
       sha: currentHead,
       retry: true,

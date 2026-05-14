@@ -137,6 +137,24 @@ export default class PushQueue {
     };
   }
 
+  // Returns the union of every path mentioned in any queued batch
+  // (any state — pending, in-progress, attempted). Used by
+  // pullIfNeeded to identify which remote changes overlap with the
+  // user's queued intent — those get deferred to push-time reconcile
+  // instead of being applied directly to the live vault, because the
+  // batch's snapshot is the source of truth for files the user
+  // already clicked Sync on.
+  async collectAllPaths(): Promise<Set<string>> {
+    const out = new Set<string>();
+    const ids = await this.list();
+    for (const id of ids) {
+      const batch = await this.read(id);
+      for (const p of batch.files) out.add(p);
+      for (const p of batch.deletions) out.add(p);
+    }
+    return out;
+  }
+
   // Return the Git blob SHA of `path` as it sits in any queued batch
   // (any state — pending available, in-progress, attempted). Used by
   // ChangeDetector.findChanges to suppress duplicate enqueue when a
