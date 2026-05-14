@@ -290,6 +290,32 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           }),
       );
 
+    new Setting(containerEl)
+      .setName("Push plugins data.json to GitHub")
+      .setDesc(
+        "OFF by default. data.json files for OTHER plugins often store " +
+          "secrets (API tokens, account credentials, license keys) that the " +
+          "user typically does NOT want published. Turning this on appends " +
+          "`!plugins/*/data.json` to <configDir>/.gitignore, which propagates " +
+          "to all devices via the synced gitignore — there's no separate " +
+          "per-device field. NOTE: THIS plugin's own data.json is ALWAYS " +
+          "blocked from sync (it carries the GitHub token); this toggle " +
+          "never affects that.",
+      )
+      .addToggle((toggle) => {
+        // Initial value comes asynchronously from <configDir>/.gitignore
+        // — the file is the single source of truth. Render with a
+        // safe-default `false` first, then update once the read
+        // resolves. UI race-free because addToggle resolves synchronously.
+        toggle.setValue(false);
+        void this.plugin.invariants
+          ?.getPushPluginsDataJson()
+          .then((v) => toggle.setValue(v));
+        toggle.onChange(async (value) => {
+          await this.plugin.invariants?.setPushPluginsDataJson(value);
+        });
+      });
+
     // ── Interface ───────────────────────────────────────────────────
     new Setting(containerEl).setName("Interface").setHeading();
 

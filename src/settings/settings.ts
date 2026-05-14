@@ -62,6 +62,18 @@ export interface GitHubSyncSettings {
   deviceLabel?: string;
 }
 
+// NOTE: "Push plugins data.json to GitHub" is NOT a per-device
+// setting field. Its source of truth is the presence of the line
+// `!plugins/*/data.json` in `<configDir>/.gitignore`. The
+// settings-tab checkbox reads/writes that file via
+// GitignoreInvariants.getPushPluginsDataJson / setPushPluginsDataJson.
+// Storing it here would have to either (a) duplicate state with the
+// gitignore (drift risk) or (b) propagate cross-device differently
+// from the gitignore itself (ping-pong on devices that disagree).
+// Letting the gitignore be the single source keeps both devices
+// converging on the same policy as soon as one of them pushes the
+// gitignore.
+
 export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   githubToken: "",
   githubOwner: "",

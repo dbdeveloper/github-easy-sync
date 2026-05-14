@@ -13,6 +13,9 @@ import GitignoreInvariants, {
   INVARIANT_BEGIN,
   INVARIANT_END,
   spliceInvariantBlock,
+  matchAllowLine,
+  insertAllowLine,
+  removeAllowLine,
 } from "../../src/sync2/gitignore-invariants";
 import SnapshotStore from "../../src/sync2/snapshot-store";
 import { Vault } from "../../mock-obsidian";
@@ -225,5 +228,61 @@ describe("GitignoreInvariants.enforce", () => {
     await store2.load();
     expect(store2.getInvariantState().configDirGitignore).toBeDefined();
     expect(store2.getInvariantState().selfPluginGitignore).toBeDefined();
+  });
+});
+
+describe("matchAllowLine / insertAllowLine / removeAllowLine (pure)", () => {
+  const seedWithout = [
+    "plugins/*/*",
+    "!plugins/*/",
+    "!plugins/*/main.js",
+    "!plugins/*/manifest.json",
+    "!plugins/*/styles.css",
+    "",
+  ].join("\n");
+
+  it("matchAllowLine: detects exact line", () => {
+    expect(matchAllowLine(seedWithout)).toBe(false);
+    expect(
+      matchAllowLine(`${seedWithout}!plugins/*/data.json\n`),
+    ).toBe(true);
+    // Variants are NOT detected — the toggle owns the exact byte
+    // sequence or nothing.
+    expect(
+      matchAllowLine(`${seedWithout}!plugins/**/data.json\n`),
+    ).toBe(false);
+  });
+
+  it("insertAllowLine: appends after the !plugins/*/styles.css anchor", () => {
+    const out = insertAllowLine(seedWithout);
+    expect(matchAllowLine(out)).toBe(true);
+    // Ordering: data.json should land right after styles.css.
+    const stylesIdx = out.indexOf("!plugins/*/styles.css");
+    const dataIdx = out.indexOf("!plugins/*/data.json");
+    expect(stylesIdx).toBeGreaterThan(-1);
+    expect(dataIdx).toBeGreaterThan(stylesIdx);
+  });
+
+  it("insertAllowLine: idempotent when line already present", () => {
+    const withLine = `${seedWithout}!plugins/*/data.json\n`;
+    expect(insertAllowLine(withLine)).toBe(withLine);
+  });
+
+  it("insertAllowLine: falls back to end-of-file when anchor missing", () => {
+    const noAnchor = "user content\n";
+    const out = insertAllowLine(noAnchor);
+    expect(out.endsWith("!plugins/*/data.json\n")).toBe(true);
+  });
+
+  it("removeAllowLine: strips matching line, collapses blank cluster", () => {
+    const withLine = `${seedWithout}!plugins/*/data.json\n`;
+    expect(matchAllowLine(removeAllowLine(withLine))).toBe(false);
+    // No accumulating empty paragraphs from repeated toggling.
+    const messy = "block A\n\n!plugins/*/data.json\n\nblock B\n";
+    expect(removeAllowLine(messy)).toBe("block A\n\nblock B\n");
+  });
+
+  it("removeAllowLine: idempotent when line missing", () => {
+    expect(removeAllowLine(seedWithout)).toBe(seedWithout);
   });
 });

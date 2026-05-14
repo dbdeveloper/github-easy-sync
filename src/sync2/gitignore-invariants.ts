@@ -25,18 +25,35 @@ ${INVARIANT_END}`;
 // Recommended defaults seeded ONLY when sync2 first creates
 // <configDir>/.gitignore. Pre-existing files keep the user's content
 // untouched below the invariant block.
+//
+// NOTE: `!plugins/*/data.json` is INTENTIONALLY MISSING from this
+// seed. Plugin data.json files often carry secrets (API tokens,
+// account credentials, license keys), so safe-by-default is to
+// block them. The settings-tab toggle "Push plugins data.json to
+// GitHub" adds/removes that single allow line — see
+// `getPushPluginsDataJson` / `setPushPluginsDataJson` below.
 const CONFIG_DIR_RECOMMENDED_DEFAULTS = `# Recommended defaults — feel free to edit.
 
 # Logs (covers the plugin's own github-easy-sync.log and any other *.log).
 *.log
 
-# Plugin folder allowlist — by default sync only the four canonical files.
+# Plugin folder allowlist — by default sync only the three canonical
+# always-public files. data.json is excluded by default because
+# plugins routinely store API keys / credentials there; the
+# settings-tab toggle "Push plugins data.json to GitHub" appends
+# \`!plugins/*/data.json\` to this file when the user opts in.
 plugins/*/*
 !plugins/*/
-!plugins/*/data.json
 !plugins/*/main.js
 !plugins/*/manifest.json
 !plugins/*/styles.css`;
+
+// The exact line that, when present anywhere in
+// <configDir>/.gitignore, signals "Push plugins data.json: ON".
+// Both the getter and setter key off this exact byte sequence so
+// users who hand-edit a variant (e.g. `!plugins/**/data.json`)
+// don't desync the checkbox state.
+const DATA_JSON_ALLOW_LINE = "!plugins/*/data.json";
 
 // Canonical content of <configDir>/plugins/<self>/.gitignore. Unlike
 // the configDir gitignore, the plugin owns this file outright — full
@@ -130,6 +147,48 @@ export default class GitignoreInvariants {
     await this.enforceConfigDirGitignore();
     await this.enforceSelfPluginGitignore();
     await this.enforceRootGitignore();
+  }
+
+  // True iff `!plugins/*/data.json` is currently present anywhere in
+  // <configDir>/.gitignore. This file is the single source of truth
+  // for the toggle — no parallel field in data.json, so devices
+  // converge on the same policy automatically once the gitignore is
+  // synced. Returns false on read errors / missing file (the
+  // safe-by-default position).
+  async getPushPluginsDataJson(): Promise<boolean> {
+    const exists = await this.vault.adapter.exists(
+      this.configDirGitignorePath,
+    );
+    if (!exists) return false;
+    const content = await this.vault.adapter.read(
+      this.configDirGitignorePath,
+    );
+    return matchAllowLine(content);
+  }
+
+  // Toggle the allow line on or off. Idempotent — calling with the
+  // current state is a no-op (no file rewrite, no mtime bump).
+  // Refreshes the invariant state cache after a write so
+  // enforceConfigDirGitignore's next stat/hash check sees the
+  // post-toggle file as canonical.
+  async setPushPluginsDataJson(enabled: boolean): Promise<void> {
+    const exists = await this.vault.adapter.exists(
+      this.configDirGitignorePath,
+    );
+    if (!exists) {
+      // Seed the file first; without it there's nothing to splice
+      // into. enforceConfigDirGitignore writes the default body.
+      await this.enforceConfigDirGitignore();
+    }
+    const before = await this.vault.adapter.read(
+      this.configDirGitignorePath,
+    );
+    const after = enabled
+      ? insertAllowLine(before)
+      : removeAllowLine(before);
+    if (after === before) return;
+    await this.write(this.configDirGitignorePath, after);
+    await this.refreshState("configDirGitignore", this.configDirGitignorePath);
   }
 
   // Called by Sync2Manager.recordSync after a successful self-push of
@@ -313,4 +372,47 @@ export function spliceInvariantBlock(
 async function sha1Of(content: string): Promise<string> {
   const buf = new TextEncoder().encode(content).buffer as ArrayBuffer;
   return await calculateGitBlobSHA(buf);
+}
+
+// Pure helpers for the "Push plugins data.json" toggle. All work
+// on the literal `!plugins/*/data.json` line — variants like
+// `!plugins/**/data.json` or hand-edited comments next to it are
+// deliberately NOT recognised: the toggle owns this exact string
+// or nothing at all. Users who want a more flexible rule should
+// edit the file directly and leave the checkbox alone.
+
+const DATA_JSON_LINE_PATTERN = /^!plugins\/\*\/data\.json[ \t]*$/m;
+
+export function matchAllowLine(content: string): boolean {
+  return DATA_JSON_LINE_PATTERN.test(content);
+}
+
+// Insert the allow line if it's missing. Drops it just after the
+// existing `!plugins/*/styles.css` line (preserving the seed
+// ordering); if styles.css isn't there either, appends at end of
+// file. Trailing newline preserved.
+export function insertAllowLine(content: string): string {
+  if (DATA_JSON_LINE_PATTERN.test(content)) return content;
+  const anchor = /^!plugins\/\*\/styles\.css[ \t]*$/m;
+  if (anchor.test(content)) {
+    return content.replace(anchor, (m) => `${m}\n${DATA_JSON_ALLOW_LINE}`);
+  }
+  const trailingNewline = content.endsWith("\n") ? "" : "\n";
+  return `${content}${trailingNewline}${DATA_JSON_ALLOW_LINE}\n`;
+}
+
+// Remove the allow line if present. Collapses any leftover blank-
+// line cluster so the file doesn't accumulate empty paragraphs on
+// repeated toggling.
+export function removeAllowLine(content: string): string {
+  if (!DATA_JSON_LINE_PATTERN.test(content)) return content;
+  // Drop the matching line PLUS exactly one trailing newline so
+  // surrounding context joins cleanly.
+  const stripped = content.replace(
+    /^!plugins\/\*\/data\.json[ \t]*\n?/m,
+    "",
+  );
+  // Collapse triple-or-more blank-line runs that can arise when
+  // the removed line sat between two blank-separated blocks.
+  return stripped.replace(/\n{3,}/g, "\n\n");
 }

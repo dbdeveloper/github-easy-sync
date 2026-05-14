@@ -50,6 +50,9 @@ export default class GitHubSyncPlugin extends Plugin {
   sync2Manager!: Sync2Manager;
   conflictStore!: ConflictStore;
   logger!: Logger;
+  // Exposed for the settings tab's "Push plugins data.json" toggle,
+  // which reads/writes the allow line directly via this owner.
+  invariants!: GitignoreInvariants;
 
   // UI elements that come and go with toggle settings.
   statusBarItem: HTMLElement | null = null;
@@ -252,7 +255,7 @@ export default class GitHubSyncPlugin extends Plugin {
       configDir: this.app.vault.configDir,
       selfPluginId: manifest.id,
     });
-    const invariants = new GitignoreInvariants({
+    this.invariants = new GitignoreInvariants({
       vault: this.app.vault,
       store,
       configDir: this.app.vault.configDir,
@@ -275,7 +278,7 @@ export default class GitHubSyncPlugin extends Plugin {
       builder,
       client,
       logger: this.logger,
-      invariants,
+      invariants: this.invariants,
       configDir: this.app.vault.configDir,
       selfPluginId: manifest.id,
       commitMessageAll: this.settings.commitMessageAll ?? "Sync at {date} {time}",
