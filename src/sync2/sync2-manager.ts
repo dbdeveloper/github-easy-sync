@@ -1,4 +1,4 @@
-import { Vault, base64ToArrayBuffer } from "obsidian";
+import { Vault, arrayBufferToBase64, base64ToArrayBuffer } from "obsidian";
 import {
   GetTreeResponseItem,
   NewTreeRequestItem,
@@ -17,6 +17,7 @@ import { mergeText } from "./three-way-merge";
 import {
   applyTemplate,
   appendDeviceSuffix,
+  DEFAULT_INIT_COMMIT_MESSAGE,
   parseDeviceSuffix,
 } from "./commit-templates";
 import ConflictStore from "./conflict-store";
@@ -43,6 +44,20 @@ export interface Sync2Client {
     retry?: boolean;
   }): Promise<string>;
   updateBranchHead(args: { sha: string; retry?: boolean }): Promise<void>;
+  // Contents API write. The only endpoint that works against a bare
+  // repo (no commits yet) — Git Data API returns 409 "Git Repository
+  // is empty" until at least one ref exists. Sync2 uses this to seed
+  // a bare repo with <vault>/.gitignore as the first commit, then
+  // switches to the Git Data API for everything after. Returns the
+  // SHAs from the response so callers can build on top without a
+  // follow-up GET (avoiding the eventual-consistency window).
+  // PUT /repos/{o}/{r}/contents/{path}.
+  createFile(args: {
+    path: string;
+    content: string;
+    message: string;
+    retry?: boolean;
+  }): Promise<{ blobSha: string; treeSha: string; commitSha: string }>;
   getBranchHeadSha(args?: { retry?: boolean }): Promise<string>;
   // Conflict reconciliation needs the tree SHA of an arbitrary commit
   // (rebase target) and the committer date (binary atomic resolver).
@@ -998,14 +1013,16 @@ export class Sync2Manager {
     await this.logger.info(`Sync2 push batch ${id}`);
     await this.queue.markInProgress(id);
     try {
-      // Three states for the head before push:
-      //   1. expectedHead = null, branch is bare → root commit, parent
-      //      stays null. (Fresh repo.)
-      //   2. expectedHead = null, branch already has commits → first
-      //      sync on this device against an existing line of history.
-      //      No snapshot to 3-way against; re-target the batch onto
-      //      currentHead and let local files land on top. Server-side
-      //      contents we don't carry are preserved through base_tree.
+      // Four states for the head before push:
+      //   1. expectedHead = null, currentHead = null → bare repo.
+      //      Seed via Contents API (<vault>/.gitignore — guaranteed
+      //      by invariants.enforce()), then build the batch on top.
+      //   2. expectedHead = null, currentHead set → first sync on
+      //      this device against an existing line of history. No
+      //      snapshot to 3-way against; re-target the batch onto
+      //      currentHead and let local files land on top. Server-
+      //      side contents we don't carry are preserved through
+      //      base_tree.
       //   3. expectedHead set, currentHead matches → fast path.
       //   4. expectedHead set, currentHead drifted → reconcile + re-target.
       let currentHead: string | null;
@@ -1021,7 +1038,12 @@ export class Sync2Manager {
         }
       }
       const expectedHead = this.store.getLastSyncCommitSha();
-      if (expectedHead === null && currentHead !== null) {
+      if (expectedHead === null && currentHead === null) {
+        // Case 1: bare repo. Seed turns the repo into a non-bare
+        // one-commit state and rewrites the batch's parent SHAs so
+        // the rest of processBatch builds on top of the seed.
+        await this.seedBareRepo(id);
+      } else if (expectedHead === null && currentHead !== null) {
         // Case 2.
         const headCommit = await this.client.getCommit({
           sha: currentHead,
@@ -1072,16 +1094,35 @@ export class Sync2Manager {
         },
         retry: true,
       });
-      const commitSha = await this.client.createCommit({
-        message: batch.commitMessage,
-        treeSha: newTreeSha,
-        parent: batch.parentCommitSha ?? undefined,
-        retry: true,
-      });
-      await this.client.updateBranchHead({
-        sha: commitSha,
-        retry: true,
-      });
+      // No-op tree change vs the parent: typically a bare-repo seed
+      // already includes every path in the batch (e.g. empty vault →
+      // only <vault>/.gitignore in the batch, which the seed itself
+      // wrote). Skip the redundant empty commit — the parent IS the
+      // synced state. Without this branch we'd land an empty commit
+      // on top of the seed.
+      let commitSha: string;
+      if (
+        baseTreeSha !== null &&
+        newTreeSha === baseTreeSha &&
+        batch.parentCommitSha !== null
+      ) {
+        commitSha = batch.parentCommitSha;
+        await this.logger.info(
+          `Sync2 push batch ${id}: tree unchanged vs parent — reusing parent commit`,
+          { commitSha, treeSha: newTreeSha },
+        );
+      } else {
+        commitSha = await this.client.createCommit({
+          message: batch.commitMessage,
+          treeSha: newTreeSha,
+          parent: batch.parentCommitSha ?? undefined,
+          retry: true,
+        });
+        await this.client.updateBranchHead({
+          sha: commitSha,
+          retry: true,
+        });
+      }
 
       // Update local state. recordSync re-stats the file so its mtime
       // is current; subsequent findChanges() short-circuits via the
@@ -1122,6 +1163,42 @@ export class Sync2Manager {
         error: String(err),
       });
       throw err;
+    }
+  }
+
+  // Seed a bare repo with a single Contents API write of
+  // <vault>/.gitignore — guaranteed to exist after
+  // GitignoreInvariants.enforce() (run by syncAll before
+  // processQueue). Git Data API endpoints return 409 "Git Repository
+  // is empty" until the branch has at least one ref, so this is the
+  // only way to bootstrap. After this call the branch has one commit
+  // ("Init at {date} {time} (label)") and we rewrite the batch's
+  // parent SHAs so the rest of processBatch builds on top of the
+  // seed just like any Case 2/3 push.
+  private async seedBareRepo(batchId: string): Promise<void> {
+    const path = this.invariants?.rootPath ?? ".gitignore";
+    const buf = await this.vault.adapter.readBinary(path);
+    const content = arrayBufferToBase64(buf);
+    const message = appendDeviceSuffix(
+      applyTemplate(DEFAULT_INIT_COMMIT_MESSAGE, {
+        date: new Date(this.now()),
+      }),
+      this.deviceLabel,
+    );
+    await this.logger.info(`Sync2 seed bare repo`, { path, message });
+    const seed = await this.client.createFile({
+      path,
+      content,
+      message,
+      retry: true,
+    });
+    await this.queue.updateMeta(batchId, {
+      parentCommitSha: seed.commitSha,
+      parentTreeSha: seed.treeSha,
+    });
+    await this.detector.recordSync(path, seed.blobSha);
+    if (this.invariants) {
+      await this.invariants.notePathSelfWritten(path);
     }
   }
 

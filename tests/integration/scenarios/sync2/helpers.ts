@@ -41,6 +41,12 @@ export interface Sync2ClientOpts {
   branch: string;
   env?: RepoEnv;
   vaultPath?: string;
+  // When set, overrides the default vault-ownership rule
+  // (`true` when vaultPath was auto-created, `false` when caller
+  // supplied one). Lets disable/re-enable tests transfer ownership
+  // from one client instance to its successor without losing the
+  // rm-rf on cleanup. Defaults to `vaultPath === undefined`.
+  ownsVaultPath?: boolean;
   onConflict?: (a: {
     path: string;
     ours: string;
@@ -79,7 +85,8 @@ export async function createSync2Client(
   opts: Sync2ClientOpts,
 ): Promise<Sync2TestClient> {
   const { token, owner, repo } = opts.env ?? requireEnv();
-  const ownsVaultPath = opts.vaultPath === undefined;
+  const ownsVaultPath =
+    opts.ownsVaultPath ?? opts.vaultPath === undefined;
   const vaultPath =
     opts.vaultPath ??
     mkdtempSync(path.join(os.tmpdir(), "github-easy-sync-int-"));

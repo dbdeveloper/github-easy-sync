@@ -197,6 +197,7 @@ export default class SnapshotStore {
     return {
       configDirGitignore: this.data.invariantState.configDirGitignore,
       selfPluginGitignore: this.data.invariantState.selfPluginGitignore,
+      rootGitignore: this.data.invariantState.rootGitignore,
     };
   }
 

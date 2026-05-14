@@ -162,6 +162,32 @@ function makeFakeClient(): Sync2Client & {
       calls.push({ op: "updateBranchHead", args });
       state.branchHead = args.sha;
     },
+    async createFile(args) {
+      calls.push({ op: "createFile", args });
+      // Synthesise SHAs deterministically from the content so the
+      // bare-repo seed path stays observable to test assertions.
+      const blobSha =
+        "blob-" +
+        crypto.createHash("sha1").update(args.content).digest("hex").slice(0, 8);
+      state.treeShaCounter++;
+      state.commitShaCounter++;
+      const treeSha = `TREE_SHA_${state.treeShaCounter}`;
+      const commitSha = `COMMIT_SHA_${state.commitShaCounter}`;
+      state.treeShaByCommit.set(commitSha, treeSha);
+      state.commitMessageByCommit.set(commitSha, args.message);
+      // Record the seeded file's contents at the freshly-created head
+      // so any subsequent getRepoContent/getBlob/getContentsAtRef calls
+      // resolve it the same way they would for any other commit.
+      let inner = state.contentsByRef.get(commitSha);
+      if (!inner) {
+        inner = new Map();
+        state.contentsByRef.set(commitSha, inner);
+      }
+      // Stored as the raw bytes the API would expose (post-base64-decode).
+      inner.set(args.path, Buffer.from(args.content, "base64").toString("utf8"));
+      state.branchHead = commitSha;
+      return { blobSha, treeSha, commitSha };
+    },
     async getCommit(args) {
       calls.push({ op: "getCommit", args });
       const treeSha = state.treeShaByCommit.get(args.sha) ?? `TREE_OF_${args.sha}`;
@@ -556,10 +582,14 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
     expect(f.conflictCalls).toEqual([]);
   });
 
-  it("first-ever sync against bare repo: root commit, no parent", async () => {
+  it("first-ever sync against bare repo: seeds .gitignore, then commits batch on top", async () => {
     writeVaultFile(f.root, "x.md", "v");
+    // sync2 seeds bare repos via the Contents API on <vault>/.gitignore
+    // (the file invariants.enforce() guarantees in production). The
+    // fixture skips invariants, so pre-create the file here.
+    writeVaultFile(f.root, ".gitignore", "# seed\n");
     // No setLastSync — fresh install. getBranchHeadSha throws 404
-    // (bare repo). sync2 falls back to a root commit.
+    // (bare repo).
     f.client.getBranchHeadSha = async () => {
       const e = new Error("Not Found") as Error & { status: number };
       e.status = 404;
@@ -568,8 +598,13 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
 
     await f.manager.syncAll();
 
-    expect(f.client.state.lastCommit?.parent).toBeUndefined();
-    expect(f.store.getLastSyncCommitSha()).toBe("COMMIT_SHA_1");
+    // COMMIT_SHA_1 is the seed (createFile, no parent at all).
+    // COMMIT_SHA_2 is the sync commit on top of it (createCommit
+    // with parent=seed). The fixture only records createCommit calls
+    // in state.lastCommit, so its `parent` field reflects the second
+    // commit's parent — which is the seed.
+    expect(f.client.state.lastCommit?.parent).toBe("COMMIT_SHA_1");
+    expect(f.store.getLastSyncCommitSha()).toBe("COMMIT_SHA_2");
   });
 
   it("first-ever sync against existing branch: parent=currentHead, base_tree=its tree", async () => {
@@ -1040,12 +1075,17 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
         throw e;
       };
       writeVaultFile(f.root, "fresh.md", "local-only");
+      // Pre-create the seed gitignore so processBatch Case 1 can read it
+      // (the fixture skips invariants; in production enforce() writes
+      // this file before processBatch runs).
+      writeVaultFile(f.root, ".gitignore", "# seed\n");
 
       await f.manager.syncAll();
 
-      // Bootstrap was skipped; the local file proceeds through the
-      // first-sync-against-bare path (handled by processBatch case 1).
-      expect(f.store.getLastSyncCommitSha()).toBe("COMMIT_SHA_1");
+      // Bootstrap-from-remote was skipped; the local file proceeds
+      // through the first-sync-against-bare path (processBatch case 1).
+      // Seed = COMMIT_SHA_1, sync commit on top = COMMIT_SHA_2.
+      expect(f.store.getLastSyncCommitSha()).toBe("COMMIT_SHA_2");
     });
 
     it("skips ignored paths during download", async () => {

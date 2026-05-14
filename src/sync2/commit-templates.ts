@@ -27,6 +27,16 @@ export const DEFAULT_COMMIT_MESSAGE_ALL = "Sync at {date} {time}";
 export const DEFAULT_COMMIT_MESSAGE_FILE =
   "Update {filename} at {date} {time}";
 
+// Used as the seed commit message when sync2 bootstraps a bare repo
+// (no commits yet). The seed is created via the Contents API with a
+// single file — <vault>/.gitignore, which always exists after
+// GitignoreInvariants.enforce() — because the Git Data API returns
+// 409 "Git Repository is empty" until the branch has at least one
+// ref. The deviceLabel suffix is appended by appendDeviceSuffix() so
+// the resulting commit reads e.g. "Init at 2026-05-14 09:38:23.123
+// (Obsidian)".
+export const DEFAULT_INIT_COMMIT_MESSAGE = "Init at {date} {time}";
+
 // Sentinel used wherever sync2 needs a stand-in for an unknown device
 // — both at READ time (parseDeviceSuffix on a commit with no trailing
 // " (label)") and at WRITE time (appendDeviceSuffix / sibling-file

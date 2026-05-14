@@ -1,7 +1,11 @@
 import { requestUrl } from "obsidian";
 import Logger from "src/logger";
 import { GitHubSyncSettings } from "src/settings/settings";
-import { isRetriableStatus, retryUntil } from "src/utils";
+import {
+  isRetriableStatus,
+  isWriteRetriableStatus,
+  retryUntil,
+} from "src/utils";
 
 export type RepoContent = {
   files: { [key: string]: GetTreeResponseItem };
@@ -188,7 +192,7 @@ export default class GithubClient {
           `POST tree (entries=${tree.tree.length})`,
         );
       },
-      (res) => !isRetriableStatus(res.status),
+      (res) => !isWriteRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -244,7 +248,7 @@ export default class GithubClient {
           "POST commit",
         );
       },
-      (res) => !isRetriableStatus(res.status),
+      (res) => !isWriteRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -466,7 +470,7 @@ export default class GithubClient {
           "POST refs (create)",
         );
       },
-      (res) => !isRetriableStatus(res.status),
+      (res) => !isWriteRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -550,7 +554,7 @@ export default class GithubClient {
           `PATCH branch head${force ? " (force)" : ""}`,
         );
       },
-      (res) => !isRetriableStatus(res.status),
+      (res) => !isWriteRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -596,7 +600,7 @@ export default class GithubClient {
           `POST blob (${encoding})`,
         );
       },
-      (res) => !isRetriableStatus(res.status),
+      (res) => !isWriteRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -704,7 +708,7 @@ export default class GithubClient {
           `PUT contents/${path}`,
         );
       },
-      (res) => !isRetriableStatus(res.status),
+      (res) => !isWriteRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 

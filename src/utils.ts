@@ -114,6 +114,33 @@ export function isRetriableStatus(status: number): boolean {
 }
 
 /**
+ * Write-endpoint retry predicate. Identical to `isRetriableStatus`
+ * plus 409.
+ *
+ * READ endpoints (`getRepoContent`, `getBranchHeadSha`, …) must NOT
+ * retry 409: GitHub uses 404/409 to signal "Git Repository is empty"
+ * on a bare repo, and sync2's bootstrap relies on getting that
+ * signal back immediately. Burning retry slots there just delays
+ * the start of seedBareRepo.
+ *
+ * WRITE endpoints (`createTree`, `createCommit`, `createBlob`,
+ * `updateBranchHead`, `createFile`) can hit a different 409: GitHub's
+ * own docs phrase it as "the Git repository is empty or
+ * **unavailable**", where "unavailable" includes the brief window
+ * where a freshly-written ref or commit hasn't propagated across
+ * GitHub's internal replicas yet (observed empirically as a ~20%
+ * flake on a second sync issued ~10ms after a first sync's
+ * `updateBranchHead` completed — see GitHub Community discussion
+ * #62198 for the same shape). `retryUntil`'s exponential backoff
+ * (1s → 2s → 4s …) reliably clears the window; non-flaky runs pay
+ * nothing because the very first attempt returns 200.
+ */
+export function isWriteRetriableStatus(status: number): boolean {
+  if (status === 409) return true;
+  return isRetriableStatus(status);
+}
+
+/**
  * Retry an async function with exponential backoff until its result
  * passes a condition or maxRetries is reached.
  */
