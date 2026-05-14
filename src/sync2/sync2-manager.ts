@@ -572,58 +572,67 @@ export class Sync2Manager {
     return currentHead;
   }
 
+  // First-sync adoption from a non-bare remote. sync2 has no prior
+  // history at this point (lastSyncCommitSha === null), so it can't do
+  // a real 3-way merge for diverging files. Instead, per-file
+  // resolution by content + atomic mtime:
+  //
+  //   - local has no copy → pull (write vault, recordSync).
+  //   - local has the exact bytes (SHA match) → recordSync, no transfer.
+  //   - local has different bytes → atomic resolution by mtime:
+  //       localMtime  >= remoteHeadCommitDate → local wins. Don't
+  //         touch vault, don't recordSync. findChanges later emits
+  //         the path as "added", push lifts it to remote.
+  //       localMtime  <  remoteHeadCommitDate → remote wins. Pull,
+  //         OVERWRITING the local copy. (README must instruct users
+  //         to pre-sync via the previous plugin to keep this branch
+  //         from firing on divergent files.)
+  //
+  // Local-only files (in vault, not in remote tree) are NOT touched
+  // here — findChanges naturally emits them as "added" once adoption
+  // sets lastSyncCommitSha.
+  //
+  // Tie on mtime: local wins ("user's last edit is more important
+  // than a peer's push from the same minute").
   private async bootstrapFromRemote(
     currentHead: string,
     republishPaths: Set<string>,
   ): Promise<void> {
-    await this.logger.info("Sync2 bootstrap-from-remote start", {
+    await this.logger.info("Sync2 adoption-from-remote start", {
       head: currentHead,
     });
     const { files, sha: treeSha } = await this.client.getRepoContent({
       retry: true,
     });
-    let downloaded = 0;
-    let skippedAlreadyDownloaded = 0;
+    // One getCommit for the uniform remote "last touched" reference
+    // — beats N per-file lookups for adoption that already touches
+    // every entry once.
+    const headCommit = await this.client.getCommit({
+      sha: currentHead,
+      retry: true,
+    });
+    const remoteHeadDateMs = Date.parse(headCommit.committer.date);
+
+    let pulled = 0;
+    let identical = 0;
+    let localKept = 0;
+    let remoteOverwrote = 0;
     for (const filePath of Object.keys(files)) {
       if (!(await this.detector.checkSyncable(filePath))) continue;
       const item = files[filePath];
-      // Resume-skip: a prior bootstrap attempt may have been
-      // interrupted (network drop, plugin disabled mid-sync, OS kill)
-      // after writing this file's blob to disk and recording its
-      // snapshot, but BEFORE setLastSync ran below. The snapshot match
-      // is our proof that the local copy is byte-equivalent to the
-      // remote blob, so re-downloading would just burn bandwidth. We
-      // still need the file to physically exist (a vault wipe between
-      // attempts would have removed it while leaving the snapshot).
-      const snap = this.store.get(filePath);
-      if (
-        snap &&
-        snap.remoteSha === item.sha &&
-        (await this.vault.adapter.exists(filePath))
-      ) {
-        skippedAlreadyDownloaded++;
+      const localExists = await this.vault.adapter.exists(filePath);
+      if (!localExists) {
+        await this.adoptionPullAndRecord(filePath, item, republishPaths);
+        pulled++;
         continue;
       }
-      const blob = await this.client.getBlob({ sha: item.sha, retry: true });
-      const bytes = base64ToArrayBuffer(blob.content);
-      if (hasTextExtension(filePath)) {
-        // Etap 6.6: canonicalize on disk; track republish if the
-        // remote's bytes weren't already canonical. ignoreBOM
-        // preserves a leading U+FEFF so normalizeText can strip it;
-        // the platform default eats it silently, which would mask
-        // "remote has BOM" from the republish trigger.
-        const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
-          bytes,
-        );
-        const { canonicalSha, changed } = await this.writeRemoteText(
-          filePath,
-          text,
-        );
-        await this.detector.recordSync(filePath, canonicalSha);
-        if (changed) republishPaths.add(filePath);
-      } else {
-        await this.ensureParentDir(filePath);
-        await this.vault.adapter.writeBinary(filePath, bytes);
+
+      const localBuf = await this.vault.adapter.readBinary(filePath);
+      const localSha = await calculateGitBlobSHA(localBuf);
+
+      if (localSha === item.sha) {
+        // Identical content. Stat-cache the snapshot so subsequent
+        // syncs short-circuit via the watermark+stat-equality check.
         const stat = await this.vault.adapter.stat(filePath);
         if (stat) {
           this.store.set(filePath, {
@@ -633,21 +642,71 @@ export class Sync2Manager {
             size: stat.size,
           });
         }
+        identical++;
+        continue;
       }
-      downloaded++;
+
+      const stat = await this.vault.adapter.stat(filePath);
+      const localMtimeMs = stat?.mtime ?? 0;
+      if (localMtimeMs >= remoteHeadDateMs) {
+        // Local wins. Don't recordSync — findChanges will emit
+        // the file as "added" (no snapshot entry) and the next push
+        // will lift this local version onto the remote.
+        localKept++;
+        continue;
+      }
+      // Remote wins. Pull, overwriting the local copy in place.
+      await this.adoptionPullAndRecord(filePath, item, republishPaths);
+      remoteOverwrote++;
     }
-    const headCommit = await this.client.getCommit({
-      sha: currentHead,
-      retry: true,
-    });
+
     this.store.setLastSync(currentHead, headCommit.tree.sha ?? treeSha);
     this.store.setLastCommitMtime(this.now());
     await this.store.save();
-    await this.logger.info("Sync2 bootstrap-from-remote done", {
-      downloaded,
-      skippedAlreadyDownloaded,
+    await this.logger.info("Sync2 adoption-from-remote done", {
+      pulled,
+      identical,
+      localKept,
+      remoteOverwrote,
       treeSha,
     });
+  }
+
+  // Shared "download from remote and write to vault" path used by
+  // adoption's three pull branches (missing-locally, remote-newer
+  // overwrite, and the legacy bootstrap pull). Text bytes go through
+  // canonicalization (Etap 6.6: CRLF→LF, BOM strip, trailing-NL); the
+  // republishPaths set collects paths whose canonical SHA differs
+  // from the remote's blob SHA, so the next push can bring the
+  // server in line ("preferred clean server").
+  private async adoptionPullAndRecord(
+    filePath: string,
+    item: GetTreeResponseItem,
+    republishPaths: Set<string>,
+  ): Promise<void> {
+    const blob = await this.client.getBlob({ sha: item.sha, retry: true });
+    const bytes = base64ToArrayBuffer(blob.content);
+    if (hasTextExtension(filePath)) {
+      const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
+      const { canonicalSha, changed } = await this.writeRemoteText(
+        filePath,
+        text,
+      );
+      await this.detector.recordSync(filePath, canonicalSha);
+      if (changed) republishPaths.add(filePath);
+    } else {
+      await this.ensureParentDir(filePath);
+      await this.vault.adapter.writeBinary(filePath, bytes);
+      const stat = await this.vault.adapter.stat(filePath);
+      if (stat) {
+        this.store.set(filePath, {
+          path: filePath,
+          remoteSha: item.sha,
+          mtime: stat.mtime,
+          size: stat.size,
+        });
+      }
+    }
   }
 
   // `republishPaths` collects paths whose on-disk canonical bytes
