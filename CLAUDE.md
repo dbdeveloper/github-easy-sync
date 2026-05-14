@@ -218,18 +218,24 @@ src/sync2/
 
 ```
 sync2/
-├── bootstrap/         # A1, A2: bare-repo bootstrap + 10-iter stress
-├── adoption/          # B1–B6: first sync against non-bare remote
-├── normalization/     # C1, C2, C3 (resume) + CRLF/BOM round-trips
-├── incremental/       # D1–D8: post-adoption + delete races
-├── conflicts-misc/    # E1–E4: reconcile-onload, binary atomic, plugin-js semver/mtime
-├── conflicts/         # ConflictStore-driven deferred-conflict tests (Etap 6.5)
-├── gitignore/         # gitignore + rename interaction (11 tests, covers legacy E4)
-├── accumulate/        # L1–L4: accumulate semantics + attempted-marker
+├── bootstrap/             # A1, A2: bare-repo bootstrap + 10-iter stress
+├── adoption/              # B1–B6: first sync against non-bare remote
+├── normalization/         # C1, C2, C3 (resume) + CRLF/BOM round-trips
+├── incremental/           # D1–D8: post-adoption + delete races
+├── conflicts-misc/        # E1–E4: reconcile-onload, binary atomic, plugin-js semver/mtime
+├── edges/                 # F: special chars in paths + content edge cases
+├── multi-device/          # G1–G4: rotation, disjoint edits, same-line, binary atomic
+├── drift/                 # H1–H4: web-UI modify, PATCH retry, concurrent syncAll, OOB rename
+├── settings-lifecycle/    # I1–I4: reset metadata, syncConfigDir toggle, deviceLabel change
+├── api-failures/          # J1–J4: invalid token, 429 retry, wrong repo, network drop
+├── manifest-corruption/   # K1–K5: invalid JSON, deleted, stale lastSync, unknown fields, empty files map
+├── accumulate/            # L1–L4: accumulate semantics + attempted-marker
+├── conflicts/             # ConflictStore-driven deferred-conflict tests (Etap 6.5)
+├── gitignore/             # gitignore + rename interaction (covers legacy E4)
 └── empty-progression.test.ts
 ```
 
-Tests use **branch-per-test** on a persistent private int-test repo (fine-grained PAT). The bootstrap suite is the exception — it needs delete+recreate to regain bare state, so it uses a public ephemeral repo with a classic PAT. See `tests/integration/helpers.ts` for env-var wiring (`integrationEnabled` / `bootstrapEnabled`).
+Tests use **branch-per-test** on a persistent private int-test repo (fine-grained PAT). The bootstrap suite is the exception — it needs delete+recreate to regain bare state, so it uses a public ephemeral repo with a classic PAT. See `tests/integration/helpers.ts` for env-var wiring (`integrationEnabled` / `bootstrapEnabled`). The detailed series-by-series breakdown lives in the `## Testing` section near the bottom of this file.
 
 ### "Sync configs" toggle (`syncConfigDir`)
 
@@ -419,50 +425,127 @@ src/
 
 ## Testing
 
+Three independent test suites — each lives in its own directory, has its own vitest config, and is invoked via its own `pnpm` script. Every test runs against the same `mock-obsidian.ts` alias (fs-backed vault stand-in); integration + perf tests reach the real GitHub API on top of that.
+
+| Suite | Scope | Network | Command | Wall-clock |
+|---|---|---|---|---|
+| Unit | Pure helpers, snapshot/queue/store invariants, classifiers | No | `pnpm test` (single) / `pnpm test:watch` (re-run) | ~6 s |
+| Integration | Sync2Manager end-to-end via real GitHub | Yes | `pnpm test:integration` (full) and the two split scripts below | ~9 min full |
+| Perf baselines | Wall-clock signal on real GitHub upload paths | Yes | `pnpm test:perf` | ~1 min |
+
+Build sanity (`pnpm build`) runs `tsc -noEmit` before bundling — keep it green; CI runs the same on tag pushes.
+
+### Unit suite (`tests/sync2/` + `tests/gi.test.ts`, `pnpm test`)
+
+17 spec files, ~390 cases, ~6 s. Mocks the `obsidian` module via `vitest.config.ts` alias → `mock-obsidian.ts`. No network, no GitHub PAT required — runs anywhere `pnpm install` succeeded.
+
+What's covered:
+
+| File | What it pins |
+|---|---|
+| `tests/gi.test.ts` | `GI` (gitignore matcher): rule precedence, path-prefix scoping, mtime-driven re-parse skip |
+| `tests/sync2/change-detector.test.ts` | `findChanges` watermark + stat-cache + SHA short-circuit; `isSyncable` deny list incl. configDir gate |
+| `tests/sync2/chunk-actions.test.ts` | Per-chunk apply / revert in the merge view |
+| `tests/sync2/commit-templates.test.ts` | `{date}` / `{time}` / `{filename}` / `{path}` substitution + `appendDeviceSuffix` |
+| `tests/sync2/conflict-merge-all.test.ts` | "Merge into one" path: copies stack, headers, ordinal numbering |
+| `tests/sync2/conflict-modal.test.ts` | Buttons → resolution shape mapping |
+| `tests/sync2/conflict-status-bar.test.ts` | 🔀 status-bar count + click-through |
+| `tests/sync2/conflict-store.test.ts` | Sibling filename generation, pending-conflict serdes, notify-on-delete |
+| `tests/sync2/conflict-view.test.ts` | Merge-view leaf wiring, dep injection |
+| `tests/sync2/gitignore-invariants.test.ts` | `enforce()`, `spliceInvariantBlock`, `extractInvariantBlock`, `blockHasAllowLine`; "Push plugins data.json" toggle state encoded in block |
+| `tests/sync2/plugin-js.test.ts` | `isAtomicPluginFile`, `compareSemver`, `readPluginVersion` |
+| `tests/sync2/push-queue.test.ts` | Batch persistence, markers (`.in-progress` / `.attempted`), `uploadedBlobs`, isolated-batch rules |
+| `tests/sync2/snapshot-store.test.ts` | `migrate()` defensive coercion, `clear()`, `setLastSync`, invariant-state slot |
+| `tests/sync2/sync2-manager.test.ts` | The orchestrator under a fake `GithubClient` — bootstrap routing, conflict-resolution dispatch, processBatch Cases 1–4 |
+| `tests/sync2/text-normalize.test.ts` | CRLF→LF, BOM strip, trailing-NL canonicalisation |
+| `tests/sync2/three-way-merge.test.ts` | `mergeText` (diff3-style) — clean merges + conflict-marker shape |
+| `tests/sync2/tree-builder.test.ts` | Batch → tree entries, `uploadedBlobs` skip, `Promise.allSettled` over `createBlob` |
+
+Run a single spec:
+```
+pnpm vitest run tests/sync2/push-queue.test.ts
+```
+
 ### Integration suite (`tests/integration/`, `pnpm test:integration`)
 
-46 tests across 39 files, ~9 min wall-clock. Real GitHub round-trips through the same `mock-obsidian.ts` alias the unit suite uses (it's fs-backed; the mock is a real-vault stand-in, not a mock of GitHub).
+60 test files, ~95 cases (some `it.each` unfold further at runtime), ~9 min full wall-clock. Real GitHub round-trips on every test; `vitest.integration.config.ts` loads `.env.test` from repo root, aliases `obsidian` to `mock-obsidian.ts` exactly like the unit suite, but does NOT bundle.
 
-**Env vars** (`.env.test` at repo root, loaded by `vitest.integration.config.ts`):
-- `GITHUB_TOKEN` — fine-grained PAT scoped to a single private repo. Permissions: Contents R/W, Metadata R. CANNOT create or delete repos, which is intentional — limits leak blast radius to that one repo's contents. Used by every test except the bootstrap suite.
-- `INT_TEST_OWNER` / `INT_TEST_REPO` — points at the private int-test repo. Each test creates a unique branch (`int-test-<scenario>-<timestamp>-<n>`) off default and deletes it in `afterEach`. The default branch is bootstrapped lazily on first run via `ensureRepoNotBare`.
-- `GITHUB_BOOTSTRAP_TOKEN` — classic PAT with `public_repo` + `delete_repo`. Required only for the bootstrap suite, which has to delete + recreate a repo to get back to the bare state. Two-token split because fine-grained PATs can't create repos.
-- `INT_BOOTSTRAP_TEST_REPO` — the public ephemeral repo the bootstrap suite recreates. `tests/integration/teardown.ts` deletes it after every run so the public-repo-with-classic-PAT exposure window is bounded by the test run itself.
+**Env vars** (`.env.test` at repo root):
+- `GITHUB_TOKEN` — fine-grained PAT scoped to one private repo. Permissions: Contents R/W, Metadata R. CANNOT create or delete repos, which is intentional — leak blast radius is that one repo's contents. Used by every test except the bootstrap suite.
+- `INT_TEST_OWNER` / `INT_TEST_REPO` — the private int-test repo. Each test creates a unique branch (`int-test-<scenario>-<timestamp>-<n>`) off the default branch and deletes it in `afterEach`. Default branch is bootstrapped lazily on first run via `ensureRepoNotBare`.
+- `GITHUB_BOOTSTRAP_TOKEN` — classic PAT with `public_repo` + `delete_repo`. Only needed for the bootstrap suite; it has to delete + recreate a repo to get back to the bare state. The two-token split exists because fine-grained PATs can't create repos.
+- `INT_BOOTSTRAP_TEST_REPO` — the public ephemeral repo the bootstrap suite recreates. `tests/integration/teardown.ts` drops it at the end of every run.
 - `INT_TEST_BRANCH_PREFIX` — defaults to `int-test`; only override if multiple users share the same int-test repo.
 
-**Layout** under `tests/integration/scenarios/`:
-- `bootstrap/` — A1, A2 (two-step bare-repo bootstrap), C2 (resume firstSyncFromLocal mid-upload). Uses the public ephemeral repo via `bootstrapEnabled()`.
-- `sync/` — everything else, branch-per-test on the persistent int-test repo. Series organized by theme:
-  - **A3** — first-sync-from-remote into empty vault.
-  - **B1–B3** — adoption flows (identical / extras / conflict).
-  - **C1** — resume firstSyncFromRemote mid-download.
-  - **D1–D3** — incremental upload / download / bidirectional deletes.
-  - **E1–E4** — onload reconcile, atomic conflict resolution (binary, plugin-js, plugin-js-same-version), gitignore blocking.
-  - **F** — special chars in paths + content edge cases (one file, 7 sub-tests).
-  - **G1–G4** — multi-device stress: 3-client rotation, last-write-wins, modify-vs-delete, delete-vs-modify resurrection.
-  - **H1–H4** — out-of-band drift: web-UI modify between syncs, updateBranchHead failure recovery, sync race (`syncing` flag), settings-change-mid-sync.
-  - **I1–I4** — settings lifecycle: reset, syncConfigDir off/on, deviceName change.
-  - **J1–J5** — auth / API failures: token revoked, 429 backoff, wrong owner, missing branch, network drop.
-  - **K1–K5** — manifest corruption / recovery: invalid JSON, deleted, future lastSync, unknown fields, empty files map.
+**Run commands**:
+```
+pnpm test:integration              # everything (uses GITHUB_BOOTSTRAP_TOKEN if set)
+pnpm test:integration:bootstrap    # just tests/integration/scenarios/sync2/bootstrap (slow — repo recreate per test)
+pnpm test:integration:nonbootstrap # everything else (no GITHUB_BOOTSTRAP_TOKEN required)
+pnpm vitest run --config vitest.integration.config.ts tests/integration/scenarios/sync2/<bucket>
+```
+The bucket form takes a glob — `tests/integration/scenarios/sync2/conflicts*` runs both `conflicts/` and `conflicts-misc/`. A single file works too.
 
-**Helpers** (`tests/integration/helpers.ts`) — `createClient`, `writeVaultFile`, `readRemoteFile`, `listRemoteFiles`, `removeRemoteFile`, `writeRemoteFile`, `getBranchHead`, `countBranchCommits`, `syncAndAssertNoErrors`, `syncAndCollectErrors`, plus fault-injection primitives below.
+**Bucket-by-bucket** (all under `tests/integration/scenarios/sync2/`):
 
-**Fault injection** (`mock-obsidian.ts` `RequestFaultInjector` + helpers):
-- `failOnNthMatch(matcher, n, message)` — throws an Error before fetch on the Nth matching call. Used by C1, C2, H2, J5 to simulate kills / network drops.
-- `respondForFirstN(matcher, n, fakeResponse)` — short-circuits the first N matching calls with a synthesized HTTP response (status + headers + body). Used by J2 to feed deterministic 429s into retryUntil's loop without actually rate-limiting the live PAT.
+| Bucket | Series | What it pins |
+|---|---|---|
+| `bootstrap/sync2-bare-repo.test.ts` | A1, A2 | Two-step bare-repo bootstrap (Contents API seed + Git Data API root commit), 10-iter stress against eventual-consistency 409. Only suite that needs the bootstrap PAT. |
+| `adoption/B1-identical.test.ts` … `B6-binary-remote-newer.test.ts` | B1–B6 | First sync against a non-bare remote: identical (B1), non-overlapping (B2), text local-newer (B3), text remote-newer (B4), binary local-newer (B5), binary remote-newer (B6). Non-destructive contract pinned here. |
+| `normalization/` (9 files) | C1, C2, C3 + CRLF/BOM | C1 resumes bootstrap pull, C2 resumes push-blob (with remote-race variant), C3 pull-defers-to-push reconcile. CRLF/BOM/idempotency round-trips, multi-device convergence on canonicalisation, binary byte-exactness. |
+| `incremental/D1-incremental-upload.test.ts` … `D8-same-file-deleted-both.test.ts` | D1–D8 | Post-adoption incremental: upload (D1), download (D2), bidirectional deletes (D3), local-delete-vs-remote-modify on different files (D4) + same file (D6), local-modify-vs-remote-delete on different files (D5) + same file (D7, resurrection), both-sides-delete (D8). |
+| `conflicts-misc/E1-reconcile-onload.test.ts` … `E4-plugin-js-same-version-mtime.test.ts` | E1–E4 | Onload reconcile after vault edits while sync2 was disabled (E1), binary atomic mtime (E2), plugin-js semver atomic (E3), plugin-js same-version → mtime tie-break (E4). |
+| `edges/F-special-chars-and-content.test.ts` | F | Cyrillic paths + content, spaces/brackets in filenames, empty files, 1 MB long-line, 150-char filename, remote-side Cyrillic path pulled into fresh vault. 6 `it()` sub-cases in one file. |
+| `multi-device/G1-three-device-rotation.test.ts` … `G4-binary-atomic-across-devices.test.ts` | G1–G4 | Three-device rotation A→B→C→A (G1), two-device disjoint same-file edits → 3-way merge (G2), same-line conflict resolved on the second pusher (G3), binary atomic mtime across two real sync2 devices (G4). |
+| `drift/H1-out-of-band-modify.test.ts` … `H4-out-of-band-rename.test.ts` | H1–H4 | Web-UI edit between syncs (H1), PATCH `/git/refs` transient retry + hard-fail recovery (H2), concurrent syncAll serialized via `running` flag (H3), out-of-band delete+create rename (H4). |
+| `settings-lifecycle/I1-reset-metadata.test.ts` … `I4-device-label-change.test.ts` | I1–I4 | Snapshot reset (I1), syncConfigDir ON→OFF (I2), OFF→ON forward-looking (I3), deviceLabel change mid-session reflected in next commit message (I4). |
+| `api-failures/J1-invalid-token.test.ts` … `J4-network-drop.test.ts` | J1–J4 | Invalid token 401 (J1), 429 backoff (J2), wrong repo 404 (J3), simulated network drop on first call (J4). Each pins fail-fast + batch persistence + recovery on next sync. |
+| `manifest-corruption/K1-invalid-json.test.ts` … `K5-empty-files-map.test.ts` | K1–K5 | Garbage JSON in snapshot manifest (K1), file deleted (K2), bogus `lastSyncCommitSha` → `compare` 404 → auto-advance to live head (K3), unknown top-level + per-file fields ignored (K4), files: {} with lastSync intact (K5). |
+| `accumulate/L1-sequential-clicks.test.ts` … `L4-attempted-locks-merge.test.ts` | L1–L4 | Sequential clicks fold (L1), custom-message stays isolated (L2), syncAll with custom message (L3), attempted-marker locks a failed batch out of merge (L4). |
+| `conflicts/` (4 files) | Etap 6.5 | Deferred + sibling-delete close (defer-then-resolve-via-sibling-delete), merge-into-one resolver, multi-copy pair resolution, pending-conflict blocks push. |
+| `gitignore/gitignore-rename-suite.test.ts` | — | gitignore-driven filtering interacting with renames. Covers what was legacy E4. |
+| `empty-progression.test.ts` | — | "Nothing in vault, nothing on remote, click sync" path stays no-op. |
+
+**Helpers** (`tests/integration/helpers.ts`): `createBranchFromHead`, `deleteBranchIfExists`, `ensureRepoNotBare`, `getDefaultBranchHead`, `getBranchHead`, `countBranchCommits`, `getBranchCommitMessages`, `writeRemoteFile`, `readRemoteFile`, `listRemoteFiles`, `removeRemoteFile`, `getRemoteFileSha`, `uniqueBranchName`, `recreateRepo`, plus fault-injection primitives below.
+
+**Sync2-specific helpers** (`tests/integration/scenarios/sync2/helpers.ts`): `createSync2Client`, `Sync2TestClient`, `sync2AllAndAssertNoErrors`, `sync2FileAndAssertNoErrors`. The client owns its vault temp dir by default; pass `ownsVaultPath: false` (first instance) + `ownsVaultPath: true` (second) to share a vault across two test "sessions" (E1, K*, …).
+
+**Fault injection** (`mock-obsidian.ts` `RequestFaultInjector` + helpers exported from `tests/integration/helpers.ts`):
+- `failOnNthMatch(matcher, n, message)` — throws on the Nth matching call. Used by H2, J4, plus several normalization-resume tests.
+- `respondForFirstN(matcher, n, fakeResponse)` — short-circuits the first N matching calls with a synthesized HTTP response. Used by H2 (503 on PATCH) and J2 (429 on createTree) to exercise retryUntil without rate-limiting the live PAT.
 - Always reset in `afterEach` via `installRequestFaultInjector(null)` — the injector is global to the vitest worker and would leak between tests otherwise.
 
 ### Perf baselines (`tests/perf/`, `pnpm test:perf`)
 
-Opt-in, not in CI. Emits one `PERF_BASELINE {"name":...,"ms":...,...}` line per test; doesn't fail on slow runs (perf is signal, not a gate). The `PERF_BASELINE` prefix is a sentinel for log-scraping. ~1 min total wall-clock against a healthy connection.
+Opt-in, not in CI. Each test emits one `PERF_BASELINE {"name":...,"ms":...,...}` line on stdout — the `PERF_BASELINE` prefix is a sentinel a future regression script can grep for. **Nothing fails on slow runs** (perf is signal, not a gate). Reuses the integration env (same fine-grained PAT + `INT_TEST_REPO`).
 
-Tests:
-- **P1** — bulk text upload at 100/250/500 files (parametric `it.each`). Times the incremental sync that ships the bulk via `createTree`'s inline content path.
-- **P2** — single 10 MB binary through `createBlob` (~13 MB base64 in the body).
-- **P3** — 50 small (~1 KB) deterministic binaries — guard against future serialization of `commitSync`'s `filesToUpload` Promise.all loop. If the loop ever gets serialized, this number jumps roughly 50×.
-- **P4** — 245-file A3-style vault: 200 markdown notes + 30 daily-journal entries + 10 PNG attachments + 5 configDir snippets.
+Run all:
+```
+pnpm test:perf
+```
+Run a single baseline:
+```
+pnpm vitest run --config vitest.perf.config.ts tests/perf/p2-large-blob-upload.test.ts
+```
 
-`tests/perf/perf-helpers.ts` — `timed(name, extras, fn)` wraps an async block and emits the baseline; `deterministicBytes(seed, length)` generates non-compressible bytes seeded by a string so two runs produce identical SHAs (resume-skip optimization stays consistent across re-runs).
+| File | Name(s) emitted | What it measures |
+|---|---|---|
+| `tests/perf/p1-bulk-text-upload.test.ts` | `P1-100`, `P1-250`, `P1-500` | Bulk text upload at three sizes (parametric `it.each`). Times the second sync (the bulk push), not the priming first sync. Inline-into-`createTree` path. |
+| `tests/perf/p2-large-blob-upload.test.ts` | `P2-10MB` | Single 10 MB binary through `createBlob` (~13.4 MB base64 in body). Catches createBlob HTTP / base64 regressions. |
+| `tests/perf/p3-many-small-binaries.test.ts` | `P3-50bin` | 50 × ~1 KB deterministic binaries in one sync. Stresses TreeBuilder's `Promise.allSettled` over createBlob — serializing the loop later would multiply this number ~50×. |
+| `tests/perf/p4-a3-shaped-vault.test.ts` | `P4-A3-245` | A3-shaped 245-file vault: 200 markdown notes across 10 subfolders + 30 daily-journal entries + 10 PNG attachments + 5 configDir snippets. Closer to real-user shape than P1. |
+
+Reference baselines (single-run, local laptop, healthy network, May 2026):
+- P1-100 ≈ 2.6 s, P1-250 ≈ 2.8 s, P1-500 ≈ 3.4 s
+- P2-10MB ≈ 8.1 s
+- P3-50bin ≈ 4.2 s
+- P4-A3-245 ≈ 3.4 s
+
+`tests/perf/perf-helpers.ts` — `timed(name, extras, fn)` wraps an async block and emits the baseline; `deterministicBytes(seed, length)` generates non-compressible bytes seeded by a string so two runs produce identical SHAs (the upload-skip cache stays consistent across re-runs).
+
+### Benchmark script (`benchmark.ts`, `pnpm benchmark`)
+
+Predates the integration suite. Drives a real first-sync against GitHub via SSH-cloning + wiping the repo between runs. Requires `GITHUB_TOKEN`, `REPO_OWNER`, `REPO_NAME`, `REPO_BRANCH` env vars and an SSH-accessible remote (uses `git clone` over SSH to reset state). `pnpm test:integration` is usually preferred over this — it's faster, branch-per-test instead of repo-wide-wipe, and doesn't need SSH. Kept around for historical comparison only.
 
 ## Constraints to respect
 

@@ -4,10 +4,15 @@ import path from "path";
 export default defineConfig({
   test: {
     include: ["tests/**/*.test.ts"],
-    // Integration tests live under tests/integration/ and need a
-    // separate config (real GitHub API, dotenv, no parallelism).
-    // Keep them out of the unit run.
-    exclude: ["**/node_modules/**", "tests/integration/**"],
+    // Integration tests live under tests/integration/ and perf
+    // baselines under tests/perf/. Both reach the real GitHub API
+    // and have their own configs (vitest.integration.config.ts and
+    // vitest.perf.config.ts). Keep them out of the unit run.
+    exclude: [
+      "**/node_modules/**",
+      "tests/integration/**",
+      "tests/perf/**",
+    ],
     // The Obsidian runtime isn't available under Node — alias to the same
     // mock-obsidian.ts the benchmark script uses. Pure-function tests then
     // run unchanged: anything that touches the actual Obsidian API would

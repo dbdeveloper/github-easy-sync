@@ -9,8 +9,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:integration:bootstrap": "vitest run --config vitest.integration.config.ts tests/integration/scenarios/bootstrap",
-    "test:integration:nonbootstrap": "vitest run --config vitest.integration.config.ts --passWithNoTests --exclude 'tests/integration/scenarios/bootstrap/**'",
+    "test:integration:bootstrap": "vitest run --config vitest.integration.config.ts tests/integration/scenarios/sync2/bootstrap",
+    "test:integration:nonbootstrap": "vitest run --config vitest.integration.config.ts --passWithNoTests --exclude 'tests/integration/scenarios/sync2/bootstrap/**'",
     "test:perf": "vitest run --config vitest.perf.config.ts",
     "version": "node version-bump.mjs",
     "benchmark": "tsx benchmark.ts"
