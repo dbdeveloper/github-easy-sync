@@ -358,38 +358,39 @@ export default class GitHubSyncPlugin extends Plugin {
           hide: () => notice.hide(),
         };
       },
-      // Brief ack after the local snapshot is on disk: tells the user
-      // their work is safe in `.push-queue/` and they can keep
-      // editing even if GitHub is unreachable. Fires once per sync.
-      onLocalCommitted: (count: number) => {
-        const message =
-          count === 1 ? "Commit file" : `Commit ${count} files`;
-        new Notice(message, BRIEF_NOTICE_MS);
-      },
-      // Truly idle sync — nothing local to enqueue and the queue is
-      // empty. Brief reassurance for the user that the click did
-      // something.
-      onNoLocalChanges: () => {
-        new Notice("No changes", BRIEF_NOTICE_MS);
-      },
-      // Fires at the very end of every successful syncAll/syncFile.
-      // The brief success notice closes the loop visually after the
-      // long-running progress notice hid — without it the user sees
-      // the progress flash through and then nothing.
+      // Local-commit ack — fires once `enqueueOrMerge` materialises
+      // the batch on disk. We deliberately do NOT pop a separate
+      // Notice here, and the same logic applies to onNoLocalChanges
+      // below. Both used to surface their own brief toast, but the
+      // user reported seeing them stack ON TOP OF the long-lived
+      // "Syncing with GitHub…" progress notice ("Syncing with
+      // GitHub…" + "Commit 2 files" side-by-side). The progress
+      // notice's NEXT phase update ("Uploading N/M files…") already
+      // implies the local commit happened and the manager is
+      // talking to the network. Single-notice UX: only the progress
+      // notice during the sync, and a single brief summary at the
+      // end via onSyncCompleted.
+      //
+      // Callbacks themselves kept (no-op here) for tests + future
+      // wiring.
+      onLocalCommitted: () => {},
+      onNoLocalChanges: () => {},
+      // Fires at the very end of every successful syncAll/syncFile,
+      // AFTER the progress notice has hidden. Only this hook pops a
+      // brief Notice so we never have two notices visible at the
+      // same time.
       //
       // Differentiated by direction:
-      //   * pushedFiles > 0  → "Synced to GitHub" (work went up,
-      //                        possibly also came down).
-      //   * pulledFiles > 0  → "Pulled changes from GitHub" (only
-      //                        remote→local work landed in this sync).
-      //   * neither          → onNoLocalChanges already fired its
-      //                        "No changes" notice — stay silent
-      //                        here to avoid double-flashing.
+      //   pushedFiles > 0  → "Synced to GitHub"
+      //   pulledFiles > 0  → "Pulled changes from GitHub"
+      //   neither          → "No changes"
       onSyncCompleted: ({ pushedFiles, pulledFiles }) => {
         if (pushedFiles > 0) {
           new Notice("Synced to GitHub", BRIEF_NOTICE_MS);
         } else if (pulledFiles > 0) {
           new Notice("Pulled changes from GitHub", BRIEF_NOTICE_MS);
+        } else {
+          new Notice("No changes", BRIEF_NOTICE_MS);
         }
       },
     });
