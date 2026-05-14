@@ -1,0 +1,186 @@
+import {
+  describe,
+  it,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  expect,
+} from "vitest";
+import * as fs from "fs";
+import * as path from "path";
+import {
+  createBranchFromHead,
+  deleteBranchIfExists,
+  ensureRepoNotBare,
+  getDefaultBranchHead,
+  integrationEnabled,
+  readRemoteFile,
+  uniqueBranchName,
+  writeRemoteFile,
+} from "../../../helpers";
+import {
+  createSync2Client,
+  Sync2TestClient,
+  sync2AllAndAssertNoErrors,
+} from "../helpers";
+
+// E4 — plugin-js conflict at EQUAL semver. Atomic resolution falls
+// back to mtime: whichever main.js was touched more recently wins.
+// (Same code path resolveBinaryConflict uses for any binary
+// divergence, just reached via the plugin-js branch after semver
+// compare returned 0.)
+
+const pluginRoot = ".obsidian/plugins/tie-version-plugin";
+const mainJsPath = `${pluginRoot}/main.js`;
+const manifestPath = `${pluginRoot}/manifest.json`;
+
+const manifestWithVersion = (v: string): string =>
+  JSON.stringify({
+    id: "tie-version-plugin",
+    name: "Tie Version Plugin",
+    version: v,
+    minAppVersion: "1.0.0",
+  });
+
+const minifiedJs = (label: string): string =>
+  `(()=>{"use strict";const LABEL="${label}";module.exports={LABEL};})();`;
+
+describe.skipIf(!integrationEnabled())(
+  "sync2 E4 — plugin-js conflict at equal semver, mtime decides",
+  () => {
+    let client: Sync2TestClient | undefined;
+    let branch: string;
+
+    beforeAll(async () => {
+      await ensureRepoNotBare();
+    });
+
+    beforeEach(async () => {
+      branch = uniqueBranchName("sync2-e4-plugin-js-mtime");
+      const head = await getDefaultBranchHead();
+      if (!head) throw new Error("default branch missing");
+      await createBranchFromHead(branch, head);
+    });
+
+    afterEach(async () => {
+      client?.cleanup();
+      await deleteBranchIfExists(branch);
+    });
+
+    it(
+      "both sides at 1.0.0, local mtime in the future → local main.js wins",
+      async () => {
+        client = await createSync2Client({ branch });
+        await client.vault.adapter.write(
+          manifestPath,
+          manifestWithVersion("1.0.0"),
+        );
+        await client.vault.adapter.write(mainJsPath, minifiedJs("prime"));
+        await sync2AllAndAssertNoErrors(client);
+
+        // Remote: SAME version, different bundle bytes.
+        await writeRemoteFile(
+          branch,
+          mainJsPath,
+          minifiedJs("from-other-device"),
+          "[other] hand-tweak main.js without bumping version",
+        );
+
+        // Local: also hand-tweak, force mtime into the future so
+        // local wins the tie-break.
+        await client.vault.adapter.write(
+          mainJsPath,
+          minifiedJs("local-edit"),
+        );
+        const localPath = path.join(client.vaultPath, mainJsPath);
+        const futureTs = (Date.now() + 60_000) / 1000;
+        fs.utimesSync(localPath, futureTs, futureTs);
+
+        await sync2AllAndAssertNoErrors(client);
+
+        // Local content won — present on both sides.
+        expect(fs.readFileSync(localPath, "utf8")).toContain(
+          "LABEL=\"local-edit\"",
+        );
+        expect(await readRemoteFile(branch, mainJsPath)).toContain(
+          "LABEL=\"local-edit\"",
+        );
+      },
+      240_000,
+    );
+
+    it(
+      "both sides at 1.0.0, local mtime in the past → remote main.js overwrites local",
+      async () => {
+        client = await createSync2Client({ branch });
+        await client.vault.adapter.write(
+          manifestPath,
+          manifestWithVersion("1.0.0"),
+        );
+        await client.vault.adapter.write(mainJsPath, minifiedJs("prime"));
+        await sync2AllAndAssertNoErrors(client);
+
+        await writeRemoteFile(
+          branch,
+          mainJsPath,
+          minifiedJs("from-other-device"),
+          "[other] hand-tweak main.js without bumping version",
+        );
+
+        await client.vault.adapter.write(
+          mainJsPath,
+          minifiedJs("local-edit"),
+        );
+        const localPath = path.join(client.vaultPath, mainJsPath);
+        const pastTs = (Date.now() - 60_000) / 1000;
+        fs.utimesSync(localPath, pastTs, pastTs);
+
+        await sync2AllAndAssertNoErrors(client);
+
+        // Remote bytes overwrote local.
+        expect(fs.readFileSync(localPath, "utf8")).toContain(
+          "LABEL=\"from-other-device\"",
+        );
+      },
+      240_000,
+    );
+
+    it(
+      "remote manifest missing/malformed → falls back to mtime regardless of local version",
+      async () => {
+        client = await createSync2Client({ branch });
+        await client.vault.adapter.write(
+          manifestPath,
+          manifestWithVersion("5.0.0"),
+        );
+        await client.vault.adapter.write(mainJsPath, minifiedJs("prime"));
+        await sync2AllAndAssertNoErrors(client);
+
+        // Remote: bundle changes, manifest stays at prime "5.0.0".
+        // The bundle diverges but versions match → semver==0 → mtime
+        // fallback. We force local newer so the local bundle wins.
+        await writeRemoteFile(
+          branch,
+          mainJsPath,
+          minifiedJs("remote-bytes"),
+          "[other] change main.js, leave manifest stale at 5.0.0",
+        );
+
+        await client.vault.adapter.write(
+          mainJsPath,
+          minifiedJs("local-newer"),
+        );
+        const localPath = path.join(client.vaultPath, mainJsPath);
+        const futureTs = (Date.now() + 60_000) / 1000;
+        fs.utimesSync(localPath, futureTs, futureTs);
+
+        await sync2AllAndAssertNoErrors(client);
+
+        expect(await readRemoteFile(branch, mainJsPath)).toContain(
+          "LABEL=\"local-newer\"",
+        );
+      },
+      240_000,
+    );
+  },
+);

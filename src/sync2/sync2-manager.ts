@@ -15,6 +15,12 @@ import SnapshotStore from "./snapshot-store";
 import TreeBuilder from "./tree-builder";
 import { mergeText } from "./three-way-merge";
 import {
+  compareSemver,
+  isAtomicPluginFile,
+  pluginRootOf,
+  readPluginVersion,
+} from "./plugin-js";
+import {
   applyTemplate,
   appendDeviceSuffix,
   DEFAULT_INIT_COMMIT_MESSAGE,
@@ -792,6 +798,15 @@ export class Sync2Manager {
       await this.resolveBinaryConflict(path, headRef, blob);
       return;
     }
+    if (isAtomicPluginFile(path, this.configDir)) {
+      // Plugin JS bundles are minified single-line megabytes; a
+      // 3-way text merge produces incoherent garbage that crashes
+      // Obsidian on load. Resolve atomically via the plugin's
+      // semver (read from manifest.json), falling back to mtime
+      // on tie — same shape the legacy plugin used.
+      await this.resolvePluginJsConflict(path, headRef, blob);
+      return;
+    }
 
     const baseFetched = await this.safeFetchContents(path, baseRef);
     const baseContent = baseFetched
@@ -913,6 +928,80 @@ export class Sync2Manager {
       "Sync2 binary conflict: remote newer, overwrote local",
       { path },
     );
+  }
+
+  // Plugin-js conflict: atomic resolution via the plugin's manifest
+  // semver, falling back to mtime when versions tie or can't be
+  // parsed. Called only for paths matching isAtomicPluginFile() — bare .js
+  // files outside the plugin tree go through the standard text
+  // 3-way merge.
+  //
+  // The plugin's version lives in `<pluginRoot>/manifest.json` on
+  // each side. We read local from disk and remote via
+  // safeFetchContents at headRef; either may be missing or
+  // malformed (returns null from readPluginVersion), which routes
+  // us into the mtime fallback the same way an equal-semver tie
+  // would. This is deliberate: a missing/broken manifest doesn't
+  // crash sync, it just degrades to the next-best heuristic.
+  private async resolvePluginJsConflict(
+    path: string,
+    headRef: string,
+    blob: { content: string; sha: string },
+  ): Promise<void> {
+    const root = pluginRootOf(path, this.configDir);
+    if (root === null) {
+      // Defensive: isAtomicPluginFile(path) ⇒ pluginRootOf(path) !== null.
+      // Fall back to mtime if somehow violated.
+      await this.resolveBinaryConflict(path, headRef, blob);
+      return;
+    }
+    const manifestPath = `${root}/manifest.json`;
+
+    let localSemver: string | null = null;
+    if (await this.vault.adapter.exists(manifestPath)) {
+      const text = await this.vault.adapter.read(manifestPath);
+      localSemver = readPluginVersion(text);
+    }
+    const remoteManifestBlob = await this.safeFetchContents(
+      manifestPath,
+      headRef,
+    );
+    const remoteSemver = remoteManifestBlob
+      ? readPluginVersion(decodeBase64String(remoteManifestBlob.content))
+      : null;
+
+    if (localSemver !== null && remoteSemver !== null) {
+      const cmp = compareSemver(localSemver, remoteSemver);
+      if (cmp > 0) {
+        // Local plugin newer. Keep local; the next push will lift
+        // it to remote.
+        await this.logger.info(
+          "Sync2 plugin-js conflict: local semver newer, keep ours",
+          { path, localSemver, remoteSemver },
+        );
+        return;
+      }
+      if (cmp < 0) {
+        // Remote plugin newer. Overwrite local in place.
+        await this.writeBinaryRemote(path, blob.content);
+        await this.detector.recordSync(path, blob.sha);
+        await this.logger.info(
+          "Sync2 plugin-js conflict: remote semver newer, overwrote local",
+          { path, localSemver, remoteSemver },
+        );
+        return;
+      }
+      // Equal semver — fall through to mtime resolution below.
+    }
+
+    // Either semver missing on at least one side, or equal versions
+    // — resolveBinaryConflict's mtime comparator handles both cases
+    // identically.
+    await this.logger.info(
+      "Sync2 plugin-js conflict: semver tie or missing, falling back to mtime",
+      { path, localSemver, remoteSemver },
+    );
+    await this.resolveBinaryConflict(path, headRef, blob);
   }
 
   private async writeBinaryRemote(

@@ -15,9 +15,26 @@ This branch (`init-state-machine-refactoring`) sits 30+ commits ahead of upstrea
 
 Behaviour described below is shaped first by an A→E manual test sweep, then locked in by the integration tests (`pnpm test:integration`). Test series A–K each correspond to a different concern — bootstrap, adoption, resume, incremental, atomic conflicts, special chars, multi-device stress, out-of-band drift, settings lifecycle, auth/API failures, manifest corruption. The conflict view UX is the one area still openly known to be primitive; everything else is intentional.
 
-## Active refactor
+## Active engine: sync2 (Etap 7 cutover landed)
 
-A performance + UX redesign is in progress. The plan, including phases, manifest schema changes, the `.push-queue/` directory layout, and out-of-scope items, lives in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md). Read it before touching `sync-manager.ts`, `metadata-store.ts`, or anything in `settings/`. The architecture described in the rest of this file is the **pre-refactor** state; phases of the plan supersede it as they land.
+The plugin is now driven by **sync2** (`src/sync2/`). The legacy `SyncManager`, `events-listener`, `decideInitAction`, and chunk-pick conflict view are **gone from src/** (see `main.ts:42` comment). The plugin id is unchanged (`github-gitless-sync`); only the engine swapped.
+
+## Headline design intent
+
+**The sync tries to behave like a primitive git client — but with predictable, easy-to-explain semantics, so users know what to expect.** Sync2 deliberately rejects features a power-user might want from a real git workflow (no branches, no rebase, no manual stash) and instead picks one safe default per scenario. Concretely:
+
+- Two-side divergence on a file → 3-way merge if there's a base, atomic mtime tie-break otherwise. Same as `git pull --no-rebase` would do, minus the conflict marker dance for the safe cases.
+- File missing on one side → pulled from / pushed to the other side. Same as `git pull` / `git push` adding new objects.
+- File deleted somewhere → propagates, with modify-vs-delete resolved as "local-intent-wins" (delete wins if local, resurrection wins if local-modified). Matches git-default conservativeness ("keep the change-side").
+- "Adoption" (first sync against a non-bare repo with local content) is **non-destructive**: local files are NEVER overwritten without an mtime check that says remote is newer.
+
+**Two places where sync2 intentionally diverges from "primitive git":**
+- **`<configDir>/plugins/<id>/main.js` and `manifest.json`** — atomic semver resolution (read `manifest.json` from both sides, higher version wins, mtime tie-break). A 3-way merge on a minified plugin bundle produces garbage that crashes Obsidian on load, so we don't do it.
+- **Binary files** — atomic mtime resolution always; no merge attempt. PNG / mp4 etc. have no useful "merge".
+
+Everything else inherits git-shape behaviour. The detail of how each path is resolved lives below in "Sync2 architecture" → "Conflict resolution".
+
+Read the **"Sync2 architecture"** section below before touching anything in `src/sync2/`. The original "Architecture" section further down describes the **legacy** flow — kept verbatim for context when reading old PRs or grep'ing for removed symbols, but the code is not in the repo anymore.
 
 ## Commands
 
@@ -34,6 +51,167 @@ Package manager is **pnpm** (CI uses `pnpm@latest-10`).
 - `pnpm benchmark` — `benchmark.ts`: real `firstSync` against GitHub. Requires env vars `GITHUB_TOKEN`, `REPO_OWNER`, `REPO_NAME`, `REPO_BRANCH` and an SSH-accessible remote (uses `git clone` over SSH to wipe the repo between runs). Predates the integration suite; the test:integration script is usually preferred now.
 
 Releases are triggered by pushing a tag matching `[0-9].[0-9]+.[0-9]+*` (a `-beta` suffix cuts a prerelease); `version-bump.mjs` syncs `manifest.json` and `versions.json` from `package.json`.
+
+## Sync2 architecture (post-Etap 7)
+
+### Entry points
+
+`Sync2Manager` is the only orchestrator. Three top-level public methods, all idempotent; `processQueue` is guarded by a `running` flag so concurrent calls don't double-drain:
+
+- `syncAll(customMessage?: string)` — whole-vault sync. Without `customMessage`: standard template-driven commit. With: an **isolated** batch using the user's typed message verbatim.
+- `syncFile(path, customMessage?)` — single-file sync. Same custom-message split.
+- `pullOnly()` — interval-driven background pull; suppresses conflict modals (any conflict defers to the next manual sync).
+
+Wired in `main.ts` to four Obsidian commands: `Sync with GitHub`, `Sync with GitHub (custom message)…`, `Sync current file with GitHub`, `Sync current file with GitHub (custom message)…`.
+
+### Polling model (NOT event-driven)
+
+Sync2 does **not** register Obsidian vault events. `findChanges` (`change-detector.ts:100`) walks the whole vault on each sync call. A watermark (`SnapshotStore.lastCommitMtime`) skips unchanged files via `file.stat.mtime <= watermark` — one stat per file, content read only for the narrow candidate set.
+
+Implication: vault edits made while the plugin was disabled get picked up on the next sync click without any "missed events" failure mode (covered by E1 test).
+
+### PushQueue: persisted commit intent
+
+Located at `<configDir>/plugins/github-gitless-sync/.push-queue/`. Each pending sync is a directory:
+
+```
+.push-queue/
+  20260514093823777/
+    .in-progress       ← runner is actively pushing this batch
+    .attempted         ← processBatch has touched this batch ≥ 1 time
+    .meta.json         ← see "Meta fields" below
+    deleted-paths.txt  ← optional; one path per line
+    vault/             ← byte-for-byte snapshot of user's intent at enqueue
+      Folder/note.md
+      attachments/img.png
+```
+
+**Meta fields** (`.meta.json`):
+- `commitMessage` — final commit text. Refreshed on accumulate-merge via `updateCommitMessage`.
+- `parentCommitSha` / `parentTreeSha` — where we'll build the commit. Updated by reconcile, by the stale-parent guard, or by `seedBareRepo`.
+- `createdAt` — local clock at enqueue.
+- `uploadedBlobs: Record<path, sha>` — paths whose `createBlob` succeeded in a prior attempt. TreeBuilder consults this map before re-uploading.
+- `isolated: boolean` — true for custom-message batches; blocks merge in either direction.
+
+**Marker semantics:**
+- `.in-progress` set at start of `processBatch`, cleared on success (via `delete(id)`) OR failure (via `clearInProgress`).
+- `.attempted` set at start of `processBatch` and **never cleared on failure** — only removed when the batch dir is deleted on commit success. Models the user's rule: "failed batch is frozen against new merges; the next sync click creates a new batch".
+- `mergeIntoLatestPending` skips batches that are `in-progress` OR `attempted` OR `isolated`.
+
+### Adoption (first sync against a non-bare remote)
+
+`bootstrapFromRemote` (the function name is historic — what it actually does is **adoption**) is **non-destructive**. Per-file decision:
+
+- Local missing → pull, write vault, recordSync.
+- Local exists, SHA matches remote → recordSync only (no transfer, no overwrite, mtime preserved).
+- Local exists, SHA differs → atomic mtime resolution:
+  - `local.mtime >= remoteHeadCommit.committerDate` → **keep local**. No recordSync; findChanges later emits "added" and the next push lifts local to remote.
+  - Else → pull, **overwrite local in place**, recordSync.
+
+Local-only files (in vault, not in remote tree) are untouched here; findChanges picks them up post-adoption as "added".
+
+Tie on mtime → local wins. No "deleted-on-this-device" detection (no history); README must instruct users to pre-sync via their previous tool. Covered by **B1–B6** tests under `tests/integration/scenarios/sync2/adoption/`.
+
+### Bare-repo bootstrap
+
+When the remote branch has zero commits (`bootstrapIfNeeded` saw 404/409 on `getBranchHeadSha`; `processBatch` arrives at Case 1 with `expectedHead === null && currentHead === null`):
+
+1. `seedBareRepo(id)` writes `<vault>/.gitignore` (guaranteed by `invariants.enforce()`) via Contents API — the only endpoint that works without a pre-existing ref. Commit message: `"Init at {date} {time} ({deviceLabel})"`.
+2. Returned `{commitSha, treeSha}` become the batch's parent. Rest of `processBatch` proceeds normally (`createTree` → `createCommit` → `updateBranchHead`).
+3. **No-op-tree-skip**: if `newTreeSha === parentTreeSha` (e.g., batch only carried the file the seed already wrote), the secondary commit is skipped; lastSync points at the seed.
+
+Covered by `tests/integration/scenarios/sync2/bootstrap/sync2-bare-repo.test.ts` (5 named cases + 10-iter `it.each` stress loop guarding the eventual-consistency 409 flake).
+
+### Retry policy
+
+- `isRetriableStatus(status)` (`src/utils.ts`): 422 / 429 / 5xx. Used by **READ** methods (`getRepoContent`, `getBranchHeadSha`, `getCommit`, `getContentsAtRef`, `compare`, `getBlob`). 409 here is the documented "Git Repository is empty" bare-repo signal — must return immediately, not retry.
+- `isWriteRetriableStatus(status)`: adds **409** to the above. Used by **WRITE** methods (`createTree`, `createCommit`, `createBlob`, `updateBranchHead`, `createFile`, `createReference`). 409 here is GitHub's "ref/index not yet propagated across replicas" — empirically a ~20% flake on back-to-back syncs, reliably cleared by the first exponential-backoff retry.
+
+If you extend retry for a specific method, prefer using/extending `isWriteRetriableStatus` over inline 409 handling — keeps the "reads stay immediate" invariant intact.
+
+### Resume strategies (three layers)
+
+1. **Pull-side resume** (`bootstrapFromRemote`): the per-file loop skips `getBlob` when the local file exists with the SHA the tree announces. A bootstrap that crashed after 6 of 50 files re-runs and only fetches 7–50.
+
+2. **Push-side resume** (`tree-builder.ts` + `PushQueue.uploadedBlobs`): after each `createBlob` success, TreeBuilder calls `queue.recordBlobUpload(id, path, sha)`. On retry of the same batch, paths in `uploadedBlobs` skip the `createBlob` call and use the cached SHA inline. Serialized through `metaWriteQueue` so `Promise.allSettled` callbacks don't clobber each other.
+
+3. **findChanges-vs-queue bridge** (`change-detector.ts:findChanges`): before emitting "added"/"modified", consults `queue.peekPathSha(path)`. If a pending batch already holds this path with the local-computed SHA, **skip emit**. This is what stops "second sync after a crash" from creating a duplicate batch — regardless of the `accumulateOfflineSyncs` setting. The matching path stays in B1 until B1 commits.
+
+### Conflict resolution
+
+`applyRemoteAddOrModify` dispatches by path shape:
+
+| Path shape | Path examples | Resolution |
+|---|---|---|
+| Non-text | `*.png`, `*.pdf`, etc. | `resolveBinaryConflict` — atomic mtime, tie → local |
+| Plugin file | `<configDir>/plugins/<id>/main.js` OR `…/manifest.json` (any depth) | `resolvePluginJsConflict` — semver from plugin's `manifest.json`, fallback to mtime on tie/parse-fail |
+| Other text | everything else with `hasTextExtension(path)` | 3-way merge against `expectedHead`; conflict → `onConflict` callback |
+
+`isAtomicPluginFile(path, configDir)` (in `src/sync2/plugin-js.ts`) is the gate for the plugin-file branch. **Only `.js` AND `manifest.json` under a plugin folder match**; `styles.css`, README files, etc. go through standard text 3-way merge.
+
+**Pull defers to push-side reconcile for queue-overlap paths**: `pullIfNeeded` skips `applyRemoteAddOrModify` for any path mentioned in a pending batch, and **withholds the `lastSync` advancement** so `processBatch`'s Case 4 (`reconcileBatchAgainstHead`) runs the 3-way merge against the **batch's snapshot** instead of the live vault. Without this bridge, the batch would push its stale snapshot on top of the merged remote, losing the merge result (covered by C3 test).
+
+### Custom-message commits & accumulate semantics
+
+- Every command that takes a custom message routes through `enqueueOrMerge({…, isolated: true})`. Isolated batches **never** absorb other changes and **never** themselves fold into a prior batch. User's typed message survives intact.
+- For standard (non-isolated) syncs with `accumulateOfflineSyncs: true`: `mergeIntoLatestPending` finds the youngest pending+non-in-progress+non-attempted+non-isolated batch and folds new changes into it. After the merge, `enqueueOrMerge` calls `updateCommitMessage` so the batch's commit message reflects the **latest** click's template render — not the first.
+- A failed batch is `attempted=true` → next click creates a fresh batch (not folded). Practical "accumulate" window: clicks that arrive WHILE a previous slow push is in-progress accumulate into a NEW second batch that the runner will pick up after the in-progress one finishes.
+- Covered by **L1–L4** in `tests/integration/scenarios/sync2/accumulate/`.
+
+### Module layout (src/sync2/)
+
+```
+src/sync2/
+├── sync2-manager.ts        # entry, queue runner, conflict resolution
+├── change-detector.ts      # vault walk + findChanges + queue bridge
+├── push-queue.ts           # .push-queue/ persistence + markers + meta serdes
+├── tree-builder.ts         # batch → tree entries (with uploadedBlobs skip)
+├── snapshot-store.ts       # github-easy-sync-metadata.json (file name is historic)
+├── gitignore-invariants.ts # the three invariant .gitignore files
+├── commit-templates.ts     # {date}/{time}/… placeholders + device suffix
+├── conflict-store.ts       # deferred conflicts, sibling files (Etap 6.5)
+├── conflict-merge-all.ts   # merge-into-one resolution path
+├── plugin-js.ts            # isAtomicPluginFile, compareSemver, etc.
+├── three-way-merge.ts      # mergeText (diff3-style)
+├── text-normalize.ts       # CRLF→LF, BOM strip, trailing-NL
+├── types.ts                # QueueBatch, FileChange, EnqueueMeta, …
+└── views/                  # ConflictView, DiffPane, CommitMessageModal
+```
+
+### Test layout (tests/integration/scenarios/sync2/)
+
+```
+sync2/
+├── bootstrap/         # A1, A2: bare-repo bootstrap + 10-iter stress
+├── adoption/          # B1–B6: first sync against non-bare remote
+├── normalization/     # C1, C2, C3 (resume) + CRLF/BOM round-trips
+├── incremental/       # D1–D8: post-adoption + delete races
+├── conflicts-misc/    # E1–E4: reconcile-onload, binary atomic, plugin-js semver/mtime
+├── conflicts/         # ConflictStore-driven deferred-conflict tests (Etap 6.5)
+├── gitignore/         # gitignore + rename interaction (11 tests, covers legacy E4)
+├── accumulate/        # L1–L4: accumulate semantics + attempted-marker
+└── empty-progression.test.ts
+```
+
+Tests use **branch-per-test** on a persistent private int-test repo (fine-grained PAT). The bootstrap suite is the exception — it needs delete+recreate to regain bare state, so it uses a public ephemeral repo with a classic PAT. See `tests/integration/helpers.ts` for env-var wiring (`integrationEnabled` / `bootstrapEnabled`).
+
+### Things sync2 deliberately does NOT do
+
+- No event-listener (polling is enough and simpler; no missed-events failure mode).
+- No legacy-manifest migration on adoption (anything that needs sync history must run a sync via the previous tool first).
+- No state-machine routing (`decideInitAction` and friends are gone). Branching lives inside `processBatch` (Cases 1–4) and `applyRemoteAddOrModify`.
+- No `syncConfigDir` gating in `isSyncable` today (per-device toggle planned — see memory `feedback_sync_configs_per_device.md`).
+- No legacy "atomic plugin .js + conflict-sibling backup" `.conflict-(local|remote)-…` files (sync2 has Etap 6.5 conflict-sibling files with a different naming scheme: `.conflict-from-<label>-<iso-no-colons>Z<ext>`; these stay strictly local via the root gitignore invariant block).
+
+## Legacy architecture (pre-cutover, historical only — code is gone from src/)
+
+The sections that follow describe the engine as it existed before the Etap 7 cutover. The code (`sync-manager.ts`, `sync-state.ts`, `metadata-store.ts`, `events-listener.ts`, the `decideInitAction` state machine, the chunk-pick conflict view) is **no longer in the repo**. Documentation is kept here so:
+
+- old PRs / commit messages remain readable;
+- removed symbols can be grep'd from this file;
+- inherited concepts (manifest as wire protocol, commit-message format with device suffix, invariant gitignores) trace back to their original design rationale.
+
+The **active** flow is described above in "Sync2 architecture".
 
 ## Architecture
 
