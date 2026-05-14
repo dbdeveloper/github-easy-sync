@@ -215,9 +215,25 @@ export interface Sync2ManagerDeps {
   //     filtered for pending-conflict paths).
   //   - onNoLocalChanges fires when there's nothing to enqueue AND
   //     no pending batches in the queue — i.e. a truly idle sync.
-  // Both are no-ops in unit tests that don't pass them.
+  //   - onSyncCompleted fires AT THE END of every successful
+  //     syncAll/syncFile (in a finally block, so it fires even after
+  //     errors — the wrapper hook is responsible for deciding
+  //     whether to flash a success or failure notice).
+  //     `pushedFiles` reflects the count enqueued in this sync
+  //     specifically; 0 means "nothing went up to remote".
+  //     `pulledFiles` counts vault mutations from the pull phases
+  //     (bootstrap-from-remote + pullIfNeeded — adds, modifies,
+  //     deletes, renames), so "nothing went up but stuff came down"
+  //     reads as pushedFiles=0, pulledFiles>0. Identical-SHA no-ops
+  //     during adoption do NOT count — those are comparisons, not
+  //     content changes.
+  // All are no-ops in unit tests that don't pass them.
   onLocalCommitted?(filesCount: number): void;
   onNoLocalChanges?(): void;
+  onSyncCompleted?(summary: {
+    pushedFiles: number;
+    pulledFiles: number;
+  }): void;
   // When true, a new sync click while pending batches exist (i.e.
   // earlier push attempt failed — typically offline) folds the new
   // changes into the latest pending batch instead of stacking. The
@@ -258,6 +274,15 @@ export class Sync2Manager {
     | ((filesCount: number) => void)
     | undefined;
   private readonly onNoLocalChanges: (() => void) | undefined;
+  private readonly onSyncCompleted:
+    | ((summary: { pushedFiles: number; pulledFiles: number }) => void)
+    | undefined;
+  // Accumulator for the pull-side phases (bootstrapFromRemote +
+  // pullIfNeeded) so onSyncCompleted can report how many files
+  // actually came down from the remote. Reset at the start of each
+  // syncAll/syncFile/pullOnly; only counts real vault mutations
+  // (no identical-SHA noops).
+  private pulledFilesThisSync = 0;
   private readonly remoteIdentity: (() => RemoteIdentity) | undefined;
   private readonly now: () => number;
   // Guard against re-entrant processQueue. The runner only loops one
@@ -295,6 +320,7 @@ export class Sync2Manager {
     this.onProgress = deps.onProgress;
     this.onLocalCommitted = deps.onLocalCommitted;
     this.onNoLocalChanges = deps.onNoLocalChanges;
+    this.onSyncCompleted = deps.onSyncCompleted;
     this.remoteIdentity = deps.remoteIdentity;
     this.now = deps.now ?? (() => Date.now());
   }
@@ -319,55 +345,80 @@ export class Sync2Manager {
     // the new remote (lastSyncCommitSha is null after the wipe →
     // bootstrapIfNeeded sees the new branch and clones it).
     await this.reconcileRemoteIdentity();
-    // Etap 6.6: track paths whose remote bytes were non-canonical and
-    // got rewritten locally. After findChanges runs we'll synthesize
-    // FileChange[modified] for any republish entry not already covered
-    // by user-driven local changes — that lets the next push bring
-    // the remote in line with the canonical local copy.
-    const republishPaths = new Set<string>();
-    const headAfterBootstrap = await this.bootstrapIfNeeded(republishPaths);
-    const headAfterPull =
-      headAfterBootstrap ?? (await this.pullIfNeeded(republishPaths));
-    // syncAll always touches configDir-side state (manifest/log,
-    // possibly user notes there). Make sure invariant gitignores are
-    // canonical before findChanges classifies anything.
-    if (this.invariants) await this.invariants.enforce();
-    const changes = await this.detector.findChanges();
-    const combined = await this.appendRepublishChanges(
-      changes,
-      republishPaths,
-    );
-    if (combined.length === 0) {
-      await this.store.save();
-      // "Nothing local AND nothing pending in the queue" is the truly
-      // idle case — fire onNoLocalChanges so plugin code can flash a
-      // brief "No changes" notice. If the queue still has pending
-      // batches (offline-accumulate case), processQueue picks them up
-      // and onProgress takes over the user feedback.
-      const pendingBatches = await this.queue.list();
-      if (pendingBatches.length === 0) this.onNoLocalChanges?.();
-      await this.processQueue(headAfterPull);
-      await this.logger.info("Sync2 syncAll: nothing to sync");
-      return;
+    // Open the progress notice IMMEDIATELY so the user sees instant
+    // feedback that their [Sync with GitHub] click registered. Without
+    // this, the first ~400ms (GET branch head) shows no UI at all and
+    // feels broken on slow links. Each phase below (.update()) replaces
+    // the text; the finally block hides at the end.
+    const progress = this.onProgress
+      ? this.onProgress("Syncing with GitHub…")
+      : null;
+    let syncedFiles = 0;
+    this.pulledFilesThisSync = 0;
+    try {
+      // Etap 6.6: track paths whose remote bytes were non-canonical
+      // and got rewritten locally. After findChanges runs we'll
+      // synthesize FileChange[modified] for any republish entry not
+      // already covered by user-driven local changes — that lets the
+      // next push bring the remote in line with the canonical local
+      // copy.
+      const republishPaths = new Set<string>();
+      const headAfterBootstrap = await this.bootstrapIfNeeded(
+        republishPaths,
+        progress,
+      );
+      const headAfterPull =
+        headAfterBootstrap ??
+        (await this.pullIfNeeded(republishPaths, progress));
+      // syncAll always touches configDir-side state (manifest/log,
+      // possibly user notes there). Make sure invariant gitignores
+      // are canonical before findChanges classifies anything.
+      if (this.invariants) await this.invariants.enforce();
+      const changes = await this.detector.findChanges();
+      const combined = await this.appendRepublishChanges(
+        changes,
+        republishPaths,
+      );
+      if (combined.length === 0) {
+        await this.store.save();
+        // "Nothing local AND nothing pending in the queue" is the
+        // truly idle case — fire onNoLocalChanges so plugin code can
+        // flash a brief "No changes" notice. If the queue still has
+        // pending batches (offline-accumulate case), processQueue
+        // picks them up and onProgress takes over the user feedback.
+        const pendingBatches = await this.queue.list();
+        if (pendingBatches.length === 0) this.onNoLocalChanges?.();
+        await this.processQueue(headAfterPull, progress);
+        await this.logger.info("Sync2 syncAll: nothing to sync");
+        return;
+      }
+      // Custom-message syncAll goes through enqueueOrMerge as an
+      // isolated batch — user's typed message must survive intact
+      // and must not absorb later std-syncs into its commit on
+      // GitHub.
+      const meta: EnqueueMeta =
+        customMessage !== undefined
+          ? {
+              commitMessage: appendDeviceSuffix(
+                customMessage,
+                this.deviceLabel(),
+              ),
+              parentCommitSha: this.store.getLastSyncCommitSha(),
+              parentTreeSha: this.store.getLastSyncTreeSha(),
+              isolated: true,
+            }
+          : this.fullSyncMeta();
+      const enqueued = await this.enqueueOrMerge(combined, meta);
+      syncedFiles = enqueued;
+      if (enqueued > 0) this.onLocalCommitted?.(enqueued);
+      await this.processQueue(headAfterPull, progress);
+    } finally {
+      progress?.hide();
+      this.onSyncCompleted?.({
+        pushedFiles: syncedFiles,
+        pulledFiles: this.pulledFilesThisSync,
+      });
     }
-    // Custom-message syncAll goes through enqueueOrMerge as an
-    // isolated batch — user's typed message must survive intact and
-    // must not absorb later std-syncs into its commit on GitHub.
-    const meta: EnqueueMeta =
-      customMessage !== undefined
-        ? {
-            commitMessage: appendDeviceSuffix(
-              customMessage,
-              this.deviceLabel(),
-            ),
-            parentCommitSha: this.store.getLastSyncCommitSha(),
-            parentTreeSha: this.store.getLastSyncTreeSha(),
-            isolated: true,
-          }
-        : this.fullSyncMeta();
-    const enqueued = await this.enqueueOrMerge(combined, meta);
-    if (enqueued > 0) this.onLocalCommitted?.(enqueued);
-    await this.processQueue(headAfterPull);
   }
 
   // Action 2/3 — sync just the file at `path`.
@@ -387,62 +438,72 @@ export class Sync2Manager {
     // useless and we'd be pushing single-file content to the wrong
     // repo if we kept going.
     await this.reconcileRemoteIdentity();
-    // Etap 6.6: pull-side normalization may rewrite OTHER paths besides
-    // the syncFile target. We only push the target in this batch (the
-    // user asked to sync one file, not the whole vault); the rest stay
-    // canonical-locally with the gap-to-remote tracked implicitly
-    // until the next syncAll.
-    const republishPaths = new Set<string>();
-    const headAfterBootstrap = await this.bootstrapIfNeeded(republishPaths);
-    const headAfterPull =
-      headAfterBootstrap ?? (await this.pullIfNeeded(republishPaths));
-    // Only enforce invariants when the active path is under configDir;
-    // single-file syncs of regular notes don't risk touching them.
-    if (this.invariants && path.startsWith(`${this.configDir}/`)) {
-      await this.invariants.enforce();
-    }
-    let change = await this.detector.findChangeForPath(path);
-    // If the target file itself was canonicalized during pull, surface
-    // it as a synthetic modify so the push converges this file's
-    // remote copy in this very call.
-    if (!change && republishPaths.has(path)) {
-      change = await this.synthesizeRepublishChange(path);
-    }
-    if (!change) {
-      await this.store.save();
-      // Same idle-vs-draining distinction as syncAll: only fire the
-      // "No changes" hook when there's truly nothing to do.
-      const pendingBatches = await this.queue.list();
-      if (pendingBatches.length === 0) this.onNoLocalChanges?.();
-      await this.processQueue(headAfterPull);
-      await this.logger.info(`Sync2 syncFile: nothing to sync`, { path });
-      return;
-    }
+    const progress = this.onProgress
+      ? this.onProgress("Syncing with GitHub…")
+      : null;
+    let syncedFiles = 0;
+    this.pulledFilesThisSync = 0;
+    try {
+      // Etap 6.6: pull-side normalization may rewrite OTHER paths
+      // besides the syncFile target. We only push the target in this
+      // batch (the user asked to sync one file, not the whole vault);
+      // the rest stay canonical-locally with the gap-to-remote tracked
+      // implicitly until the next syncAll.
+      const republishPaths = new Set<string>();
+      const headAfterBootstrap = await this.bootstrapIfNeeded(
+        republishPaths,
+        progress,
+      );
+      const headAfterPull =
+        headAfterBootstrap ??
+        (await this.pullIfNeeded(republishPaths, progress));
+      // Only enforce invariants when the active path is under
+      // configDir; single-file syncs of regular notes don't risk
+      // touching them.
+      if (this.invariants && path.startsWith(`${this.configDir}/`)) {
+        await this.invariants.enforce();
+      }
+      let change = await this.detector.findChangeForPath(path);
+      // If the target file itself was canonicalized during pull,
+      // surface it as a synthetic modify so the push converges this
+      // file's remote copy in this very call.
+      if (!change && republishPaths.has(path)) {
+        change = await this.synthesizeRepublishChange(path);
+      }
+      if (!change) {
+        await this.store.save();
+        const pendingBatches = await this.queue.list();
+        if (pendingBatches.length === 0) this.onNoLocalChanges?.();
+        await this.processQueue(headAfterPull, progress);
+        await this.logger.info(`Sync2 syncFile: nothing to sync`, { path });
+        return;
+      }
 
-    const baseMessage =
-      customMessage !== undefined
-        ? customMessage
-        : applyTemplate(this.commitMessageFile(), {
-            date: new Date(this.now()),
-            filename: path.split("/").pop() ?? path,
-            path,
-          });
-    // Apply the device suffix to BOTH the templated path and a
-    // user-typed customMessage — uniform parseability on GitHub.
-    const message = appendDeviceSuffix(baseMessage, this.deviceLabel());
-    // Custom-message syncs always get an isolated batch: the user's
-    // typed message must survive intact (no accumulate-group rename
-    // to a template) and must not absorb unrelated subsequent
-    // changes. enqueueOrMerge sees `isolated: true` and skips its
-    // mergeIntoLatestPending path.
-    const enqueued = await this.enqueueOrMerge([change], {
-      commitMessage: message,
-      parentCommitSha: this.store.getLastSyncCommitSha(),
-      parentTreeSha: this.store.getLastSyncTreeSha(),
-      isolated: customMessage !== undefined,
-    });
-    if (enqueued > 0) this.onLocalCommitted?.(enqueued);
-    await this.processQueue(headAfterPull);
+      const baseMessage =
+        customMessage !== undefined
+          ? customMessage
+          : applyTemplate(this.commitMessageFile(), {
+              date: new Date(this.now()),
+              filename: path.split("/").pop() ?? path,
+              path,
+            });
+      const message = appendDeviceSuffix(baseMessage, this.deviceLabel());
+      const enqueued = await this.enqueueOrMerge([change], {
+        commitMessage: message,
+        parentCommitSha: this.store.getLastSyncCommitSha(),
+        parentTreeSha: this.store.getLastSyncTreeSha(),
+        isolated: customMessage !== undefined,
+      });
+      syncedFiles = enqueued;
+      if (enqueued > 0) this.onLocalCommitted?.(enqueued);
+      await this.processQueue(headAfterPull, progress);
+    } finally {
+      progress?.hide();
+      this.onSyncCompleted?.({
+        pushedFiles: syncedFiles,
+        pulledFiles: this.pulledFilesThisSync,
+      });
+    }
   }
 
   // resumeQueue — full implementation in Etap 6d. For 6a, processQueue
@@ -508,6 +569,7 @@ export class Sync2Manager {
   // upload on the next push, since recordSync isn't called).
   private async pullIfNeeded(
     republishPaths: Set<string>,
+    sharedProgress: ProgressHandle | null = null,
   ): Promise<string | null> {
     const expectedHead = this.store.getLastSyncCommitSha();
     if (expectedHead === null) return null;
@@ -578,11 +640,20 @@ export class Sync2Manager {
         syncableChanges.push(f);
       }
     }
-    let pullProgress: ProgressHandle | null = null;
-    if (this.onProgress && syncableChanges.length > 0) {
-      pullProgress = this.onProgress(
-        `Downloading 0/${syncableChanges.length} files from GitHub…`,
-      );
+    // Reuse the click-time progress notice if syncAll opened one;
+    // otherwise spin up our own and own its hide.
+    const ownPullProgress = sharedProgress === null;
+    let pullProgress: ProgressHandle | null = sharedProgress;
+    if (syncableChanges.length > 0) {
+      if (pullProgress === null && this.onProgress) {
+        pullProgress = this.onProgress(
+          `Downloading 0/${syncableChanges.length} files from GitHub…`,
+        );
+      } else if (pullProgress) {
+        pullProgress.update(
+          `Downloading 0/${syncableChanges.length} files from GitHub…`,
+        );
+      }
     }
     let processed = 0;
     const tickPull = (): void => {
@@ -608,6 +679,7 @@ export class Sync2Manager {
 
         if (f.status === "removed") {
           await this.applyRemoteDeletion(f.filename, expectedHead);
+          this.pulledFilesThisSync++;
           tickPull();
           continue;
         }
@@ -629,10 +701,11 @@ export class Sync2Manager {
           expectedHead,
           republishPaths,
         );
+        this.pulledFilesThisSync++;
         tickPull();
       }
     } finally {
-      pullProgress?.hide();
+      if (ownPullProgress) pullProgress?.hide();
     }
 
     if (anyOverlapDeferred) {
@@ -715,6 +788,7 @@ export class Sync2Manager {
   // nothing to bootstrap (lastSyncCommitSha already set).
   private async bootstrapIfNeeded(
     republishPaths: Set<string>,
+    sharedProgress: ProgressHandle | null = null,
   ): Promise<string | null> {
     if (this.store.getLastSyncCommitSha() !== null) return null;
     let currentHead: string | null;
@@ -726,7 +800,7 @@ export class Sync2Manager {
       throw err;
     }
     if (currentHead === null) return null;
-    await this.bootstrapFromRemote(currentHead, republishPaths);
+    await this.bootstrapFromRemote(currentHead, republishPaths, sharedProgress);
     return currentHead;
   }
 
@@ -755,6 +829,7 @@ export class Sync2Manager {
   private async bootstrapFromRemote(
     currentHead: string,
     republishPaths: Set<string>,
+    sharedProgress: ProgressHandle | null = null,
   ): Promise<void> {
     await this.logger.info("Sync2 adoption-from-remote start", {
       head: currentHead,
@@ -782,22 +857,37 @@ export class Sync2Manager {
       }
     }
     // Spin up the long-running notice once we know there's real work.
-    // Counter increments after every file pass (pull, identical-noop,
-    // local-kept, remote-overwrote) so the user sees uniform progress
-    // through the whole adoption, not just the slow paths. Same shape
-    // as the upload notice: total = files, not blob round-trips.
-    let pullProgress: ProgressHandle | null = null;
-    if (this.onProgress && syncablePaths.length > 0) {
-      pullProgress = this.onProgress(
-        `Downloading 0/${syncablePaths.length} files from GitHub…`,
-      );
+    // Adoption is mostly a *comparison* pass — for a vault previously
+    // synced via another tool (obsidian-git, etc.), most files'
+    // local content already matches the remote SHA and the loop
+    // just stat-caches them. Only the "missing locally" and
+    // "remote-newer" branches actually fire getBlob. Calling the
+    // notice "Downloading…" misled a real user: the counter ripped
+    // through 245 files in seconds and looked broken because nothing
+    // was actually downloading. "Reconciling…" sets the right
+    // expectation: we're cross-checking local against remote,
+    // downloading what's missing as we go.
+    // Reuse the click-time progress notice if syncAll opened one;
+    // otherwise spin up our own and own its hide.
+    const ownPullProgress = sharedProgress === null;
+    let pullProgress: ProgressHandle | null = sharedProgress;
+    if (syncablePaths.length > 0) {
+      if (pullProgress === null && this.onProgress) {
+        pullProgress = this.onProgress(
+          `Reconciling 0/${syncablePaths.length} files with GitHub…`,
+        );
+      } else if (pullProgress) {
+        pullProgress.update(
+          `Reconciling 0/${syncablePaths.length} files with GitHub…`,
+        );
+      }
     }
     let processed = 0;
     const tickPull = (): void => {
       processed += 1;
       if (pullProgress) {
         pullProgress.update(
-          `Downloading ${processed}/${syncablePaths.length} files from GitHub…`,
+          `Reconciling ${processed}/${syncablePaths.length} files with GitHub…`,
         );
       }
     };
@@ -813,6 +903,7 @@ export class Sync2Manager {
         if (!localExists) {
           await this.adoptionPullAndRecord(filePath, item, republishPaths);
           pulled++;
+          this.pulledFilesThisSync++;
           tickPull();
           continue;
         }
@@ -850,10 +941,11 @@ export class Sync2Manager {
         // Remote wins. Pull, overwriting the local copy in place.
         await this.adoptionPullAndRecord(filePath, item, republishPaths);
         remoteOverwrote++;
+        this.pulledFilesThisSync++;
         tickPull();
       }
     } finally {
-      pullProgress?.hide();
+      if (ownPullProgress) pullProgress?.hide();
     }
 
     this.store.setLastSync(currentHead, headCommit.tree.sha ?? treeSha);
@@ -1365,19 +1457,26 @@ export class Sync2Manager {
   // re-fetch since each prior batch may have moved HEAD itself.
   private async processQueue(
     headHint: string | null = null,
+    sharedProgress: ProgressHandle | null = null,
   ): Promise<void> {
     if (this.running) return;
     this.running = true;
-    let progress: ProgressHandle | null = null;
+    // When syncAll/syncFile/pullOnly opened a notice at the click,
+    // reuse it (we just call .update() — caller hides). Otherwise
+    // own the notice lifecycle here, same as before.
+    const ownProgress = sharedProgress === null;
+    let progress: ProgressHandle | null = sharedProgress;
     try {
       const ids = await this.queue.list();
       if (ids.length === 0) return;
-      if (this.onProgress) {
+      if (this.onProgress && progress === null) {
         progress = this.onProgress(
           ids.length === 1
             ? "Syncing with GitHub…"
             : `Syncing commit 1/${ids.length} with GitHub…`,
         );
+      } else if (progress && ids.length > 1) {
+        progress.update(`Syncing commit 1/${ids.length} with GitHub…`);
       }
       for (let i = 0; i < ids.length; i++) {
         if (progress && ids.length > 1) {
@@ -1394,7 +1493,7 @@ export class Sync2Manager {
         );
       }
     } finally {
-      progress?.hide();
+      if (ownProgress) progress?.hide();
       this.running = false;
     }
   }

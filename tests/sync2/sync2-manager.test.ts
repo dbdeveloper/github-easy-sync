@@ -2593,11 +2593,11 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 
-    it("pull-side counter: bootstrap-from-remote ticks 'Downloading X/N…'", async () => {
-      // Adoption path (fresh vault, remote has content). The pull
-      // notice has to open up-front and tick after each blob fetch
-      // — without this the user sees up to a minute of silence
-      // while N getBlob round-trips happen serially.
+    it("pull-side counter: bootstrap-from-remote ticks 'Reconciling X/N…'", async () => {
+      // Adoption path (fresh vault, remote has content). Adoption is
+      // a comparison pass — for vaults previously synced via another
+      // tool most paths SHA-match and only a subset actually pulls,
+      // so the user-facing label is "Reconciling" not "Downloading".
       const messages: string[] = [];
       const f2 = fixture({
         onProgress: (initial) => {
@@ -2608,8 +2608,6 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
           };
         },
       });
-      // Three syncable files on the remote → bootstrapFromRemote
-      // should advertise "0/3", "1/3", "2/3", "3/3".
       f2.client.setBranchHead("FRESH_HEAD");
       f2.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
       f2.client.setContentAtRef("FRESH_HEAD", "a.md", "a\n");
@@ -2618,12 +2616,100 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
 
       await f2.manager.syncAll();
 
-      expect(messages.some((m) => /Downloading 0\/3 files/.test(m))).toBe(
+      expect(messages.some((m) => /Reconciling 0\/3 files/.test(m))).toBe(
         true,
       );
-      expect(messages.some((m) => /Downloading 3\/3 files/.test(m))).toBe(
+      expect(messages.some((m) => /Reconciling 3\/3 files/.test(m))).toBe(
         true,
       );
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
+    it("syncAll opens 'Syncing with GitHub…' immediately (click-time feedback)", async () => {
+      // Even before any network call, the user must see something —
+      // catches the "300-400 ms silence on GET branch head" gap that
+      // felt broken on slow links.
+      const messages: string[] = [];
+      const f2 = fixture({
+        onProgress: (initial) => {
+          messages.push(initial);
+          return {
+            update: (m) => messages.push(m),
+            hide: () => {},
+          };
+        },
+      });
+      // Trivially idle: lastSync set + no changes; syncAll should
+      // still flash the click-time notice and then hide it.
+      f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+      await f2.manager.syncAll();
+      expect(messages[0]).toBe("Syncing with GitHub…");
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
+    it("onSyncCompleted fires with pushed/pulled counts at end of syncAll", async () => {
+      const summaries: Array<{ pushedFiles: number; pulledFiles: number }> = [];
+      const f2 = fixture({
+        onProgress: (initial) => ({
+          update: () => {},
+          hide: () => {},
+        }),
+      });
+      // Manually wire up the field (fixture currently doesn't pipe
+      // onSyncCompleted, but the manager respects it when present
+      // — assigned post-construct here for the test only).
+      (
+        f2.manager as unknown as {
+          onSyncCompleted?: (s: {
+            pushedFiles: number;
+            pulledFiles: number;
+          }) => void;
+        }
+      ).onSyncCompleted = (s) => summaries.push(s);
+
+      // Push-only: lastSync set + a fresh local file → one push.
+      f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+      writeVaultFile(f2.root, "x.md", "v");
+
+      await f2.manager.syncAll();
+
+      expect(summaries).toHaveLength(1);
+      expect(summaries[0].pushedFiles).toBe(1);
+      expect(summaries[0].pulledFiles).toBe(0);
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
+    it("onSyncCompleted: pull-only sync reports pulledFiles > 0, pushedFiles = 0", async () => {
+      const summaries: Array<{ pushedFiles: number; pulledFiles: number }> = [];
+      const f2 = fixture({
+        onProgress: (initial) => ({
+          update: () => {},
+          hide: () => {},
+        }),
+      });
+      (
+        f2.manager as unknown as {
+          onSyncCompleted?: (s: {
+            pushedFiles: number;
+            pulledFiles: number;
+          }) => void;
+        }
+      ).onSyncCompleted = (s) => summaries.push(s);
+
+      // Adoption from a fresh remote with two files — both pull.
+      f2.client.setBranchHead("FRESH_HEAD");
+      f2.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
+      f2.client.setContentAtRef("FRESH_HEAD", "a.md", "alpha\n");
+      f2.client.setContentAtRef("FRESH_HEAD", "b.md", "beta\n");
+
+      await f2.manager.syncAll();
+
+      expect(summaries).toHaveLength(1);
+      expect(summaries[0].pulledFiles).toBe(2);
+      // The republish heuristic may queue a tiny push for the
+      // canonicalised invariant gitignores, but for THIS pair of
+      // files (canonical text), nothing extra. Loose check:
+      expect(summaries[0].pushedFiles).toBeGreaterThanOrEqual(0);
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 

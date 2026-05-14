@@ -372,6 +372,26 @@ export default class GitHubSyncPlugin extends Plugin {
       onNoLocalChanges: () => {
         new Notice("No changes", BRIEF_NOTICE_MS);
       },
+      // Fires at the very end of every successful syncAll/syncFile.
+      // The brief success notice closes the loop visually after the
+      // long-running progress notice hid — without it the user sees
+      // the progress flash through and then nothing.
+      //
+      // Differentiated by direction:
+      //   * pushedFiles > 0  → "Synced to GitHub" (work went up,
+      //                        possibly also came down).
+      //   * pulledFiles > 0  → "Pulled changes from GitHub" (only
+      //                        remote→local work landed in this sync).
+      //   * neither          → onNoLocalChanges already fired its
+      //                        "No changes" notice — stay silent
+      //                        here to avoid double-flashing.
+      onSyncCompleted: ({ pushedFiles, pulledFiles }) => {
+        if (pushedFiles > 0) {
+          new Notice("Synced to GitHub", BRIEF_NOTICE_MS);
+        } else if (pulledFiles > 0) {
+          new Notice("Pulled changes from GitHub", BRIEF_NOTICE_MS);
+        }
+      },
     });
 
     // Conflict view leaf — registered once per plugin load. setDeps
