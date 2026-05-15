@@ -277,6 +277,7 @@ export default class GitHubSyncPlugin extends Plugin {
       vault: this.app.vault,
       configDir: this.app.vault.configDir,
       selfPluginId: manifest.id,
+      autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? true,
     });
     const detector = new ChangeDetector({
       vault: this.app.vault,
@@ -349,6 +350,7 @@ export default class GitHubSyncPlugin extends Plugin {
       conflictStore,
       onConflict: (args) => this.handleSync2Conflict(args),
       accumulateOfflineSyncs: this.settings.accumulateOfflineSyncs ?? false,
+      autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? true,
       onProgress: (initial: string) => {
         // Long-lived notice during the network phase — stays visible
         // until processQueue calls handle.hide(). The text is the

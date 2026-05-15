@@ -61,12 +61,18 @@ export interface PushQueueDeps {
   selfPluginId: string;
   // Override the clock for deterministic IDs in tests.
   now?: () => Date;
+  // Live getter for the autoCanonicalizeTextFiles setting. When the
+  // toggle is off, the queue copies text files into batch dirs and
+  // overwrites batch files byte-exact — no CRLF/BOM rewrite. Optional;
+  // when omitted, canonicalization is on (legacy behaviour).
+  autoCanonicalize?: () => boolean;
 }
 
 export default class PushQueue {
   private readonly vault: Vault;
   private readonly queueRoot: string;
   private readonly now: () => Date;
+  private readonly autoCanonicalize: () => boolean;
   // Serializes meta-file rewrites so concurrent `recordBlobUpload`
   // callers (parallel `createBlob` callbacks in TreeBuilder) don't
   // clobber each other's appends. Each call awaits the previous one
@@ -78,6 +84,7 @@ export default class PushQueue {
     this.vault = deps.vault;
     this.queueRoot = `${deps.configDir}/plugins/${deps.selfPluginId}/${QUEUE_DIRNAME}`;
     this.now = deps.now ?? (() => new Date());
+    this.autoCanonicalize = deps.autoCanonicalize ?? (() => true);
   }
 
   // Materialize a new batch on disk from `changes` and return its id.
@@ -411,7 +418,7 @@ export default class PushQueue {
     const batchDir = `${this.queueRoot}/${id}`;
     const targetPath = `${batchDir}/${VAULT_SUBDIR}/${path}`;
     await this.ensureParentDir(targetPath);
-    if (hasTextExtension(path)) {
+    if (hasTextExtension(path) && this.autoCanonicalize()) {
       // Caller (Sync2Manager during cascade-rebase) hands us merged text
       // from a 3-way merge. Inputs to that merge come through the same
       // normalizeText pipeline, so the merge output is usually canonical
@@ -471,14 +478,15 @@ export default class PushQueue {
   ): Promise<void> {
     const target = `${batchDir}/${VAULT_SUBDIR}/${vaultPath}`;
     await this.ensureParentDir(target);
-    if (hasTextExtension(vaultPath)) {
-      // Text canonicalisation (Etap 6.6). Read live bytes, normalize to
-      // LF + no-BOM + trailing-NL-iff-non-empty. The snapshot stores the
-      // canonical form so TreeBuilder uploads canonical bytes to GitHub.
-      // Write-back to the live vault file enforces the "локально все
-      // правильно" invariant, but only when something actually changed
-      // — touching the vault file on every Sync click would needlessly
-      // bump mtime and disturb ChangeDetector's stat-cache shortcut.
+    if (hasTextExtension(vaultPath) && this.autoCanonicalize()) {
+      // Text canonicalisation. Read live bytes, normalize to LF +
+      // no-BOM + trailing-NL-iff-non-empty. The snapshot stores the
+      // canonical form so TreeBuilder uploads canonical bytes to
+      // GitHub. Write-back to the live vault file enforces "locally
+      // everything is canonical", but only when something actually
+      // changed — touching the vault file on every Sync click would
+      // needlessly bump mtime and disturb ChangeDetector's stat-cache
+      // shortcut.
       const original = await this.vault.adapter.read(vaultPath);
       const { content, changed } = normalizeText(original);
       if (changed) {

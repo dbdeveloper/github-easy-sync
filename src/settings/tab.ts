@@ -277,6 +277,26 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     previews.push(updateFilePreview);
 
     new Setting(containerEl)
+      .setName("Auto-canonicalize text files")
+      .setDesc(
+        "When ON (default), the plugin rewrites text files locally to " +
+          "LF line endings, strips UTF-8 BOM, and ensures a trailing " +
+          "newline — both on pull (after fetching from GitHub) and on " +
+          "commit (before snapshotting your edits into the queue). " +
+          "Turn OFF to preserve byte-exact text round-trips (e.g., for " +
+          "a Windows-shared repo that expects CRLF, or files whose " +
+          "exact trailing-newline matters).",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.autoCanonicalizeTextFiles ?? true)
+          .onChange(async (value) => {
+            this.plugin.settings.autoCanonicalizeTextFiles = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
       .setName("Accumulate offline syncs into one commit")
       .setDesc(
         "When the network is unavailable and a previous push is still " +

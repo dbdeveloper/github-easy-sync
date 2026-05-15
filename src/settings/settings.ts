@@ -80,6 +80,16 @@ export interface GitHubSyncSettings {
   // still sync regardless so shared rules (denylist, plugin-folder
   // allowlist) converge across devices.
   syncConfigDir?: boolean;
+
+  // Pull-side + click-time text canonicalization (CRLF→LF, BOM strip,
+  // trailing-NL). Default `true` — the engine rewrites non-canonical
+  // text bytes both locally on pull AND when copying the user's edits
+  // into a batch on click. Set `false` if you have a real reason to
+  // preserve byte-exact text round-trips with GitHub (e.g., a repo
+  // shared with Windows users whose tooling expects CRLF, or files
+  // whose trailing-newline matters). With this off, plugin treats
+  // text the same as binary at the byte level.
+  autoCanonicalizeTextFiles?: boolean;
 }
 
 // NOTE: "Push plugins data.json to GitHub" is NOT a per-device
@@ -111,4 +121,5 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   accumulateOfflineSyncs: false,
   deviceLabel: "Obsidian",
   syncConfigDir: false,
+  autoCanonicalizeTextFiles: true,
 };

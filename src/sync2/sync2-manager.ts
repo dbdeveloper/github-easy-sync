@@ -248,6 +248,11 @@ export interface Sync2ManagerDeps {
   // unit tests that don't care about remote-identity tracking can
   // omit it; mismatch detection is skipped when undefined.
   remoteIdentity?: () => RemoteIdentity;
+  // Live getter for the autoCanonicalizeTextFiles setting. When `false`,
+  // writeRemoteText writes raw remote bytes without CRLF→LF/BOM/trailing
+  // -NL rewrites — the engine treats text the same as binary at the
+  // byte level. Optional; default is true (canonicalization on).
+  autoCanonicalize?: () => boolean;
   // Override the clock for deterministic tests.
   now?: () => number;
 }
@@ -284,6 +289,7 @@ export class Sync2Manager {
   // (no identical-SHA noops).
   private pulledFilesThisSync = 0;
   private readonly remoteIdentity: (() => RemoteIdentity) | undefined;
+  private readonly autoCanonicalize: () => boolean;
   private readonly now: () => number;
   // Guard against re-entrant drain. The runner only loops one
   // batch at a time; if a second syncAll() lands while the first is
@@ -322,6 +328,7 @@ export class Sync2Manager {
     this.onNoLocalChanges = deps.onNoLocalChanges;
     this.onSyncCompleted = deps.onSyncCompleted;
     this.remoteIdentity = deps.remoteIdentity;
+    this.autoCanonicalize = deps.autoCanonicalize ?? (() => true);
     this.now = deps.now ?? (() => Date.now());
   }
 
@@ -1299,12 +1306,16 @@ export class Sync2Manager {
     // record-sync — next push will resurrect it on the remote.
   }
 
-  // Write text content to disk in canonical form (Etap 6.6: LF, no
-  // BOM, trailing-NL iff non-empty). Returns the canonical SHA so the
-  // caller can recordSync against the actual on-disk bytes, plus a
-  // `changed` flag indicating whether normalization mutated the input
-  // — used by callers to decide whether the path needs republishing
-  // back to GitHub.
+  // Write text content to disk in canonical form (LF, no BOM,
+  // trailing-NL iff non-empty) when autoCanonicalize is on. Returns
+  // the on-disk SHA so the caller can recordSync against the actual
+  // bytes, plus a `changed` flag indicating whether normalization
+  // mutated the input — callers use that to decide whether the next
+  // findChanges should treat the file as modified (republish).
+  //
+  // When autoCanonicalize is off, no normalization happens: the input
+  // bytes are written verbatim, the returned `changed` is always false,
+  // and the SHA is computed against the raw bytes.
   private async writeRemoteText(
     path: string,
     content: string,
@@ -1316,7 +1327,10 @@ export class Sync2Manager {
         `Sync2 internal: writeRemoteText called with non-text path ${path}`,
       );
     }
-    const { content: canonical, changed } = normalizeText(content);
+    const canonicalize = this.autoCanonicalize();
+    const { content: canonical, changed } = canonicalize
+      ? normalizeText(content)
+      : { content, changed: false };
     await this.ensureParentDir(path);
     await this.vault.adapter.write(path, canonical);
     const bytes = new TextEncoder().encode(canonical).buffer as ArrayBuffer;
