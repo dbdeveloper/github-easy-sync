@@ -684,6 +684,30 @@ export class Sync2Manager {
           continue;
         }
 
+        // Resume: a prior pull pass may have already written this file
+        // before crashing. Mirrors bootstrapFromRemote's SHA-match skip.
+        if (
+          f.status !== "renamed" &&
+          f.sha &&
+          (await this.vault.adapter.exists(f.filename))
+        ) {
+          const localBuf = await this.vault.adapter.readBinary(f.filename);
+          const localSha = await calculateGitBlobSHA(localBuf);
+          if (localSha === f.sha) {
+            const stat = await this.vault.adapter.stat(f.filename);
+            if (stat) {
+              this.store.set(f.filename, {
+                path: f.filename,
+                remoteSha: f.sha,
+                mtime: stat.mtime,
+                size: stat.size,
+              });
+            }
+            tickPull();
+            continue;
+          }
+        }
+
         // added / modified / renamed / copied / changed → fetch and
         // apply remote content. previous_filename only matters for
         // renamed status; we treat it as a delete-of-old + add-of-new
