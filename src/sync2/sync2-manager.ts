@@ -126,6 +126,17 @@ export interface Sync2Client {
   }>;
 }
 
+// Thresholds for the lazy-opened progress notice. A pull or push
+// cycle stays silent (no long-lived notice) below these; above either
+// bound, drain opens a "Pull/Push N/M…" notice the user can watch.
+// PROGRESS_BYTES_THRESHOLD applies to both pull (sum of tree sizes
+// for the syncable changes) and push (estimateBatchBytes). Default
+// 500 KB — overridable via Sync2ManagerDeps.progressBytesThreshold
+// so tests can flip it to 0 to assert notice behaviour without
+// having to fabricate 500 KB+ of test data.
+export const PROGRESS_BYTES_THRESHOLD = 500 * 1024;
+const PROGRESS_COUNT_THRESHOLD = 5;
+
 // Progress UI hook. Sync2Manager keeps one handle per drain run and
 // calls update() as it advances commits or files. Whether that maps
 // to an Obsidian Notice, a status-bar item, or a noop is the caller's
@@ -248,6 +259,11 @@ export interface Sync2ManagerDeps {
   // unit tests that don't care about remote-identity tracking can
   // omit it; mismatch detection is skipped when undefined.
   remoteIdentity?: () => RemoteIdentity;
+  // Bytes threshold for lazy-opening the long-lived progress notice
+  // during drain's pull and push cycles. Defaults to 500 KB; tests
+  // pass 0 to make every cycle "heavy" so they can assert the
+  // notice transitions.
+  progressBytesThreshold?: number;
   // Live getter for the autoCanonicalizeTextFiles setting. When `false`,
   // writeRemoteText writes raw remote bytes without CRLF→LF/BOM/trailing
   // -NL rewrites — the engine treats text the same as binary at the
@@ -289,6 +305,7 @@ export class Sync2Manager {
   // (no identical-SHA noops).
   private pulledFilesThisSync = 0;
   private readonly remoteIdentity: (() => RemoteIdentity) | undefined;
+  private readonly progressBytesThreshold: number;
   private readonly autoCanonicalize: () => boolean;
   private readonly now: () => number;
   // Guard against re-entrant drain. The runner only loops one
@@ -328,6 +345,8 @@ export class Sync2Manager {
     this.onNoLocalChanges = deps.onNoLocalChanges;
     this.onSyncCompleted = deps.onSyncCompleted;
     this.remoteIdentity = deps.remoteIdentity;
+    this.progressBytesThreshold =
+      deps.progressBytesThreshold ?? PROGRESS_BYTES_THRESHOLD;
     this.autoCanonicalize = deps.autoCanonicalize ?? (() => true);
     this.now = deps.now ?? (() => Date.now());
   }
@@ -350,14 +369,11 @@ export class Sync2Manager {
     // the new remote (lastSyncCommitSha is null after the wipe →
     // bootstrapIfNeeded sees the new branch and clones it).
     await this.reconcileRemoteIdentity();
-    // Open the progress notice IMMEDIATELY so the user sees instant
-    // feedback that their [Sync with GitHub] click registered. Without
-    // this, the first ~400ms (GET branch head) shows no UI at all and
-    // feels broken on slow links. Each phase below (.update()) replaces
-    // the text; the finally block hides at the end.
-    const progress = this.onProgress
-      ? this.onProgress("Syncing with GitHub…")
-      : null;
+    // Click is local-only; the long-lived progress notice is opened
+    // LAZILY inside drain only when a batch's pull or push exceeds
+    // PROGRESS_BYTES_THRESHOLD. Light syncs run silent and finish
+    // with a brief "Sync done" via onSyncCompleted.
+    const progress: ProgressHandle | null = (null as ProgressHandle | null);
     let syncedFiles = 0;
     this.pulledFilesThisSync = 0;
     try {
@@ -434,9 +450,7 @@ export class Sync2Manager {
     // useless and we'd be pushing single-file content to the wrong
     // repo if we kept going.
     await this.reconcileRemoteIdentity();
-    const progress = this.onProgress
-      ? this.onProgress("Syncing with GitHub…")
-      : null;
+    const progress: ProgressHandle | null = (null as ProgressHandle | null);
     let syncedFiles = 0;
     this.pulledFilesThisSync = 0;
     try {
@@ -634,15 +648,35 @@ export class Sync2Manager {
     // otherwise spin up our own and own its hide.
     const ownPullProgress = sharedProgress === null;
     let pullProgress: ProgressHandle | null = sharedProgress;
+    // Bytes-based threshold: fetch the head tree once and sum the
+    // sizes of the syncable changes. The notice opens iff the total
+    // would actually take noticeable time to download. Skipped when
+    // there's nothing to pull (no tree call cost).
+    let isHeavyPull = false;
     if (syncableChanges.length > 0) {
+      try {
+        const { files: treeFiles } = await this.client.getRepoContent({
+          retry: true,
+        });
+        let totalBytes = 0;
+        for (const f of syncableChanges) {
+          totalBytes += treeFiles[f.filename]?.size ?? 0;
+        }
+        isHeavyPull = totalBytes > this.progressBytesThreshold;
+      } catch {
+        // Tree call failed (rare); fall back to count-based heuristic.
+        isHeavyPull = syncableChanges.length > PROGRESS_COUNT_THRESHOLD;
+      }
+    }
+    if (syncableChanges.length > 0 && isHeavyPull) {
+      const initial =
+        syncableChanges.length === 1
+          ? "Pull file from GitHub…"
+          : `Pull 0/${syncableChanges.length} files from GitHub`;
       if (pullProgress === null && this.onProgress) {
-        pullProgress = this.onProgress(
-          `Pull 0/${syncableChanges.length}`,
-        );
+        pullProgress = this.onProgress(initial);
       } else if (pullProgress) {
-        pullProgress.update(
-          `Pull 0/${syncableChanges.length}`,
-        );
+        pullProgress.update(initial);
       }
     }
     let processed = 0;
@@ -650,7 +684,9 @@ export class Sync2Manager {
       processed += 1;
       if (pullProgress) {
         pullProgress.update(
-          `Pull ${processed}/${syncableChanges.length}`,
+          syncableChanges.length === 1
+            ? "Pull file from GitHub…"
+            : `Pull ${processed}/${syncableChanges.length} files from GitHub`,
         );
       }
     };
@@ -1457,23 +1493,26 @@ export class Sync2Manager {
     let progress: ProgressHandle | null = sharedProgress;
     let commitNum = 0;
     try {
+      let pushedAnyBatch = false;
       while (true) {
         const headHint = await this.pullIfNeeded(progress);
         const ids = await this.queue.list();
         if (ids.length === 0) break;
         commitNum += 1;
-        if (progress === null && this.onProgress) {
+        // Lazy-open a long-lived progress notice only when this
+        // batch's push would actually be heavy. Light batches run
+        // silent here; the drain-level "Sync done" finale below
+        // shows the success signal.
+        const batchBytes = await this.estimateBatchBytes(ids[0]);
+        const isHeavyPush = batchBytes > this.progressBytesThreshold;
+        if (isHeavyPush && progress === null && this.onProgress) {
           progress = this.onProgress(
-            ids.length === 1 && commitNum === 1
-              ? "Syncing with GitHub…"
-              : `Syncing commit ${commitNum} with GitHub…`,
+            commitNum === 1
+              ? "Push to GitHub…"
+              : `Push commit ${commitNum}…`,
           );
-        } else if (progress) {
-          progress.update(
-            ids.length === 1 && commitNum === 1
-              ? "Syncing with GitHub…"
-              : `Syncing commit ${commitNum} with GitHub…`,
-          );
+        } else if (progress && commitNum > 1) {
+          progress.update(`Push commit ${commitNum}…`);
         }
         await this.processBatch(
           ids[0],
@@ -1482,9 +1521,25 @@ export class Sync2Manager {
           commitNum,
           commitNum + ids.length - 1,
         );
+        pushedAnyBatch = true;
+      }
+      // Drain finished cleanly with an empty queue. Show "Sync done":
+      //   - reuse the long-lived handle if we opened one (heavy phase)
+      //   - otherwise, briefly flash a new one only if SOMETHING
+      //     actually moved (a pull applied remote changes, OR we
+      //     pushed at least one batch). True no-op drains (no remote
+      //     changes, no pending queue) stay silent.
+      const drainDidWork =
+        pushedAnyBatch || this.pulledFilesThisSync > 0;
+      if (ownProgress && progress) {
+        progress.update("Sync done");
+        const handle = progress;
+        setTimeout(() => handle.hide(), 1000);
+      } else if (ownProgress && drainDidWork && this.onProgress) {
+        const handle = this.onProgress("Sync done");
+        setTimeout(() => handle.hide(), 1000);
       }
     } finally {
-      if (ownProgress) progress?.hide();
       this.running = false;
     }
   }

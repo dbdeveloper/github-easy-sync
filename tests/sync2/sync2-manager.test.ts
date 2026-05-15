@@ -313,6 +313,7 @@ function fixture(opts?: {
     repo: string;
     branch: string;
   };
+  progressBytesThreshold?: number;
 }): {
   root: string;
   vault: Vault;
@@ -414,6 +415,15 @@ function fixture(opts?: {
     onLocalCommitted: opts?.onLocalCommitted,
     onNoLocalChanges: opts?.onNoLocalChanges,
     remoteIdentity: opts?.remoteIdentity,
+    // Tests assert progress-notice behaviour with tiny fixtures.
+    // Setting the threshold to 0 makes every drain phase "heavy",
+    // so the lazy-open logic fires consistently. Tests that
+    // specifically want silent behaviour pass `progressBytesThreshold:
+    // Infinity` via opts to disable the notice.
+    progressBytesThreshold:
+      opts?.progressBytesThreshold !== undefined
+        ? opts.progressBytesThreshold
+        : 0,
     now: () => clock.nowMs(),
   });
   return {
@@ -2461,17 +2471,14 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
   });
 
   describe("progress UI (Step 5)", () => {
-    it("single batch: 'Syncing with GitHub…' shown then hidden", async () => {
+    it("single batch: notice opens 'Push to GitHub…', ends with 'Sync done'", async () => {
       const messages: string[] = [];
-      let hidden = false;
       const f2 = fixture({
         onProgress: (initial) => {
           messages.push(initial);
           return {
             update: (m) => messages.push(m),
-            hide: () => {
-              hidden = true;
-            },
+            hide: () => {},
           };
         },
       });
@@ -2479,8 +2486,10 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       await f2.store.load();
       f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
       await f2.manager.syncAll();
-      expect(messages[0]).toBe("Syncing with GitHub…");
-      expect(hidden).toBe(true);
+      // Lazy-open: first text the notice ever shows is the push label.
+      expect(messages[0]).toBe("Push to GitHub…");
+      // Final state is the "Sync done" replace.
+      expect(messages[messages.length - 1]).toBe("Sync done");
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 
@@ -2589,12 +2598,14 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
 
       await f2.manager.syncAll();
 
-      // Initial broad notice + at least one "Push X/4" line + the
-      // terminal "Push: committing" notice.
-      expect(messages[0]).toMatch(/Syncing with GitHub/);
+      // First text is the lazy-open "Push to GitHub…" + at least one
+      // "Push X/4" line + the terminal "Push: committing" notice +
+      // the final "Sync done" finale that replaces the same handle.
+      expect(messages[0]).toMatch(/Push to GitHub/);
       expect(messages.some((m) => /Push 0\/4/.test(m))).toBe(true);
       expect(messages.some((m) => /Push 4\/4/.test(m))).toBe(true);
       expect(messages.some((m) => /^Push: committing/.test(m))).toBe(true);
+      expect(messages.some((m) => /^Sync done$/.test(m))).toBe(true);
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 
@@ -2630,10 +2641,12 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 
-    it("syncAll opens 'Syncing with GitHub…' immediately (click-time feedback)", async () => {
-      // Even before any network call, the user must see something —
-      // catches the "300-400 ms silence on GET branch head" gap that
-      // felt broken on slow links.
+    it("idle syncAll stays silent (no notice opened)", async () => {
+      // With the lazy-open contract there's no eager click-time notice
+      // anymore. Trivially idle syncs run completely silent — neither
+      // pull nor push opens the long-lived progress handle. The
+      // onNoLocalChanges callback handles the brief "No changes" flash
+      // separately.
       const messages: string[] = [];
       const f2 = fixture({
         onProgress: (initial) => {
@@ -2643,12 +2656,11 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
             hide: () => {},
           };
         },
+        progressBytesThreshold: Infinity,
       });
-      // Trivially idle: lastSync set + no changes; syncAll should
-      // still flash the click-time notice and then hide it.
       f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
       await f2.manager.syncAll();
-      expect(messages[0]).toBe("Syncing with GitHub…");
+      expect(messages).toEqual([]);
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 

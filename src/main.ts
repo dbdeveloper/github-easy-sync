@@ -375,28 +375,29 @@ export default class GitHubSyncPlugin extends Plugin {
       // notice during the sync, and a single brief summary at the
       // end via onSyncCompleted.
       //
-      // Callbacks themselves kept (no-op here) for tests + future
-      // wiring.
-      onLocalCommitted: () => {},
-      onNoLocalChanges: () => {},
-      // Fires at the very end of every successful syncAll/syncFile,
-      // AFTER the progress notice has hidden. Only this hook pops a
-      // brief Notice so we never have two notices visible at the
-      // same time.
-      //
-      // Differentiated by direction:
-      //   pushedFiles > 0  → "Synced to GitHub"
-      //   pulledFiles > 0  → "Pulled changes from GitHub"
-      //   neither          → "No changes"
-      onSyncCompleted: ({ pushedFiles, pulledFiles }) => {
-        if (pushedFiles > 0) {
-          new Notice("Synced to GitHub", BRIEF_NOTICE_MS);
-        } else if (pulledFiles > 0) {
-          new Notice("Pulled changes from GitHub", BRIEF_NOTICE_MS);
-        } else {
-          new Notice("No changes", BRIEF_NOTICE_MS);
-        }
+      // Click-time local-commit ack: brief flash right after the
+      // batch is materialised on disk, before drain starts. Independent
+      // notice (separate handle from the drain-level Pull/Push notice,
+      // so users see them stacked naturally when both fire).
+      onLocalCommitted: (count: number) => {
+        new Notice(
+          count === 1 ? "Commit 1 file" : `Commit ${count} files`,
+          BRIEF_NOTICE_MS,
+        );
       },
+      onNoLocalChanges: () => {
+        new Notice("No changes", BRIEF_NOTICE_MS);
+      },
+      // Observability hook only. The three user-visible notices in
+      // sync2's new UX contract are handled elsewhere:
+      //   - "Commit N files" via onLocalCommitted (click-time ack)
+      //   - "No changes" via onNoLocalChanges (click on idle vault)
+      //   - "Sync done" via the drain's own progress handle (replaces
+      //     the Pull/Push notice on heavy syncs; brief flash on light
+      //     syncs that did real work).
+      // Left as a no-op so tests + future wiring can still depend on
+      // the callback existing in the deps surface.
+      onSyncCompleted: () => {},
     });
 
     // Conflict view leaf — registered once per plugin load. setDeps
