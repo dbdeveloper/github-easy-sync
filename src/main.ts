@@ -466,7 +466,17 @@ export default class GitHubSyncPlugin extends Plugin {
       },
     );
 
-    await this.sync2Manager.resumeQueue();
+    // Deliberately NO drain on enable. Users running with "Sync
+    // strategy: manual" + "Sync on startup: false" expect to be in
+    // control: a click triggers sync, otherwise the plugin stays
+    // silent. Auto-draining on enable — even for the pending-batches
+    // case — surprised users with a "Sync done" toast right after
+    // toggling the plugin off and on. Orphaned push-queue batches
+    // from a previous failed session still get retried, just later:
+    //   • Manual click → syncAll → drain picks them up.
+    //   • Watchdog tick (5 min, fires only when queue is non-empty)
+    //     → backgroundDrain → drain picks them up.
+    // Neither path startles the user on enable.
     this.refreshConflictStatusBar();
   }
 
