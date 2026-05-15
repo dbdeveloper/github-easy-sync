@@ -1503,19 +1503,20 @@ export class Sync2Manager {
         if (ids.length === 0) break;
         commitNum += 1;
         // Lazy-open a long-lived progress notice only when this
-        // batch's push would actually be heavy. Light batches run
-        // silent here; the drain-level "Sync done" finale below
-        // shows the success signal.
+        // batch's push would actually be heavy. The notice goes
+        // straight into "Push 0/N files to GitHub" — no separate
+        // "starting" pre-message, no batch-number indicator. Each
+        // batch's per-file ticks become the user's only visible
+        // signal during heavy push; light batches stay silent here
+        // and the drain-level "Sync done" finale below shows the
+        // success signal once the whole queue drains.
         const batchBytes = await this.estimateBatchBytes(ids[0]);
         const isHeavyPush = batchBytes > this.progressBytesThreshold;
         if (isHeavyPush && progress === null && this.onProgress) {
+          const peek = await this.queue.read(ids[0]);
           progress = this.onProgress(
-            commitNum === 1
-              ? "Push to GitHub…"
-              : `Push commit ${commitNum}…`,
+            `Push 0/${peek.files.length} files to GitHub`,
           );
-        } else if (progress && commitNum > 1) {
-          progress.update(`Push commit ${commitNum}…`);
         }
         await this.processBatch(
           ids[0],
@@ -1644,49 +1645,16 @@ export class Sync2Manager {
         }
       }
 
-      // Estimate aggregate transfer size for the progress UI hint.
-      // Cheap approximation: sum file sizes from on-disk stats. We
-      // don't read content for this — the figure is a UI signal, not
-      // an assertion.
-      const heavyThreshold = 5 * 1024 * 1024;
-      const totalBytes = await this.estimateBatchBytes(id);
-      const sizeHint =
-        totalBytes > heavyThreshold
-          ? ` (~${(totalBytes / (1024 * 1024)).toFixed(1)} MB)`
-          : "";
-      // Prefix that names the active commit when there's more than
-      // one batch to drain. For a single batch we omit the prefix —
-      // saying "commit 1/1" is just noise.
-      const commitPrefix =
-        commitTotal > 1 ? `commit ${commitNum}/${commitTotal}, ` : "";
-
-      // Pre-blob phase: show the size hint immediately so the user
-      // knows something heavy is coming, even before buildTreeEntries
-      // starts hitting createBlob in parallel.
-      if (progress && sizeHint) {
-        progress.update(`Syncing${sizeHint} with GitHub…`);
-      }
-
       const { entries, baseTreeSha, batch } =
         await this.builder.buildTreeEntries(id, {
-          // Switch the notice to a live N/M counter the moment file
-          // processing begins. The counter advances on every file —
-          // text (read+inline) and binary (createBlob) alike — so
-          // the user sees the same "Uploading M/N files…" semantics
-          // regardless of how the batch is composed. Without this,
-          // a 200-file vault shows a frozen "Syncing…" notice for
-          // tens of seconds.
-          onUploadStart: (total) => {
-            if (!progress) return;
-            progress.update(
-              `Push ${commitPrefix}0/${total}${sizeHint}`,
-            );
-          },
+          // Live N/M counter. Each batch starts hidden when not heavy
+          // (progress=null, hook returns immediately). When heavy, the
+          // drain opened the notice with "Push 0/N files to GitHub"
+          // already, so onUploadStart is redundant — only the per-file
+          // tick needs to advance the counter.
           onFileProcessed: (done, total) => {
             if (!progress) return;
-            progress.update(
-              `Push ${commitPrefix}${done}/${total}${sizeHint}`,
-            );
+            progress.update(`Push ${done}/${total} files to GitHub`);
           },
         });
       // Empty batch: reconcile may have deferred every path via
@@ -1701,13 +1669,11 @@ export class Sync2Manager {
       }
 
       // After all blobs settled, the work shifts to createTree +
-      // createCommit + updateBranchHead. That's typically a few
-      // seconds at most but the message would otherwise keep saying
-      // "Uploading N/N files…" through those steps. Switch to a
-      // dedicated phase label so the user sees we've moved on.
-      if (progress) {
-        progress.update(`Push: committing${sizeHint}`);
-      }
+      // createCommit + updateBranchHead. ~1-2 seconds; the notice
+      // keeps the last "Push N/N files to GitHub" text until the
+      // drain-level "Sync done" finale replaces it. No
+      // intermediate phase label — the user gets one consistent
+      // message per drain.
 
       // Build path → blob SHA map for snapshot updates after success.
       // Text entries have inline content but no SHA from buildTreeEntries

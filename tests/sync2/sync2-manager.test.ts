@@ -2471,7 +2471,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
   });
 
   describe("progress UI (Step 5)", () => {
-    it("single batch: notice opens 'Push to GitHub…', ends with 'Sync done'", async () => {
+    it("single batch heavy push: notice opens at 'Push 0/N files to GitHub' and ends 'Sync done'", async () => {
       const messages: string[] = [];
       const f2 = fixture({
         onProgress: (initial) => {
@@ -2486,14 +2486,16 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
       await f2.store.load();
       f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
       await f2.manager.syncAll();
-      // Lazy-open: first text the notice ever shows is the push label.
-      expect(messages[0]).toBe("Push to GitHub…");
-      // Final state is the "Sync done" replace.
+      // Lazy-open: notice opens straight into the file counter. No
+      // separate "Push to GitHub…" pre-message, no batch-number
+      // indicator.
+      expect(messages[0]).toBe("Push 0/1 files to GitHub");
+      // Final state is the "Sync done" replace on the same handle.
       expect(messages[messages.length - 1]).toBe("Sync done");
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 
-    it("two pending batches: 'Syncing commit N/M…' progresses", async () => {
+    it("two pending batches: each batch shows its own 'Push X/N files to GitHub'", async () => {
       const messages: string[] = [];
       const f2 = fixture({
         onProgress: (initial) => {
@@ -2541,31 +2543,17 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
 
       await f2.manager.resumeQueue();
 
-      expect(messages.some((m) => m.includes("commit 1/2"))).toBe(true);
-      expect(messages.some((m) => m.includes("commit 2/2"))).toBe(true);
-      fs.rmSync(f2.root, { recursive: true, force: true });
-    });
-
-    it("heavy batch: progress message includes ~MB hint", async () => {
-      const messages: string[] = [];
-      const f2 = fixture({
-        onProgress: (initial) => {
-          messages.push(initial);
-          return {
-            update: (m) => messages.push(m),
-            hide: () => {},
-          };
-        },
-      });
-      await f2.store.load();
-      f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
-      // 6 MB file: > 5 MB threshold.
-      const big = Buffer.alloc(6 * 1024 * 1024, 0x42);
-      writeVaultFile(f2.root, "big.bin", big);
-      await f2.manager.syncAll();
-      expect(messages.some((m) => /~\d/.test(m) && m.includes("MB"))).toBe(
+      // Each batch shows its own "Push X/N files to GitHub" counter.
+      // No commit-number indicator — every batch is a self-contained
+      // Push view from the user's perspective. The final state is
+      // "Sync done" replacing the same handle once the queue empties.
+      expect(messages.some((m) => m === "Push 0/1 files to GitHub")).toBe(
         true,
       );
+      expect(messages.some((m) => m === "Push 1/1 files to GitHub")).toBe(
+        true,
+      );
+      expect(messages[messages.length - 1]).toBe("Sync done");
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 
@@ -2598,14 +2586,15 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
 
       await f2.manager.syncAll();
 
-      // First text is the lazy-open "Push to GitHub…" + at least one
-      // "Push X/4" line + the terminal "Push: committing" notice +
-      // the final "Sync done" finale that replaces the same handle.
-      expect(messages[0]).toMatch(/Push to GitHub/);
-      expect(messages.some((m) => /Push 0\/4/.test(m))).toBe(true);
-      expect(messages.some((m) => /Push 4\/4/.test(m))).toBe(true);
-      expect(messages.some((m) => /^Push: committing/.test(m))).toBe(true);
-      expect(messages.some((m) => /^Sync done$/.test(m))).toBe(true);
+      // Notice opens directly into "Push 0/4 files to GitHub" via the
+      // drain's lazy-open + ticks through "Push X/4 files to GitHub"
+      // as the tree-builder hook fires per file, and ends with
+      // "Sync done" replacing the same handle.
+      expect(messages[0]).toBe("Push 0/4 files to GitHub");
+      expect(
+        messages.some((m) => m === "Push 4/4 files to GitHub"),
+      ).toBe(true);
+      expect(messages[messages.length - 1]).toBe("Sync done");
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 

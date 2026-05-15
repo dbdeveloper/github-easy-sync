@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 4. Define success criteria. Loop until verified.
 5. Follow Occam's Razor. Keep your project simple—but don't overcomplicate it. Not sure how? Just ask!
 
-## What this plugin is
+    ## What this plugin is
 
 An Obsidian plugin that syncs a local vault with a GitHub repository using **only the GitHub REST API** — no `git` binary, no `isomorphic-git`. This constraint is deliberate so the plugin works identically on desktop and mobile. It means features like branching, merging, rebasing, or any non-GitHub host are out of scope.
 
