@@ -1,13 +1,11 @@
 name: Integration tests
 
-# Bootstrap tests delete + recreate a public test repo (~30-90 s of
-# GitHub-side churn) and are the most sensitive to GitHub API drift,
-# so they run nightly. Other tests (B/C/D/E) are cheap branch-per-test
-# work against a private repo — they're triggered manually or as part
-# of the "all" suite.
+# Manual-only. Trigger this workflow from the GitHub UI (or
+# `gh workflow run integration.yml -f suite=...`) before merging a
+# change that touches sync2's network paths. The earlier nightly
+# bootstrap schedule was retired — the test repos (and our GitHub
+# API quota) get touched on demand rather than on a clock.
 on:
-  schedule:
-    - cron: "0 3 * * *" # 03:00 UTC daily — bootstrap only
   workflow_dispatch:
     inputs:
       suite:
@@ -51,9 +49,6 @@ jobs:
       - name: Build plugin
         run: pnpm build
 
-      # Pick the script based on trigger:
-      #   - schedule (nightly): always bootstrap-only
-      #   - manual: inputs.suite picks all / bootstrap / nonbootstrap
       - name: Run integration tests
         env:
           # Fine-grained PAT scoped to the private test repo. Used by
@@ -68,15 +63,11 @@ jobs:
           INT_BOOTSTRAP_TEST_REPO: ${{ vars.INT_BOOTSTRAP_TEST_REPO }}
           INT_TEST_BRANCH_PREFIX: ${{ vars.INT_TEST_BRANCH_PREFIX || 'int-test' }}
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            pnpm test:integration:bootstrap
-          else
-            case "${{ inputs.suite }}" in
-              bootstrap)    pnpm test:integration:bootstrap ;;
-              nonbootstrap) pnpm test:integration:nonbootstrap ;;
-              all|*)        pnpm test:integration ;;
-            esac
-          fi
+          case "${{ inputs.suite }}" in
+            bootstrap)    pnpm test:integration:bootstrap ;;
+            nonbootstrap) pnpm test:integration:nonbootstrap ;;
+            all|*)        pnpm test:integration ;;
+          esac
 
       # Best-effort cleanup of stray feature branches in the PRIVATE
       # test repo. Bootstrap repo doesn't need this — its lifecycle
