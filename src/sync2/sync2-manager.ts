@@ -1176,6 +1176,9 @@ export class Sync2Manager {
           theirsBlobSha: blob.sha,
           theirsAuthor,
         });
+        // Sibling file landed in the vault — counts as a local-side
+        // change for the "Sync done (updated N files)" summary.
+        this.pulledFilesThisSync++;
         await this.logger.info("Sync2 conflict deferred via sibling file", {
           path,
         });
@@ -1529,14 +1532,27 @@ export class Sync2Manager {
       //     actually moved (a pull applied remote changes, OR we
       //     pushed at least one batch). True no-op drains (no remote
       //     changes, no pending queue) stay silent.
+      // When the pull side touched local files (writes from remote,
+      // canonicalisations, sibling files for deferred conflicts), the
+      // message is padded with "(updated N files)" so the user knows
+      // their vault changed. Push-only syncs use the plain "Sync done"
+      // — the user already saw "Commit N files" at click time and
+      // their vault didn't get modified by sync. Counter resets at the
+      // start of every syncAll/syncFile/pullOnly (pulledFilesThisSync).
       const drainDidWork =
         pushedAnyBatch || this.pulledFilesThisSync > 0;
+      const doneMessage =
+        this.pulledFilesThisSync > 0
+          ? this.pulledFilesThisSync === 1
+            ? "Sync done (updated 1 file)"
+            : `Sync done (updated ${this.pulledFilesThisSync} files)`
+          : "Sync done";
       if (ownProgress && progress) {
-        progress.update("Sync done");
+        progress.update(doneMessage);
         const handle = progress;
         setTimeout(() => handle.hide(), 1000);
       } else if (ownProgress && drainDidWork && this.onProgress) {
-        const handle = this.onProgress("Sync done");
+        const handle = this.onProgress(doneMessage);
         setTimeout(() => handle.hide(), 1000);
       }
     } finally {
@@ -2029,6 +2045,7 @@ export class Sync2Manager {
             theirsBlobSha: theirsFetched?.sha ?? "",
             theirsAuthor,
           });
+          this.pulledFilesThisSync++;
           await this.cascadeDeferRemoval(batchId, path);
           await this.logger.info(
             "Sync2 reconcile deferred via sibling file",
@@ -2118,6 +2135,7 @@ export class Sync2Manager {
             theirsBlobSha: theirs.sha,
             theirsAuthor,
           });
+          this.pulledFilesThisSync++;
           await this.queue.removeDeletion(batchId, path);
           await this.cascadeDeferRemoval(batchId, path);
           await this.logger.info(
