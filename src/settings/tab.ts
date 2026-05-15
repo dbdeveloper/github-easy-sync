@@ -148,19 +148,19 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       .setName("Sync strategy")
       .setDesc("How to sync files with the remote repository");
 
-    let syncInterval = "1";
+    let syncInterval = "5";
     if (this.plugin.settings.syncInterval) {
       syncInterval = this.plugin.settings.syncInterval.toString();
     }
     const intervalSettings = new Setting(containerEl)
       .setName("Sync interval")
-      .setDesc("Interval in minutes between automatic syncs")
+      .setDesc("Interval in minutes between automatic syncs (default 5)")
       .addText((text) =>
         text
           .setPlaceholder("Interval in minutes")
           .setValue(syncInterval)
           .onChange(async (value) => {
-            this.plugin.settings.syncInterval = parseInt(value) || 1;
+            this.plugin.settings.syncInterval = parseInt(value) || 5;
             await this.plugin.saveSettings();
             this.plugin.restartSyncInterval();
           }),

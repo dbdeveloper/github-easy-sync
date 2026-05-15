@@ -110,7 +110,7 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   githubRepo: "",
   githubBranch: "main",
   syncStrategy: "manual",
-  syncInterval: 1,
+  syncInterval: 5,
   syncOnStartup: false,
   autoCommitOnSync: false,
   showStatusBarItem: true,
