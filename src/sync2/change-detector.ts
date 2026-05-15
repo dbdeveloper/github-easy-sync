@@ -10,12 +10,6 @@ import SnapshotStore, {
 } from "./snapshot-store";
 import { FileChange } from "./types";
 
-// Legacy plugin's old manifest filename. Hardcoded-blocked so a user
-// migrating from github-gitless-sync doesn't accidentally start
-// pushing their old manifest file as user content. We don't read it,
-// don't write it, don't sync it — silently invisible to sync2.
-const LEGACY_MANIFEST_FILE_NAME = "github-sync-metadata.json";
-
 // isSyncable for sync2: hardcoded deny list + per-device configDir
 // gate + gi.ignoredAsync. The configDir gate (`syncConfigDir`) is
 // per-device by design — see settings.ts where it lives. When OFF,
@@ -35,7 +29,6 @@ export async function isSyncable(
   ) => Promise<{ content: string; mtime: number } | null>,
 ): Promise<boolean> {
   if (path === `${configDir}/${SYNC2_MANIFEST_FILE_NAME}`) return false;
-  if (path === `${configDir}/${LEGACY_MANIFEST_FILE_NAME}`) return false;
   if (path === `${configDir}/plugins/${selfPluginId}/data.json`) return false;
   // Per-device configDir gate — symmetric: OFF blocks the whole
   // <configDir>/ subtree on both push and pull.

@@ -98,12 +98,6 @@ describe("ChangeDetector", () => {
       expect(out).toEqual([]);
     });
 
-    it("hardcoded deny: skips legacy manifest artifact", async () => {
-      writeFile(f.root, `${CONFIG_DIR}/github-sync-metadata.json`, "{}");
-      const out = await f.detector.findChanges();
-      expect(out).toEqual([]);
-    });
-
     it("hardcoded deny: skips our plugin's data.json", async () => {
       writeFile(
         f.root,
