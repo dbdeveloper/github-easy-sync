@@ -99,9 +99,11 @@ export default class GitHubSyncPlugin extends Plugin {
 
     await this.initSync2();
 
-    if (this.settings.syncStrategy === "interval") {
-      this.startSyncInterval();
-    }
+    // Always start the timer: when interval is enabled, it runs at the
+    // user's configured cadence and ticks pull + drain; when disabled
+    // it's a 5-min watchdog that only drains pending batches (so a
+    // failed earlier drain gets retried automatically).
+    this.startSyncInterval();
 
     this.app.workspace.onLayoutReady(() => {
       if (this.settings.showStatusBarItem) this.showStatusBarItem();
@@ -702,24 +704,48 @@ export default class GitHubSyncPlugin extends Plugin {
 
   startSyncInterval(): void {
     if (this.syncIntervalId !== null) return;
-    const ms = Math.max(1, this.settings.syncInterval) * 60 * 1000;
+    const intervalEnabled = this.settings.syncStrategy === "interval";
+    // Interval ON: user's configured minutes drive the tick rate and
+    // each tick does a full sync (pull + push pending). OFF: a 5-min
+    // watchdog that fires drain ONLY when the on-disk queue still has
+    // pending batches — used to retry pushes that failed earlier
+    // (offline, server error). When OFF + queue empty: no-op, so we
+    // don't poll GitHub uninvited.
+    const minutes = intervalEnabled
+      ? Math.max(1, this.settings.syncInterval)
+      : 5;
+    const ms = minutes * 60 * 1000;
     this.syncIntervalId = window.setInterval(() => {
-      // Interval semantics depend on autoCommitOnSync. Off
-      // (default) → silent pull only — no notices, no commits. On →
-      // full sync, including push and the user-facing notices. The
-      // Sync ribbon button always invokes the full sync() regardless,
-      // so a user who's left interval on pull-only can still commit
-      // on demand. Interval intentionally does NOT drain pending
-      // queue batches — that's a startup-only concession (see
-      // runStartupSync); idle background ticks shouldn't suddenly
-      // push a commit the user thought was deferred.
-      if (this.settings.autoCommitOnSync ?? false) {
-        void this.sync();
-      } else {
-        void this.pullOnly();
-      }
+      void this.intervalTick(intervalEnabled);
     }, ms);
     this.registerInterval(this.syncIntervalId);
+  }
+
+  private async intervalTick(intervalEnabled: boolean): Promise<void> {
+    if (!this.isConfigured()) return;
+    if (!intervalEnabled) {
+      // Watchdog mode: only act if there's actual queued work.
+      const hasWork = await this.sync2Manager.hasPendingBatches();
+      if (!hasWork) return;
+      try {
+        await this.sync2Manager.resumeQueue();
+      } catch (err) {
+        void this.logger.error("Interval watchdog drain failed", `${err}`);
+      }
+      return;
+    }
+    // Interval mode: pull + push as one tick. autoCommitOnSync decides
+    // whether to also enqueue + push the user's local edits this tick.
+    if (this.settings.autoCommitOnSync ?? false) {
+      void this.sync();
+    } else {
+      void this.pullOnly();
+      try {
+        await this.sync2Manager.resumeQueue();
+      } catch (err) {
+        void this.logger.error("Interval drain failed", `${err}`);
+      }
+    }
   }
 
   // Startup hook for `syncOnStartup: true`. Same autoCommit gate as

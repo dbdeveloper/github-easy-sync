@@ -481,6 +481,16 @@ export class Sync2Manager {
     await this.drain();
   }
 
+  // True iff the on-disk push-queue has at least one pending batch.
+  // Used by main.ts's interval timer to gate watchdog-style drain
+  // ticks: when interval is OFF and the queue is empty, the timer
+  // is a no-op (we don't periodically poll remote for changes the
+  // user didn't ask for).
+  async hasPendingBatches(): Promise<boolean> {
+    const ids = await this.queue.list();
+    return ids.length > 0;
+  }
+
   // Pull-only entry point for interval-driven background syncs (when
   // autoCommitOnIntervalSync is off). Brings the local vault up to
   // date with the remote — bootstrap-from-remote on a fresh device,
