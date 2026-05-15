@@ -1544,8 +1544,8 @@ export class Sync2Manager {
       const doneMessage =
         this.pulledFilesThisSync > 0
           ? this.pulledFilesThisSync === 1
-            ? "Sync done (updated 1 file)"
-            : `Sync done (updated ${this.pulledFilesThisSync} files)`
+            ? "Sync done (1 file updated from GitHub)"
+            : `Sync done (${this.pulledFilesThisSync} files updated from GitHub)`
           : "Sync done";
       if (ownProgress && progress) {
         progress.update(doneMessage);
