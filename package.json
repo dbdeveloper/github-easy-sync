@@ -16,7 +16,7 @@
     "benchmark": "tsx benchmark.ts"
   },
   "keywords": [],
-  "author": "Silvano Cerza",
+  "author": "Vladyslav Kozlovskyy",
   "license": "AGPL-3.0-only",
   "devDependencies": {
     "@types/node": "^22.10.5",

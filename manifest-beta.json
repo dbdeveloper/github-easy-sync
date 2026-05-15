@@ -4,14 +4,9 @@
   "version": "2.0.0-beta",
   "minAppVersion": "1.7.7",
   "description": "Sync a GitHub repository with vaults on different platforms without requiring git installation",
-  "author": "Silvano Cerza",
-  "authorUrl": "https://silvanocerza.com",
-  "fundingUrl": "https://ko-fi.com/silvanocerza",
+  "author": "Vladyslav Kozlovskyy",
+  "authorUrl": "https://github.com/dbdeveloper/github-easy-sync",
   "contributors": [
-    {
-      "name": "Vladyslav Kozlovskyy",
-      "email": "dbdevelop@gmail.com"
-    },
     {
       "name": "Claude Code",
       "url": "https://claude.com/claude-code"
