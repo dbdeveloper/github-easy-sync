@@ -9,6 +9,7 @@ import {
   TextComponent,
   Notice,
   Modal,
+  requestUrl,
 } from "obsidian";
 import GitHubSyncPlugin from "src/main";
 import { copyToClipboard } from "src/utils";
@@ -103,6 +104,179 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           }),
       );
+
+    // ── Connection probe ─────────────────────────────────────────────
+    // Lightweight standalone check: GET /repos/{owner}/{repo}, then if
+    // that passes and a branch is set, GET /repos/.../branches/{branch}.
+    // Deliberately uses requestUrl directly instead of going through
+    // GithubClient so the probe doesn't touch Sync2Manager state
+    // (snapshot, push-queue, conflict-store) — a misconfigured click
+    // should never mutate anything.
+    const probeResultEl = containerEl.createDiv({
+      attr: {
+        style:
+          "margin: 0 0 1.5em 0; padding: 0.5em 0.75em; border-radius: 4px; " +
+          "font-family: var(--font-monospace); font-size: 0.85em; " +
+          "white-space: pre-wrap; display: none;",
+      },
+    });
+    const setProbeResult = (kind: "ok" | "err" | "info", text: string) => {
+      probeResultEl.style.display = "block";
+      probeResultEl.style.background =
+        kind === "ok"
+          ? "var(--background-modifier-success)"
+          : kind === "err"
+            ? "var(--background-modifier-error)"
+            : "var(--background-secondary)";
+      probeResultEl.style.color =
+        kind === "ok"
+          ? "var(--text-on-accent)"
+          : kind === "err"
+            ? "var(--text-on-accent)"
+            : "var(--text-normal)";
+      probeResultEl.setText(text);
+    };
+    new Setting(containerEl)
+      .setName("Test connection")
+      .setDesc(
+        "One-shot lightweight probe against GitHub. Verifies token, " +
+          "owner/repo accessibility, and branch existence. Reads only — " +
+          "never writes or mutates plugin state.",
+      )
+      .addButton((button) =>
+        button
+          .setButtonText("Test")
+          .setCta()
+          .onClick(async () => {
+            const { githubToken, githubOwner, githubRepo, githubBranch } =
+              this.plugin.settings;
+            if (!githubToken || !githubOwner || !githubRepo) {
+              setProbeResult(
+                "err",
+                "✗ Fill in token, owner, and repo first.",
+              );
+              return;
+            }
+            setProbeResult("info", "Probing…");
+            button.setDisabled(true);
+            try {
+              const repoRes = await requestUrl({
+                url: `https://api.github.com/repos/${githubOwner}/${githubRepo}`,
+                method: "GET",
+                headers: {
+                  Accept: "application/vnd.github+json",
+                  Authorization: `Bearer ${githubToken}`,
+                  "X-GitHub-Api-Version": "2022-11-28",
+                },
+                throw: false,
+              });
+              if (repoRes.status === 401) {
+                setProbeResult(
+                  "err",
+                  "✗ 401 Unauthorized — token invalid or expired.\n" +
+                    "Generate a new token on GitHub → Settings → Developer settings.",
+                );
+                return;
+              }
+              if (repoRes.status === 403) {
+                setProbeResult(
+                  "err",
+                  "✗ 403 Forbidden — token lacks the required scope.\n" +
+                    "Fine-grained PAT needs: Contents (R/W), Metadata (R).\n" +
+                    "Classic PAT needs: repo.",
+                );
+                return;
+              }
+              if (repoRes.status === 404) {
+                setProbeResult(
+                  "err",
+                  `✗ 404 Not Found — \`${githubOwner}/${githubRepo}\` ` +
+                    "is unreachable for this token.\n" +
+                    "Likely causes:\n" +
+                    "  • Typo in owner or repo (case-sensitive on REST API).\n" +
+                    "  • Fine-grained PAT doesn't include this repo in its " +
+                    "Repository access list.\n" +
+                    "  • Repo is private and token belongs to a different user.",
+                );
+                return;
+              }
+              if (repoRes.status >= 500) {
+                const reqId = repoRes.headers?.["X-GitHub-Request-Id"] ?? "";
+                setProbeResult(
+                  "err",
+                  `✗ ${repoRes.status} GitHub server error. Retry later.\n` +
+                    (reqId ? `Request ID: ${reqId}` : ""),
+                );
+                return;
+              }
+              if (repoRes.status < 200 || repoRes.status >= 400) {
+                setProbeResult(
+                  "err",
+                  `✗ Unexpected status ${repoRes.status}.\n` +
+                    String(repoRes.text ?? "").slice(0, 200),
+                );
+                return;
+              }
+              const repoJson = repoRes.json ?? {};
+              const visibility = repoJson.private ? "private" : "public";
+              const defaultBranch = repoJson.default_branch ?? "?";
+              const fullName = repoJson.full_name ?? `${githubOwner}/${githubRepo}`;
+              if (!githubBranch) {
+                setProbeResult(
+                  "ok",
+                  `✓ Repo \`${fullName}\` accessible (${visibility}).\n` +
+                    `Default branch: ${defaultBranch}.\n` +
+                    "Branch field is empty — no branch check performed.",
+                );
+                return;
+              }
+              const branchRes = await requestUrl({
+                url: `https://api.github.com/repos/${githubOwner}/${githubRepo}/branches/${encodeURIComponent(githubBranch)}`,
+                method: "GET",
+                headers: {
+                  Accept: "application/vnd.github+json",
+                  Authorization: `Bearer ${githubToken}`,
+                  "X-GitHub-Api-Version": "2022-11-28",
+                },
+                throw: false,
+              });
+              if (branchRes.status === 404) {
+                setProbeResult(
+                  "err",
+                  `✗ Repo OK, but branch \`${githubBranch}\` not found.\n` +
+                    `Default branch on this repo: ${defaultBranch}.\n` +
+                    "Check for typos or create the branch on GitHub first.",
+                );
+                return;
+              }
+              if (branchRes.status < 200 || branchRes.status >= 400) {
+                setProbeResult(
+                  "err",
+                  `✗ Branch check failed: status ${branchRes.status}.`,
+                );
+                return;
+              }
+              const branchSha =
+                String(branchRes.json?.commit?.sha ?? "").slice(0, 7) || "?";
+              setProbeResult(
+                "ok",
+                `✓ All good. Repo \`${fullName}\` (${visibility}), ` +
+                  `branch \`${githubBranch}\` exists, HEAD ${branchSha}.\n` +
+                  "Plugin is ready to sync.",
+              );
+            } catch (err) {
+              setProbeResult(
+                "err",
+                "✗ Network error: " +
+                  String((err as Error)?.message ?? err).slice(0, 200),
+              );
+            } finally {
+              button.setDisabled(false);
+            }
+          }),
+      );
+    // Mount the result div right after the Setting row.
+    containerEl.appendChild(probeResultEl);
 
     // ── Device identity ─────────────────────────────────────────────
     new Setting(containerEl).setName("Sync").setHeading();
