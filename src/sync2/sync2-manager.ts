@@ -326,20 +326,18 @@ export class Sync2Manager {
   }
 
   // Action 1 — full sync.
-  //   1. Pull remote-driven adds/modifies/deletes since last sync.
-  //   2. Detect what changed locally.
-  //   3. Materialize a queue batch with that snapshot.
-  //   4. Drain the queue (push + commit + ref + record).
   //
-  // The pull pass runs first so subsequent findChanges() classifies
-  // local files against the freshly-updated snapshot, not against
-  // a stale baseline.
+  // Click path is LOCAL ONLY: identity check → optional one-time
+  // bootstrap (network, fires only when lastSyncCommitSha is null) →
+  // invariants → findChanges → enqueue. Returns when the batch is on
+  // disk. Network drain (pull + push) runs inside drain() which can
+  // also be triggered by the interval timer or onload.
   async syncAll(customMessage?: string): Promise<void> {
     await this.logger.info("Sync2 syncAll start", {
       customMessage: customMessage !== undefined,
     });
-    // Remote-identity drift check runs FIRST — before bootstrapIfNeeded
-    // and pullIfNeeded. If the user pointed the plugin at a different
+    // Remote-identity drift check runs FIRST — before bootstrapIfNeeded.
+    // If the user pointed the plugin at a different
     // (owner, repo, branch), we wipe local state here so the rest of
     // syncAll naturally routes through adoption-from-remote against
     // the new remote (lastSyncCommitSha is null after the wipe →
@@ -356,30 +354,16 @@ export class Sync2Manager {
     let syncedFiles = 0;
     this.pulledFilesThisSync = 0;
     try {
-      // Etap 6.6: track paths whose remote bytes were non-canonical
-      // and got rewritten locally. After findChanges runs we'll
-      // synthesize FileChange[modified] for any republish entry not
-      // already covered by user-driven local changes — that lets the
-      // next push bring the remote in line with the canonical local
-      // copy.
-      const republishPaths = new Set<string>();
-      const headAfterBootstrap = await this.bootstrapIfNeeded(
-        republishPaths,
-        progress,
-      );
-      const headAfterPull =
-        headAfterBootstrap ??
-        (await this.pullIfNeeded(republishPaths, progress));
-      // syncAll always touches configDir-side state (manifest/log,
-      // possibly user notes there). Make sure invariant gitignores
-      // are canonical before findChanges classifies anything.
+      // Bootstrap is the one network step the click body still runs:
+      // first-ever sync needs a remote tree probe so the upcoming
+      // enqueue doesn't blindly mass-overwrite a non-bare remote. After
+      // the first success, lastSyncCommitSha !== null and
+      // bootstrapIfNeeded returns null in O(1) — every subsequent click
+      // is pure-local.
+      await this.bootstrapIfNeeded(progress);
       if (this.invariants) await this.invariants.enforce();
       const changes = await this.detector.findChanges();
-      const combined = await this.appendRepublishChanges(
-        changes,
-        republishPaths,
-      );
-      if (combined.length === 0) {
+      if (changes.length === 0) {
         await this.store.save();
         // "Nothing local AND nothing pending in the queue" is the
         // truly idle case — fire onNoLocalChanges so plugin code can
@@ -388,7 +372,7 @@ export class Sync2Manager {
         // picks them up and onProgress takes over the user feedback.
         const pendingBatches = await this.queue.list();
         if (pendingBatches.length === 0) this.onNoLocalChanges?.();
-        await this.drain(headAfterPull, progress);
+        await this.drain(progress);
         await this.logger.info("Sync2 syncAll: nothing to sync");
         return;
       }
@@ -408,10 +392,10 @@ export class Sync2Manager {
               isolated: true,
             }
           : this.fullSyncMeta();
-      const enqueued = await this.enqueueOrMerge(combined, meta);
+      const enqueued = await this.enqueueOrMerge(changes, meta);
       syncedFiles = enqueued;
       if (enqueued > 0) this.onLocalCommitted?.(enqueued);
-      await this.drain(headAfterPull, progress);
+      await this.drain(progress);
     } finally {
       progress?.hide();
       this.onSyncCompleted?.({
@@ -444,37 +428,22 @@ export class Sync2Manager {
     let syncedFiles = 0;
     this.pulledFilesThisSync = 0;
     try {
-      // Etap 6.6: pull-side normalization may rewrite OTHER paths
-      // besides the syncFile target. We only push the target in this
-      // batch (the user asked to sync one file, not the whole vault);
-      // the rest stay canonical-locally with the gap-to-remote tracked
-      // implicitly until the next syncAll.
-      const republishPaths = new Set<string>();
-      const headAfterBootstrap = await this.bootstrapIfNeeded(
-        republishPaths,
-        progress,
-      );
-      const headAfterPull =
-        headAfterBootstrap ??
-        (await this.pullIfNeeded(republishPaths, progress));
+      // Click body is local-only after bootstrap: the only network
+      // step is the first-ever bootstrap probe. Pull + push live in
+      // drain (the network worker).
+      await this.bootstrapIfNeeded(progress);
       // Only enforce invariants when the active path is under
       // configDir; single-file syncs of regular notes don't risk
       // touching them.
       if (this.invariants && path.startsWith(`${this.configDir}/`)) {
         await this.invariants.enforce();
       }
-      let change = await this.detector.findChangeForPath(path);
-      // If the target file itself was canonicalized during pull,
-      // surface it as a synthetic modify so the push converges this
-      // file's remote copy in this very call.
-      if (!change && republishPaths.has(path)) {
-        change = await this.synthesizeRepublishChange(path);
-      }
+      const change = await this.detector.findChangeForPath(path);
       if (!change) {
         await this.store.save();
         const pendingBatches = await this.queue.list();
         if (pendingBatches.length === 0) this.onNoLocalChanges?.();
-        await this.drain(headAfterPull, progress);
+        await this.drain(progress);
         await this.logger.info(`Sync2 syncFile: nothing to sync`, { path });
         return;
       }
@@ -496,7 +465,7 @@ export class Sync2Manager {
       });
       syncedFiles = enqueued;
       if (enqueued > 0) this.onLocalCommitted?.(enqueued);
-      await this.drain(headAfterPull, progress);
+      await this.drain(progress);
     } finally {
       progress?.hide();
       this.onSyncCompleted?.({
@@ -520,8 +489,6 @@ export class Sync2Manager {
   //   - invariants.enforce (no mass rewrite of `.gitignore`s on a
   //     timer; reserved for explicit Sync clicks)
   //   - findChanges + enqueueOrMerge + drain (no commits)
-  //   - republishPaths follow-up (Etap 6.6 best-effort canonicalisation
-  //     stays best-effort; the next manual syncAll picks it up)
   //
   // Conflicts surfaced during pull behave as if the user had clicked
   // "Later": the sibling file is created, the 🔀 status-bar widget
@@ -531,10 +498,9 @@ export class Sync2Manager {
   async pullOnly(): Promise<void> {
     await this.logger.info("Sync2 pullOnly start");
     await this.reconcileRemoteIdentity();
-    const republishPaths = new Set<string>();
-    const headAfterBootstrap = await this.bootstrapIfNeeded(republishPaths);
+    const headAfterBootstrap = await this.bootstrapIfNeeded();
     if (headAfterBootstrap === null) {
-      await this.pullIfNeeded(republishPaths);
+      await this.pullIfNeeded();
     }
     await this.store.save();
     await this.logger.info("Sync2 pullOnly done");
@@ -568,7 +534,6 @@ export class Sync2Manager {
   // delete-vs-modify race is treated like a conflict (resurrection
   // upload on the next push, since recordSync isn't called).
   private async pullIfNeeded(
-    republishPaths: Set<string>,
     sharedProgress: ProgressHandle | null = null,
   ): Promise<string | null> {
     const expectedHead = this.store.getLastSyncCommitSha();
@@ -677,6 +642,21 @@ export class Sync2Manager {
           continue;
         }
 
+        // Already have a pending conflict record for THIS exact remote
+        // version (matched by theirsBlobSha): user picked "Later" on
+        // this file/version already; re-firing the modal would create
+        // a duplicate sibling. Skip. If the remote has moved on to a
+        // newer SHA since the last defer, fall through — new version,
+        // new modal, new sibling (multi-copy semantics).
+        if (this.conflictStore && f.sha) {
+          const pending = this.conflictStore.forPath(f.filename);
+          if (pending.some((rec) => rec.theirsBlobSha === f.sha)) {
+            anyOverlapDeferred = true;
+            tickPull();
+            continue;
+          }
+        }
+
         if (f.status === "removed") {
           await this.applyRemoteDeletion(f.filename, expectedHead);
           this.pulledFilesThisSync++;
@@ -723,7 +703,6 @@ export class Sync2Manager {
           f.filename,
           currentHead,
           expectedHead,
-          republishPaths,
         );
         this.pulledFilesThisSync++;
         tickPull();
@@ -811,7 +790,6 @@ export class Sync2Manager {
   // to drain), or null when the branch is bare or there's
   // nothing to bootstrap (lastSyncCommitSha already set).
   private async bootstrapIfNeeded(
-    republishPaths: Set<string>,
     sharedProgress: ProgressHandle | null = null,
   ): Promise<string | null> {
     if (this.store.getLastSyncCommitSha() !== null) return null;
@@ -824,7 +802,7 @@ export class Sync2Manager {
       throw err;
     }
     if (currentHead === null) return null;
-    await this.bootstrapFromRemote(currentHead, republishPaths, sharedProgress);
+    await this.bootstrapFromRemote(currentHead, sharedProgress);
     return currentHead;
   }
 
@@ -852,7 +830,6 @@ export class Sync2Manager {
   // than a peer's push from the same minute").
   private async bootstrapFromRemote(
     currentHead: string,
-    republishPaths: Set<string>,
     sharedProgress: ProgressHandle | null = null,
   ): Promise<void> {
     await this.logger.info("Sync2 adoption-from-remote start", {
@@ -925,7 +902,7 @@ export class Sync2Manager {
         const item = files[filePath];
         const localExists = await this.vault.adapter.exists(filePath);
         if (!localExists) {
-          await this.adoptionPullAndRecord(filePath, item, republishPaths);
+          await this.adoptionPullAndRecord(filePath, item);
           pulled++;
           this.pulledFilesThisSync++;
           tickPull();
@@ -963,7 +940,7 @@ export class Sync2Manager {
           continue;
         }
         // Remote wins. Pull, overwriting the local copy in place.
-        await this.adoptionPullAndRecord(filePath, item, republishPaths);
+        await this.adoptionPullAndRecord(filePath, item);
         remoteOverwrote++;
         this.pulledFilesThisSync++;
         tickPull();
@@ -987,14 +964,12 @@ export class Sync2Manager {
   // Shared "download from remote and write to vault" path used by
   // adoption's three pull branches (missing-locally, remote-newer
   // overwrite, and the legacy bootstrap pull). Text bytes go through
-  // canonicalization (Etap 6.6: CRLF→LF, BOM strip, trailing-NL); the
-  // republishPaths set collects paths whose canonical SHA differs
-  // from the remote's blob SHA, so the next push can bring the
-  // server in line ("preferred clean server").
+  // canonicalization (CRLF→LF, BOM strip, trailing-NL); when bytes
+  // change, snapshot stays stale so the next findChanges treats the
+  // file as added/modified and the next push uploads canonical bytes.
   private async adoptionPullAndRecord(
     filePath: string,
     item: GetTreeResponseItem,
-    republishPaths: Set<string>,
   ): Promise<void> {
     const blob = await this.client.getBlob({ sha: item.sha, retry: true });
     const bytes = base64ToArrayBuffer(blob.content);
@@ -1004,8 +979,12 @@ export class Sync2Manager {
         filePath,
         text,
       );
-      await this.detector.recordSync(filePath, canonicalSha);
-      if (changed) republishPaths.add(filePath);
+      // recordSync only when bytes are already canonical. When pull
+      // rewrote them, leave snapshot stale so the next findChanges
+      // picks the file up as added/modified and pushes canonical back.
+      if (!changed) {
+        await this.detector.recordSync(filePath, canonicalSha);
+      }
     } else {
       await this.ensureParentDir(filePath);
       await this.vault.adapter.writeBinary(filePath, bytes);
@@ -1021,16 +1000,15 @@ export class Sync2Manager {
     }
   }
 
-  // `republishPaths` collects paths whose on-disk canonical bytes
-  // differ from what's actually on the remote (because we normalized
-  // the remote's non-canonical input). Caller flushes this set into a
-  // synthetic FileChange[modified] batch after findChanges so the next
-  // push closes the gap. Etap 6.6: "preferred clean server".
+  // When pull rewrites the on-disk file (CRLF→LF, BOM strip,
+  // trailing-NL), recordSync is intentionally skipped so the snapshot
+  // stays at the old remote SHA. Next findChanges sees the local-vs-
+  // remote divergence and emits the file as modified; the next push
+  // uploads canonical bytes back to GitHub.
   private async applyRemoteAddOrModify(
     path: string,
     headRef: string,
     baseRef: string,
-    republishPaths: Set<string>,
   ): Promise<void> {
     const blob = await this.safeFetchContents(path, headRef);
     if (!blob) return; // raced with a subsequent remote delete; skip
@@ -1047,13 +1025,14 @@ export class Sync2Manager {
           path,
           remoteText,
         );
-        // Record-sync against the canonical SHA so the snapshot
-        // matches what's actually on disk. If the remote bytes were
-        // already canonical, canonicalSha === blob.sha and there's
-        // nothing to republish. Otherwise mark for republish — the
-        // next push will bring the remote in line.
-        await this.detector.recordSync(path, canonicalSha);
-        if (changed) republishPaths.add(path);
+        // recordSync only when local bytes match remote bytes byte-
+        // exactly. When canonicalization rewrote anything (CRLF→LF,
+        // BOM strip, trailing-NL), snapshot stays stale on purpose so
+        // findChanges emits the file on the next sync click and the
+        // canonical version reaches GitHub.
+        if (!changed) {
+          await this.detector.recordSync(path, canonicalSha);
+        }
       } else {
         await this.writeBinaryRemote(path, blob.content);
         await this.detector.recordSync(path, blob.sha);
@@ -1116,8 +1095,8 @@ export class Sync2Manager {
         // User picked "Later". Snapshot (base, theirs) and the sibling
         // file via ConflictStore so the conflict is visible in the
         // vault and survives a deferred resolution. Local file stays
-        // as ours — we deliberately do NOT writeRemoteText here, do
-        // NOT recordSync, do NOT add to republishPaths. The path is
+        // as ours — we deliberately do NOT writeRemoteText here and
+        // do NOT recordSync. The path is
         // excluded from push (enqueueOrMerge filters it) until
         // ConflictStore.resolve fires, at which point the next sync
         // picks it up like any other modified file.
@@ -1162,13 +1141,12 @@ export class Sync2Manager {
       resolved = decision.content;
     }
 
-    // Write canonical, then record-sync the canonical SHA so the
-    // snapshot tracks on-disk bytes. If those bytes don't match what's
-    // on GitHub, queue a republish so the next push closes the gap.
+    // Write canonical. recordSync only when canonical equals what's on
+    // GitHub; otherwise leave snapshot stale so findChanges picks the
+    // gap up on the next sync click.
     const { canonicalSha } = await this.writeRemoteText(path, resolved);
-    await this.detector.recordSync(path, canonicalSha);
-    if (canonicalSha !== blob.sha) {
-      republishPaths.add(path);
+    if (canonicalSha === blob.sha) {
+      await this.detector.recordSync(path, canonicalSha);
     }
   }
 
@@ -1358,45 +1336,6 @@ export class Sync2Manager {
     }
   }
 
-  // Build a synthetic FileChange[modified] for a path that needs to be
-  // republished to GitHub in canonical form. The on-disk bytes are
-  // already canonical and the snapshot already matches them — without
-  // this synthetic entry, findChanges() would silently report nothing
-  // (stat-cache hit), and the canonical-vs-remote gap would persist.
-  private async synthesizeRepublishChange(
-    path: string,
-  ): Promise<FileChange | null> {
-    const stat = await this.vault.adapter.stat(path);
-    if (!stat) return null;
-    const snap = this.store.get(path);
-    return {
-      kind: "modified",
-      path,
-      size: stat.size,
-      mtime: stat.mtime,
-      previousRemoteSha: snap?.remoteSha ?? "",
-    };
-  }
-
-  // Combine ChangeDetector's findings with the post-pull republish set.
-  // When a path is both edited locally AND was canonicalised during
-  // pull, the user-driven change wins (it already includes whatever
-  // bytes are now on disk).
-  private async appendRepublishChanges(
-    changes: FileChange[],
-    republishPaths: Set<string>,
-  ): Promise<FileChange[]> {
-    if (republishPaths.size === 0) return changes;
-    const seen = new Set(changes.map((c) => c.path));
-    const extra: FileChange[] = [];
-    for (const path of republishPaths) {
-      if (seen.has(path)) continue;
-      const synth = await this.synthesizeRepublishChange(path);
-      if (synth) extra.push(synth);
-    }
-    return extra.length === 0 ? changes : [...changes, ...extra];
-  }
-
   // Either enqueue a fresh batch or fold into the latest pending one,
   // depending on the accumulate-offline-syncs setting and whether
   // there's already a non-in-progress batch waiting. mergeIntoLatest
@@ -1471,49 +1410,60 @@ export class Sync2Manager {
     };
   }
 
-  // Drain pending batches one at a time, oldest-first. Stops on the
-  // first failure so the user sees the error notice and can retry;
-  // remaining batches stay on disk for the next syncAll/resumeQueue.
+  // Drain runner — the network worker. Each iteration:
+  //   1. pullIfNeeded — apply remote-driven changes to the vault for
+  //      paths NOT already in the queue. For paths that ARE in the
+  //      queue (overlap), pull defers — push-side reconcile resolves
+  //      them against the batch's snapshot.
+  //   2. queue.list. Empty → exit.
+  //   3. processBatch(oldest) — push, with reconcile if remote moved.
+  //   4. Loop. Picks up new batches that the user enqueued mid-drain.
   //
-  // `headHint` is the head SHA pullIfNeeded just observed (or null if
-  // we have nothing fresh). The first batch processed in this drain
-  // can use it to skip its own getBranchHeadSha; subsequent batches
-  // re-fetch since each prior batch may have moved HEAD itself.
+  // Pull runs BEFORE every push so each batch lands on the freshest
+  // possible HEAD; even if the previous batch advanced HEAD itself,
+  // the next iteration's pull re-syncs against that.
+  //
+  // Re-entry guard: in-memory `running` flag serializes concurrent
+  // drain() calls. A click while drain is active becomes no-op here,
+  // but the click's enqueueOrMerge upstream already added the new
+  // batch to disk, which the active drain picks up on its next list().
+  //
+  // Stops on the first failure so the user sees the error notice and
+  // can retry; remaining batches stay on disk for the next trigger
+  // (next click, next interval tick, next onload).
   private async drain(
-    headHint: string | null = null,
     sharedProgress: ProgressHandle | null = null,
   ): Promise<void> {
     if (this.running) return;
     this.running = true;
-    // When syncAll/syncFile/pullOnly opened a notice at the click,
-    // reuse it (we just call .update() — caller hides). Otherwise
-    // own the notice lifecycle here, same as before.
     const ownProgress = sharedProgress === null;
     let progress: ProgressHandle | null = sharedProgress;
+    let commitNum = 0;
     try {
-      const ids = await this.queue.list();
-      if (ids.length === 0) return;
-      if (this.onProgress && progress === null) {
-        progress = this.onProgress(
-          ids.length === 1
-            ? "Syncing with GitHub…"
-            : `Syncing commit 1/${ids.length} with GitHub…`,
-        );
-      } else if (progress && ids.length > 1) {
-        progress.update(`Syncing commit 1/${ids.length} with GitHub…`);
-      }
-      for (let i = 0; i < ids.length; i++) {
-        if (progress && ids.length > 1) {
+      while (true) {
+        const headHint = await this.pullIfNeeded(progress);
+        const ids = await this.queue.list();
+        if (ids.length === 0) break;
+        commitNum += 1;
+        if (progress === null && this.onProgress) {
+          progress = this.onProgress(
+            ids.length === 1 && commitNum === 1
+              ? "Syncing with GitHub…"
+              : `Syncing commit ${commitNum} with GitHub…`,
+          );
+        } else if (progress) {
           progress.update(
-            `Syncing commit ${i + 1}/${ids.length} with GitHub…`,
+            ids.length === 1 && commitNum === 1
+              ? "Syncing with GitHub…"
+              : `Syncing commit ${commitNum} with GitHub…`,
           );
         }
         await this.processBatch(
-          ids[i],
-          i === 0 ? headHint : null,
+          ids[0],
+          headHint,
           progress,
-          i + 1,
-          ids.length,
+          commitNum,
+          commitNum + ids.length - 1,
         );
       }
     } finally {
@@ -1651,6 +1601,17 @@ export class Sync2Manager {
             );
           },
         });
+      // Empty batch: reconcile may have deferred every path via
+      // ConflictStore, leaving nothing to push. Skip createTree/Commit
+      // entirely and delete the batch so the drain loop moves on.
+      if (entries.length === 0 && batch.deletions.length === 0) {
+        await this.logger.info(
+          `Sync2 push batch ${id}: empty after reconcile, skipping`,
+        );
+        await this.queue.delete(id);
+        return;
+      }
+
       // After all blobs settled, the work shifts to createTree +
       // createCommit + updateBranchHead. That's typically a few
       // seconds at most but the message would otherwise keep saying
@@ -1808,13 +1769,19 @@ export class Sync2Manager {
       string,
       { oldOurs: string; newOurs: string }
     >();
+    // Cached head commit (date used by binary/plugin-js mtime fallback)
+    // — fetched lazily because most reconcile invocations only see text
+    // files.
+    let cachedHeadCommit: { committer: { date: string } } | null = null;
+    const getHeadCommit = async (): Promise<{ committer: { date: string } }> => {
+      if (cachedHeadCommit) return cachedHeadCommit;
+      cachedHeadCommit = await this.client.getCommit({
+        sha: currentHead,
+        retry: true,
+      });
+      return cachedHeadCommit;
+    };
     for (const path of batch.files) {
-      if (!hasTextExtension(path)) {
-        // Binary: skip auto-merge. The batch's version wins on push;
-        // a separate atomic-resolution path lives in pull-side
-        // resolveBinaryConflict.
-        continue;
-      }
       const baseFetched = await this.safeFetchContents(path, expectedHead);
       const theirsFetched = await this.safeFetchContents(path, currentHead);
 
@@ -1824,6 +1791,86 @@ export class Sync2Manager {
         theirsFetched !== null &&
         baseFetched.sha === theirsFetched.sha
       ) {
+        continue;
+      }
+
+      if (!hasTextExtension(path)) {
+        // Binary overlap: atomic mtime. Same shape as pull-side
+        // resolveBinaryConflict, but the loser ALSO drops out of this
+        // batch's push (we don't want to upload a stale binary).
+        if (theirsFetched === null) {
+          // Remote deleted the file. Batch wins: push will resurrect
+          // it. Nothing to do here.
+          continue;
+        }
+        const headCommit = await getHeadCommit();
+        const remoteMs = Date.parse(headCommit.committer.date);
+        const stat = await this.vault.adapter.stat(path);
+        const localMs = stat?.mtime ?? 0;
+        if (!Number.isNaN(remoteMs) && remoteMs > localMs) {
+          // Remote newer → apply remote bytes to live vault, drop path
+          // from batch.
+          await this.writeBinaryRemote(path, theirsFetched.content);
+          await this.detector.recordSync(path, theirsFetched.sha);
+          await this.queue.removeFile(batchId, path);
+          await this.logger.info(
+            "Sync2 reconcile binary: remote newer, dropped from batch",
+            { path },
+          );
+        }
+        // else: local newer (or remote date unparseable) — batch wins,
+        // push will overwrite remote.
+        continue;
+      }
+
+      if (isAtomicPluginFile(path, this.configDir)) {
+        // Plugin-js overlap: semver from manifest.json, fall through
+        // to mtime on tie. theirsFetched is the bytes; we need remote
+        // manifest to read its semver.
+        if (theirsFetched === null) continue;
+        const root = pluginRootOf(path, this.configDir);
+        let localSemver: string | null = null;
+        let remoteSemver: string | null = null;
+        if (root !== null) {
+          const manifestPath = `${root}/manifest.json`;
+          if (await this.vault.adapter.exists(manifestPath)) {
+            const text = await this.vault.adapter.read(manifestPath);
+            localSemver = readPluginVersion(text);
+          }
+          const remoteManifestBlob = await this.safeFetchContents(
+            manifestPath,
+            currentHead,
+          );
+          if (remoteManifestBlob) {
+            remoteSemver = readPluginVersion(
+              decodeBase64String(remoteManifestBlob.content),
+            );
+          }
+        }
+        let remoteWins: boolean | null = null;
+        if (localSemver !== null && remoteSemver !== null) {
+          const cmp = compareSemver(localSemver, remoteSemver);
+          if (cmp > 0) remoteWins = false;
+          else if (cmp < 0) remoteWins = true;
+          // cmp === 0 → fall through to mtime
+        }
+        if (remoteWins === null) {
+          const headCommit = await getHeadCommit();
+          const remoteMs = Date.parse(headCommit.committer.date);
+          const stat = await this.vault.adapter.stat(path);
+          const localMs = stat?.mtime ?? 0;
+          remoteWins =
+            !Number.isNaN(remoteMs) && remoteMs > localMs;
+        }
+        if (remoteWins) {
+          await this.writeBinaryRemote(path, theirsFetched.content);
+          await this.detector.recordSync(path, theirsFetched.sha);
+          await this.queue.removeFile(batchId, path);
+          await this.logger.info(
+            "Sync2 reconcile plugin-js: remote newer, dropped from batch",
+            { path, localSemver, remoteSemver },
+          );
+        }
         continue;
       }
 
@@ -1848,10 +1895,45 @@ export class Sync2Manager {
           theirs: theirsContent,
           conflictMarkedContent: merge.conflictMarkedContent,
         });
-        resolved = this.requireResolvedContent(
-          decision,
-          "in-flight batch reconcile",
-        );
+        if (decision.kind === "deferred") {
+          // User picked "Later" on an overlap path: stash base+theirs
+          // via ConflictStore (sibling file appears in vault), drop the
+          // path from this batch AND every subsequent batch in the
+          // queue. The path's local vault copy stays as-is; user
+          // resolves by editing local + deleting the sibling. Any
+          // queued batch that becomes empty after the removal is
+          // deleted from disk so drain doesn't try to push nothing.
+          if (!this.conflictStore) {
+            throw new Error(
+              "Sync2 conflict deferral requested but no ConflictStore is wired",
+            );
+          }
+          let theirsAuthor = "unknown";
+          try {
+            const headCommit = await this.client.getCommit({
+              sha: currentHead,
+              retry: true,
+            });
+            theirsAuthor = parseDeviceSuffix(headCommit.message);
+          } catch {
+            // network / 404 — keep "unknown"
+          }
+          await this.conflictStore.create({
+            vaultPath: path,
+            baseContent,
+            theirsContent,
+            baseCommitSha: expectedHead,
+            theirsBlobSha: theirsFetched?.sha ?? "",
+            theirsAuthor,
+          });
+          await this.cascadeDeferRemoval(batchId, path);
+          await this.logger.info(
+            "Sync2 reconcile deferred via sibling file",
+            { path },
+          );
+          continue;
+        }
+        resolved = decision.content;
       }
 
       const buf = new TextEncoder().encode(resolved).buffer as ArrayBuffer;
@@ -1874,6 +1956,41 @@ export class Sync2Manager {
       parentCommitSha: currentHead,
       parentTreeSha: headCommit.tree.sha,
     });
+  }
+
+  // Defer cascade: a path the user just deferred via reconcile must
+  // also drop out of every subsequent queued batch. From this batch
+  // onwards: remove the path from each batch's snapshot, delete batches
+  // that become empty. User resolves by editing local + deleting the
+  // sibling; the next sync after that picks up the resolved version
+  // through normal findChanges.
+  private async cascadeDeferRemoval(
+    fromBatchId: string,
+    path: string,
+  ): Promise<void> {
+    const ids = await this.queue.list();
+    const startIdx = ids.indexOf(fromBatchId);
+    if (startIdx < 0) return;
+    for (const id of ids.slice(startIdx)) {
+      const batch = await this.queue.read(id);
+      if (!batch.files.includes(path) && !batch.deletions.includes(path)) {
+        continue;
+      }
+      // Don't drop files from an in-progress batch — its push is
+      // already mid-flight or about to start; mutating mid-push risks
+      // a mismatched parentTree. The in-progress batch's reconcile
+      // already removed the path from its OWN snapshot before this
+      // helper was called (we only cascade to AFTER it).
+      if (id !== fromBatchId && batch.inProgress) continue;
+      await this.queue.removeFile(id, path);
+      const refreshed = await this.queue.read(id);
+      if (
+        refreshed.files.length === 0 &&
+        refreshed.deletions.length === 0
+      ) {
+        await this.queue.delete(id);
+      }
+    }
   }
 
   // Propagate every resolution from a just-reconciled batch into the

@@ -395,6 +395,14 @@ export default class PushQueue {
   // cascading conflict resolution: when batch Q1's resolve produces a
   // new version, later batches that touch the same path are rebased
   // against it before pushing.
+  // Remove a single path from a batch's snapshot. Used by reconcile
+  // when the user defers a conflict mid-push: the path drops out of
+  // this batch's push (ConflictStore takes over until the user
+  // resolves the sibling), and the rest of the batch proceeds.
+  async removeFile(id: string, path: string): Promise<void> {
+    await this.removeBatchFile(`${this.queueRoot}/${id}`, path);
+  }
+
   async overwriteFile(
     id: string,
     path: string,
