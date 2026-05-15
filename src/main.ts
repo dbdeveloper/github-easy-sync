@@ -16,6 +16,7 @@ import PushQueue from "./sync2/push-queue";
 import TreeBuilder from "./sync2/tree-builder";
 import GitignoreInvariants from "./sync2/gitignore-invariants";
 import { Sync2Manager } from "./sync2/sync2-manager";
+import { IntervalScheduler } from "./sync2/interval-scheduler";
 import { ConflictResolution as Sync2ConflictResolution } from "./sync2/types";
 import { applyTemplate } from "./sync2/commit-templates";
 import { CommitMessageModal } from "./sync2/views/commit-message-modal";
@@ -81,8 +82,11 @@ export default class GitHubSyncPlugin extends Plugin {
   // file's diff instead of just the list.
   private resolveNowPath: string | null = null;
 
-  // Auto-sync timer id (Window.setInterval handle).
+  // Auto-sync timer id (Window.setInterval handle). Retained for the
+  // registerInterval() bookkeeping Obsidian wants on unload; the
+  // tick + startup logic itself lives in IntervalScheduler.
   private syncIntervalId: number | null = null;
+  private intervalScheduler!: IntervalScheduler;
 
   async onUserEnable(): Promise<void> {
     if (!this.isConfigured()) {
@@ -707,47 +711,31 @@ export default class GitHubSyncPlugin extends Plugin {
 
   startSyncInterval(): void {
     if (this.syncIntervalId !== null) return;
-    const intervalEnabled = this.settings.syncStrategy === "interval";
-    // Interval ON: user's configured minutes drive the tick rate and
-    // each tick does a full sync (pull + push pending). OFF: a 5-min
-    // watchdog that fires drain ONLY when the on-disk queue still has
-    // pending batches — used to retry pushes that failed earlier
-    // (offline, server error). When OFF + queue empty: no-op, so we
-    // don't poll GitHub uninvited.
-    const minutes = intervalEnabled
-      ? Math.max(1, this.settings.syncInterval)
-      : 5;
-    const ms = minutes * 60 * 1000;
-    this.syncIntervalId = window.setInterval(() => {
-      void this.intervalTick(intervalEnabled);
-    }, ms);
-    this.registerInterval(this.syncIntervalId);
-  }
-
-  private async intervalTick(intervalEnabled: boolean): Promise<void> {
-    if (!this.isConfigured()) return;
-    if (!intervalEnabled) {
-      // Watchdog mode: only act if there's actual queued work.
-      const hasWork = await this.sync2Manager.hasPendingBatches();
-      if (!hasWork) return;
-      try {
-        await this.sync2Manager.resumeQueue();
-      } catch (err) {
-        void this.logger.error("Interval watchdog drain failed", `${err}`);
-      }
-      return;
-    }
-    // Interval mode: pull + push as one tick. autoCommitOnSync decides
-    // whether to also enqueue + push the user's local edits this tick.
-    if (this.settings.autoCommitOnSync ?? false) {
-      void this.sync();
-    } else {
-      void this.pullOnly();
-      try {
-        await this.sync2Manager.resumeQueue();
-      } catch (err) {
-        void this.logger.error("Interval drain failed", `${err}`);
-      }
+    // The tick + startup decisions all live in IntervalScheduler so
+    // the three branches (interval-tick, watchdog, startup) can be
+    // unit-tested without spinning up a real Obsidian. main.ts only
+    // wires the settings predicates, the Sync2Manager ops, and the
+    // OS-level setInterval handle.
+    this.intervalScheduler = new IntervalScheduler({
+      isConfigured: () => this.isConfigured(),
+      intervalEnabled: () => this.settings.syncStrategy === "interval",
+      intervalMinutes: () => this.settings.syncInterval,
+      autoCommitOnSync: () => this.settings.autoCommitOnSync ?? false,
+      hasPendingBatches: () => this.sync2Manager.hasPendingBatches(),
+      drain: () => this.sync2Manager.resumeQueue(),
+      fullSync: () => this.sync(),
+      pullOnly: () => this.pullOnly(),
+      logError: (label, err) => {
+        void this.logger.error(label, err);
+      },
+      setInterval: (fn, ms) => window.setInterval(fn, ms),
+      clearInterval: (id) => window.clearInterval(id),
+    });
+    this.intervalScheduler.start();
+    const active = this.intervalScheduler.getTimerId();
+    if (active !== null) {
+      this.syncIntervalId = active;
+      this.registerInterval(active);
     }
   }
 
@@ -758,33 +746,16 @@ export default class GitHubSyncPlugin extends Plugin {
   // opted into "sync on startup" — pushing whatever they had queued
   // last time is the obvious right thing.
   private async runStartupSync(): Promise<void> {
-    if (this.settings.autoCommitOnSync ?? false) {
-      // Behave exactly like a manual Sync click — full commit + pull
-      // + push, with notices. accumulateOfflineSyncs (if on) folds
-      // the new commit into any pending batch so the result is one
-      // combined commit on GitHub.
-      await this.sync();
-      return;
-    }
-    // Pull-only path: bring remote changes down silently, then push
-    // any commits the user had queued before this Obsidian session
-    // started. The "Commit N files" notice never fires (we don't
-    // enqueue current edits); "Syncing with GitHub…" only appears
-    // if there's actually something queued to push.
-    await this.pullOnly();
-    try {
-      await this.sync2Manager.resumeQueue();
-    } catch (err) {
-      void this.logger.error("Startup queue drain failed", `${err}`);
-    }
+    await this.intervalScheduler.runStartup();
+    // Pull may have created sibling files via ConflictStore; refresh
+    // the status-bar widget so the 🔀 indicator reflects the new
+    // pending count. The scheduler doesn't know about UI bits.
     this.refreshConflictStatusBar();
   }
 
   stopSyncInterval(): void {
-    if (this.syncIntervalId !== null) {
-      window.clearInterval(this.syncIntervalId);
-      this.syncIntervalId = null;
-    }
+    if (this.intervalScheduler) this.intervalScheduler.stop();
+    this.syncIntervalId = null;
   }
 
   restartSyncInterval(): void {

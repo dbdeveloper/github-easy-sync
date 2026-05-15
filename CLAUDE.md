@@ -6,6 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 2. Minimum code that solves the problem. Nothing speculative.
 3. Touch only what you must. Clean up only your own mess.
 4. Define success criteria. Loop until verified.
+5. Follow Occam's Razor. Keep your project simple—but don't overcomplicate it. Not sure how? Just ask!
 
 ## What this plugin is
 
