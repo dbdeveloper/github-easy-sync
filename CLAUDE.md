@@ -63,8 +63,7 @@ Releases are triggered by pushing a tag matching `[0-9].[0-9]+.[0-9]+*` (a `-bet
 
 - `syncAll(customMessage?: string)` — whole-vault sync. Click body is LOCAL-ONLY after bootstrap: `reconcileRemoteIdentity` → `bootstrapIfNeeded` (one-time when `lastSyncCommitSha === null`, O(1) skip thereafter) → `invariants.enforce` → `findChanges` → `enqueueOrMerge` → `drain()`. The drain pulls + pushes; the click returns when the batch is on disk so the user can keep editing while network catches up.
 - `syncFile(path, customMessage?)` — single-file sync, same shape as `syncAll`. Custom message → isolated batch.
-- `pullOnly()` — interval-driven background pull; suppresses conflict modals (deferral fires automatically via ConflictStore for any unresolvable pull-side conflict).
-- `resumeQueue()` — thin wrapper around `drain()`. Called from `main.ts` onload to drain any pending batches left over from a previous Obsidian session, and from the interval/watchdog timer.
+- `resumeQueue()` — thin wrapper around `drain()`. Called from `main.ts` onload to drain any pending batches left over from a previous Obsidian session, and from the interval/watchdog timer's `backgroundDrain()` wrapper (which adds `suppressConflictModals` so a pull-side conflict auto-defers instead of blocking on a modal). `drain()` already pulls at the start of each iteration, so a separate "pull-only" entry point isn't needed — drain with an empty queue is effectively pullOnly.
 - `hasPendingBatches()` — gate the watchdog uses to decide "interval OFF + queue empty → no-op".
 
 Wired in `main.ts` to four Obsidian commands: `Sync with GitHub`, `Sync with GitHub (custom message)…`, `Sync current file with GitHub`, `Sync current file with GitHub (custom message)…`.
@@ -222,7 +221,7 @@ Wired via `onLocalCommitted(count)` / `onNoLocalChanges()` callbacks. main.ts sh
 Three modes:
 
 1. **Interval enabled + autoCommitOnSync ON** — every tick + startup runs the full sync (commit + pull + push) like a manual Sync click.
-2. **Interval enabled + autoCommitOnSync OFF** — every tick + startup runs `pullOnly` + `drain`. The user's own edits stay uncommitted; only pending batches and remote changes move.
+2. **Interval enabled + autoCommitOnSync OFF** — every tick + startup runs `drain()`. drain pulls + pushes any pending batches in one cycle; with an empty queue it's effectively pull-only. The user's own edits stay uncommitted (no findChanges/enqueue inside drain).
 3. **Interval disabled (watchdog)** — tick fires `drain` ONLY when the on-disk queue has pending batches (retries pushes that failed earlier). Empty queue + interval disabled → no-op, no GitHub poll. Startup behaviour is the same as mode 2: "Sync on startup" overrides the disabled strategy for the one-shot startup pulse.
 
 Cadence: user's `syncInterval` minutes when enabled (clamped to ≥ 1); hardcoded 5 min when disabled (watchdog default). `Sync interval` default is **5 min** (lowered from 1 in the post-drain-refactor) — the typical job is "retry stuck drains in the background", not aggressive polling.
@@ -342,7 +341,7 @@ Threaded through as a live getter — `() => settings.syncConfigDir` — so flip
 
 ### Remote identity tracking
 
-The snapshot store records the `(owner, repo, branch)` triplet it was last reconciled against. `Sync2Manager.reconcileRemoteIdentity()` runs at the very start of every `syncAll`/`syncFile`/`pullOnly` — BEFORE `bootstrapIfNeeded` and `pullIfNeeded` — and compares the recorded triplet to current settings:
+The snapshot store records the `(owner, repo, branch)` triplet it was last reconciled against. `Sync2Manager.reconcileRemoteIdentity()` runs at the very start of every `syncAll`/`syncFile` — BEFORE `bootstrapIfNeeded` and `pullIfNeeded` — and compares the recorded triplet to current settings:
 
 - **First observation** (`remoteIdentity == null`, e.g. an upgrade from an older sync2 version): record current settings, don't reset. Existing `lastSync` state stays intact.
 - **Matching triplet**: no-op.

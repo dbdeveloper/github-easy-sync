@@ -458,24 +458,21 @@ export default class GitHubSyncPlugin extends Plugin {
     this.afterSync();
   }
 
-  // Silent pull — entry point for the interval timer when
-  // autoCommitOnIntervalSync is off. Conflicts that fire during the
-  // pull are auto-deferred (suppressConflictModals stays true for the
-  // whole call) so the timer never blocks waiting for a modal.
-  async pullOnly(): Promise<void> {
+  // Background drain — entry point for the interval timer when
+  // autoCommitOnSync is off. Conflicts that fire during pull are
+  // auto-deferred (suppressConflictModals stays true for the whole
+  // call) so the timer never blocks waiting for a modal. Errors are
+  // swallowed + logged because network blips during a background
+  // tick are common and shouldn't surface a toast.
+  async backgroundDrain(): Promise<void> {
     if (!this.isConfigured()) return;
     this.suppressConflictModals = true;
     this.openConflictViewAfterSync = false;
     try {
-      await this.sync2Manager.pullOnly();
+      await this.sync2Manager.resumeQueue();
     } catch (err) {
-      // Network errors during interval pull are common (offline,
-      // captive portal, GitHub down). Don't spam the user with
-      // notices — log only.
-      void this.logger.error("Interval pullOnly failed", `${err}`);
+      void this.logger.error("Interval drain failed", `${err}`);
     } finally {
-      // Reset the suppress flag so a subsequent manual click reaches
-      // the modal again.
       this.suppressConflictModals = false;
     }
     this.refreshConflictStatusBar();
@@ -722,9 +719,11 @@ export default class GitHubSyncPlugin extends Plugin {
       intervalMinutes: () => this.settings.syncInterval,
       autoCommitOnSync: () => this.settings.autoCommitOnSync ?? false,
       hasPendingBatches: () => this.sync2Manager.hasPendingBatches(),
-      drain: () => this.sync2Manager.resumeQueue(),
+      // Background drain wraps suppressConflictModals so a pull-side
+      // conflict auto-defers instead of blocking on the modal. The
+      // interval timer never wants a modal popping up under the user.
+      drain: () => this.backgroundDrain(),
       fullSync: () => this.sync(),
-      pullOnly: () => this.pullOnly(),
       logError: (label, err) => {
         void this.logger.error(label, err);
       },

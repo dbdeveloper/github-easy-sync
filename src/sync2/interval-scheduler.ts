@@ -10,16 +10,17 @@
 //      manual Sync click.
 //
 //   2. Interval-enabled + autoCommit OFF
-//      Every tick + startup: pullOnly + drain. The user's own edits
-//      stay uncommitted; only pending batches and remote changes go
-//      across.
+//      Every tick + startup: drain. drain() does pull + push of any
+//      pending batches in one cycle; with no pending batches it
+//      effectively becomes pull-only. The user's own edits stay
+//      uncommitted (no findChanges/enqueue inside drain).
 //
 //   3. Interval-disabled (syncStrategy !== "interval")
 //      Tick is a 5-min watchdog: only fires drain when the on-disk
 //      queue has pending batches (retries pushes that failed earlier).
 //      Empty queue → no-op, no GitHub poll. Startup behaviour is the
 //      same as #2: the user opted into "sync on startup" so we still
-//      pullOnly + drain to drag pending work up to date.
+//      drain to drag pending work + remote changes up to date.
 
 export interface IntervalSchedulerDeps {
   // Settings predicates. Read live so the scheduler picks up settings
@@ -35,7 +36,6 @@ export interface IntervalSchedulerDeps {
   hasPendingBatches: () => Promise<boolean>;
   drain: () => Promise<void>;
   fullSync: () => Promise<void>;
-  pullOnly: () => Promise<void>;
 
   logError: (label: string, err: string) => void;
 
@@ -118,7 +118,6 @@ export class IntervalScheduler {
       return;
     }
     try {
-      await this.deps.pullOnly();
       await this.deps.drain();
     } catch (err) {
       this.deps.logError(`${label} drain failed`, `${err}`);

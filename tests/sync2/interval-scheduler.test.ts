@@ -39,7 +39,6 @@ function makeOps() {
   let hasPendingError: Error | null = null;
   let drainError: Error | null = null;
   let fullSyncError: Error | null = null;
-  let pullOnlyError: Error | null = null;
   const errors: { label: string; err: string }[] = [];
   return {
     calls,
@@ -51,9 +50,6 @@ function makeOps() {
     },
     setFullSyncError(e: Error | null) {
       fullSyncError = e;
-    },
-    setPullOnlyError(e: Error | null) {
-      pullOnlyError = e;
     },
     setHasPendingError(e: Error | null) {
       hasPendingError = e;
@@ -72,10 +68,6 @@ function makeOps() {
       fullSync: async (): Promise<void> => {
         calls.push("fullSync");
         if (fullSyncError) throw fullSyncError;
-      },
-      pullOnly: async (): Promise<void> => {
-        calls.push("pullOnly");
-        if (pullOnlyError) throw pullOnlyError;
       },
       logError: (label: string, err: string) => {
         errors.push({ label, err });
@@ -102,7 +94,6 @@ function makeDeps(
     hasPendingBatches: ops.deps.hasPendingBatches,
     drain: ops.deps.drain,
     fullSync: ops.deps.fullSync,
-    pullOnly: ops.deps.pullOnly,
     logError: ops.deps.logError,
     setInterval: timer.setInterval,
     clearInterval: timer.clearInterval,
@@ -192,14 +183,14 @@ describe("IntervalScheduler.tick — interval ON + autoCommit ON", () => {
 });
 
 describe("IntervalScheduler.tick — interval ON + autoCommit OFF", () => {
-  it("calls pullOnly then drain", async () => {
+  it("calls drain (which pulls + pushes internally)", async () => {
     const ops = makeOps();
     const timer = fakeTimer();
     const s = new IntervalScheduler(
       makeDeps(ops, timer, { intervalEnabled: true, autoCommit: false }),
     );
     await s.tick();
-    expect(ops.calls).toEqual(["pullOnly", "drain"]);
+    expect(ops.calls).toEqual(["drain"]);
   });
 
   it("logs but doesn't throw when drain rejects", async () => {
@@ -213,18 +204,6 @@ describe("IntervalScheduler.tick — interval ON + autoCommit OFF", () => {
     expect(ops.errors).toEqual([
       { label: "Interval drain failed", err: "Error: net" },
     ]);
-  });
-
-  it("if pullOnly rejects, drain is NOT called", async () => {
-    const ops = makeOps();
-    ops.setPullOnlyError(new Error("offline"));
-    const timer = fakeTimer();
-    const s = new IntervalScheduler(
-      makeDeps(ops, timer, { intervalEnabled: true, autoCommit: false }),
-    );
-    await s.tick();
-    expect(ops.calls).toEqual(["pullOnly"]);
-    expect(ops.errors).toHaveLength(1);
   });
 });
 
@@ -293,14 +272,14 @@ describe("IntervalScheduler.runStartup", () => {
     expect(ops.calls).toEqual(["fullSync"]);
   });
 
-  it("autoCommit OFF → pullOnly then drain", async () => {
+  it("autoCommit OFF → drain (which pulls + pushes)", async () => {
     const ops = makeOps();
     const timer = fakeTimer();
     const s = new IntervalScheduler(
       makeDeps(ops, timer, { autoCommit: false }),
     );
     await s.runStartup();
-    expect(ops.calls).toEqual(["pullOnly", "drain"]);
+    expect(ops.calls).toEqual(["drain"]);
   });
 
   it("startup ignores intervalEnabled (always fullCycle, no watchdog)", async () => {
@@ -314,7 +293,7 @@ describe("IntervalScheduler.runStartup", () => {
       }),
     );
     await s.runStartup();
-    expect(ops.calls).toEqual(["pullOnly", "drain"]);
+    expect(ops.calls).toEqual(["drain"]);
   });
 
   it("unconfigured plugin → runStartup is a no-op", async () => {

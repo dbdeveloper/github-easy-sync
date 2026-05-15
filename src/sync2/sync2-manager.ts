@@ -301,7 +301,7 @@ export class Sync2Manager {
   // Accumulator for the pull-side phases (bootstrapFromRemote +
   // pullIfNeeded) so onSyncCompleted can report how many files
   // actually came down from the remote. Reset at the start of each
-  // syncAll/syncFile/pullOnly; only counts real vault mutations
+  // syncAll/syncFile; only counts real vault mutations
   // (no identical-SHA noops).
   private pulledFilesThisSync = 0;
   private readonly remoteIdentity: (() => RemoteIdentity) | undefined;
@@ -518,31 +518,6 @@ export class Sync2Manager {
   async hasPendingBatches(): Promise<boolean> {
     const ids = await this.queue.list();
     return ids.length > 0;
-  }
-
-  // Pull-only entry point for interval-driven background syncs (when
-  // autoCommitOnIntervalSync is off). Brings the local vault up to
-  // date with the remote — bootstrap-from-remote on a fresh device,
-  // applyRemoteAddOrModify/applyRemoteDeletion for diverging files —
-  // but DELIBERATELY skips:
-  //   - invariants.enforce (no mass rewrite of `.gitignore`s on a
-  //     timer; reserved for explicit Sync clicks)
-  //   - findChanges + enqueueOrMerge + drain (no commits)
-  //
-  // Conflicts surfaced during pull behave as if the user had clicked
-  // "Later": the sibling file is created, the 🔀 status-bar widget
-  // ticks up, and the path is excluded from any future push until
-  // the user resolves it. main.ts achieves this by setting its
-  // suppressConflictModals flag before calling pullOnly().
-  async pullOnly(): Promise<void> {
-    await this.logger.info("Sync2 pullOnly start");
-    await this.reconcileRemoteIdentity();
-    const headAfterBootstrap = await this.bootstrapIfNeeded();
-    if (headAfterBootstrap === null) {
-      await this.pullIfNeeded();
-    }
-    await this.store.save();
-    await this.logger.info("Sync2 pullOnly done");
   }
 
   // ── internal ────────────────────────────────────────────────────────
@@ -1539,7 +1514,7 @@ export class Sync2Manager {
       // their vault changed. Push-only syncs use the plain "Sync done"
       // — the user already saw "Commit N files" at click time and
       // their vault didn't get modified by sync. Counter resets at the
-      // start of every syncAll/syncFile/pullOnly (pulledFilesThisSync).
+      // start of every syncAll/syncFile (pulledFilesThisSync).
       const drainDidWork =
         pushedAnyBatch || this.pulledFilesThisSync > 0;
       const doneMessage =
