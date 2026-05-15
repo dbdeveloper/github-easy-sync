@@ -255,9 +255,17 @@ export class DiffPane {
   // theme telling them to fill the parent they collapse on empty /
   // short docs. Apply at the per-editor level so it's effective for
   // both halves of the MergeView and the unified single-editor.
+  //
+  // The chain matters for scrolling: the flex column in
+  // DiffPane.container gives `.cm-mergeView` (or unified `.cm-editor`)
+  // `flex: 1` height. We then need each `.cm-editor` to be 100% of
+  // its parent and its `.cm-scroller` to scroll within that. The
+  // explicit `height: 100%` on `.cm-scroller` is what makes it
+  // smaller than its content (and therefore scrollable) when the
+  // doc is taller than the viewport.
   private fillParentTheme = EditorView.theme({
     "&": { height: "100%" },
-    ".cm-scroller": { overflow: "auto" },
+    ".cm-scroller": { overflow: "auto", height: "100%" },
   });
 
   private renderSideBySide(): void {

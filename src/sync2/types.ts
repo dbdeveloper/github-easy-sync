@@ -86,6 +86,14 @@ export type QueueBatch = {
   // Cleared implicitly when the batch dir is deleted on commit
   // success — staleness is impossible by construction.
   uploadedBlobs: Record<string, string>;
+  // mtime per snapshotted file, captured at enqueue time BEFORE
+  // copyFileFromVault's canonical-write-back can bump the live vault
+  // file's mtime. Reconcile uses this as the local-side timestamp
+  // for binary/plugin-js atomic resolution — using the live mtime
+  // instead would silently flip the answer toward "local wins" any
+  // time canonicalization rewrote the file. Empty for batches that
+  // predate this field (defensive — caller falls back to 0).
+  fileMtimes: Record<string, number>;
 };
 
 // Outcome of a 3-way merge attempt.

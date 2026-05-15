@@ -1811,6 +1811,14 @@ export class Sync2Manager {
         continue;
       }
 
+      // Remote no longer has this path at currentHead (deleted by
+      // another device, or never existed) → no overlap to resolve.
+      // The batch's version of the file pushes through normally on
+      // the next step (resurrection on the remote).
+      if (theirsFetched === null) {
+        continue;
+      }
+
       if (!hasTextExtension(path)) {
         // Binary overlap: atomic mtime. Same shape as pull-side
         // resolveBinaryConflict, but the loser ALSO drops out of this
@@ -1822,8 +1830,11 @@ export class Sync2Manager {
         }
         const headCommit = await getHeadCommit();
         const remoteMs = Date.parse(headCommit.committer.date);
-        const stat = await this.vault.adapter.stat(path);
-        const localMs = stat?.mtime ?? 0;
+        // Use the mtime captured at enqueue time, not the live vault
+        // mtime — enqueue's canonical-write-back can bump live mtime
+        // even when the user's edit is older, which would flip mtime
+        // resolution the wrong way.
+        const localMs = batch.fileMtimes?.[path] ?? 0;
         if (!Number.isNaN(remoteMs) && remoteMs > localMs) {
           // Remote newer → apply remote bytes to live vault, drop path
           // from batch.
@@ -1850,9 +1861,30 @@ export class Sync2Manager {
         let remoteSemver: string | null = null;
         if (root !== null) {
           const manifestPath = `${root}/manifest.json`;
-          if (await this.vault.adapter.exists(manifestPath)) {
-            const text = await this.vault.adapter.read(manifestPath);
-            localSemver = readPluginVersion(text);
+          // Read the local-side manifest as it WAS at click time, not
+          // what's currently in the live vault — pull may have just
+          // overwritten the live manifest with the remote version,
+          // which would make localSemver == remoteSemver and silently
+          // flip resolution. Two cases:
+          //   - User bumped the manifest themselves (it's in this
+          //     batch): use the batch's snapshot.
+          //   - Otherwise: fetch from baseRef (lastSync) — the
+          //     version the user was effectively on.
+          if (batch.files.includes(manifestPath)) {
+            const buf = await this.queue.readFile(batchId, manifestPath);
+            localSemver = readPluginVersion(
+              new TextDecoder().decode(buf),
+            );
+          } else {
+            const baseManifestBlob = await this.safeFetchContents(
+              manifestPath,
+              expectedHead,
+            );
+            if (baseManifestBlob) {
+              localSemver = readPluginVersion(
+                decodeBase64String(baseManifestBlob.content),
+              );
+            }
           }
           const remoteManifestBlob = await this.safeFetchContents(
             manifestPath,
@@ -1874,8 +1906,7 @@ export class Sync2Manager {
         if (remoteWins === null) {
           const headCommit = await getHeadCommit();
           const remoteMs = Date.parse(headCommit.committer.date);
-          const stat = await this.vault.adapter.stat(path);
-          const localMs = stat?.mtime ?? 0;
+          const localMs = batch.fileMtimes?.[path] ?? 0;
           remoteWins =
             !Number.isNaN(remoteMs) && remoteMs > localMs;
         }
@@ -1965,6 +1996,17 @@ export class Sync2Manager {
 
     if (resolvedPerPath.size > 0) {
       await this.cascadeRebase(batchId, resolvedPerPath);
+    }
+
+    // Filter batch.deletions: drop entries whose target file no longer
+    // exists at currentHead (e.g., another device already deleted the
+    // same file). createTree returns 422 if asked to delete a path
+    // that's not in base_tree, so we strip those deletions here.
+    for (const path of batch.deletions) {
+      const theirs = await this.safeFetchContents(path, currentHead);
+      if (theirs === null) {
+        await this.queue.removeDeletion(batchId, path);
+      }
     }
 
     // Re-target the batch onto the current head so the next step in

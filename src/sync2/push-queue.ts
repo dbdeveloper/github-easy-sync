@@ -98,23 +98,29 @@ export default class PushQueue {
     await this.ensureDir(batchDir);
     await this.ensureDir(`${batchDir}/${VAULT_SUBDIR}`);
 
+    const deletions: string[] = [];
+    const fileMtimes: Record<string, number> = {};
+    for (const c of changes) {
+      if (c.kind === "deleted") {
+        deletions.push(c.path);
+        continue;
+      }
+      // Capture mtime BEFORE copyFileFromVault, which may rewrite the
+      // live vault file (canonical-text writeback) and bump mtime.
+      const stat = await this.vault.adapter.stat(c.path);
+      if (stat) fileMtimes[c.path] = stat.mtime;
+      // added or modified: snapshot the current contents into the batch.
+      await this.copyFileFromVault(c.path, batchDir);
+    }
+
     await this.writeMeta(batchDir, {
       commitMessage: meta.commitMessage,
       parentCommitSha: meta.parentCommitSha,
       parentTreeSha: meta.parentTreeSha,
       createdAt: Date.now(),
       isolated: meta.isolated ?? false,
+      fileMtimes,
     });
-
-    const deletions: string[] = [];
-    for (const c of changes) {
-      if (c.kind === "deleted") {
-        deletions.push(c.path);
-        continue;
-      }
-      // added or modified: snapshot the current contents into the batch.
-      await this.copyFileFromVault(c.path, batchDir);
-    }
     if (deletions.length > 0) {
       await this.vault.adapter.write(
         `${batchDir}/${DELETIONS_FILE}`,
@@ -158,6 +164,7 @@ export default class PushQueue {
       deletions,
       uploadedBlobs: meta.uploadedBlobs,
       isolated: meta.isolated,
+      fileMtimes: meta.fileMtimes,
     };
   }
 
@@ -233,6 +240,8 @@ export default class PushQueue {
         parentTreeSha: meta.parentTreeSha,
         createdAt: meta.createdAt,
         uploadedBlobs: updated,
+        isolated: meta.isolated,
+        fileMtimes: meta.fileMtimes,
       });
     });
     // Swallow errors on the chained queue value (so one failure
@@ -410,6 +419,26 @@ export default class PushQueue {
     await this.removeBatchFile(`${this.queueRoot}/${id}`, path);
   }
 
+  // Drop a path from this batch's deletion list. Used by reconcile to
+  // strip a deletion entry whose target already vanished on remote
+  // (another device deleted the same file between batch enqueue and
+  // push). Without this, GitHub's createTree returns 422 because you
+  // can't delete a path that isn't in the base_tree anymore.
+  async removeDeletion(id: string, path: string): Promise<void> {
+    const batchDir = `${this.queueRoot}/${id}`;
+    const file = `${batchDir}/${DELETIONS_FILE}`;
+    if (!(await this.vault.adapter.exists(file))) return;
+    const text = await this.vault.adapter.read(file);
+    const remaining = text
+      .split("\n")
+      .filter((line) => line.length > 0 && line !== path);
+    if (remaining.length === 0) {
+      await this.vault.adapter.remove(file);
+    } else {
+      await this.vault.adapter.write(file, remaining.join("\n") + "\n");
+    }
+  }
+
   async overwriteFile(
     id: string,
     path: string,
@@ -518,12 +547,14 @@ export default class PushQueue {
       createdAt: number;
       uploadedBlobs?: Record<string, string>;
       isolated?: boolean;
+      fileMtimes?: Record<string, number>;
     },
   ): Promise<void> {
     const out = {
       ...meta,
       uploadedBlobs: meta.uploadedBlobs ?? {},
       isolated: meta.isolated ?? false,
+      fileMtimes: meta.fileMtimes ?? {},
     };
     await this.vault.adapter.write(
       `${batchDir}/${META_FILE}`,
@@ -538,6 +569,7 @@ export default class PushQueue {
     createdAt: number;
     uploadedBlobs: Record<string, string>;
     isolated: boolean;
+    fileMtimes: Record<string, number>;
   }> {
     const text = await this.vault.adapter.read(`${batchDir}/${META_FILE}`);
     const raw = JSON.parse(text) as Record<string, unknown>;
@@ -551,6 +583,13 @@ export default class PushQueue {
         if (typeof sha === "string") uploadedBlobs[path] = sha;
       }
     }
+    let fileMtimes: Record<string, number> = {};
+    if (raw.fileMtimes && typeof raw.fileMtimes === "object") {
+      const candidate = raw.fileMtimes as Record<string, unknown>;
+      for (const [path, mtime] of Object.entries(candidate)) {
+        if (typeof mtime === "number") fileMtimes[path] = mtime;
+      }
+    }
     return {
       commitMessage:
         typeof raw.commitMessage === "string" ? raw.commitMessage : "",
@@ -561,6 +600,7 @@ export default class PushQueue {
       createdAt: typeof raw.createdAt === "number" ? raw.createdAt : 0,
       uploadedBlobs,
       isolated: raw.isolated === true,
+      fileMtimes,
     };
   }
 
