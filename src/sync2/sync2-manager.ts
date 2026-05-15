@@ -1998,15 +1998,93 @@ export class Sync2Manager {
       await this.cascadeRebase(batchId, resolvedPerPath);
     }
 
-    // Filter batch.deletions: drop entries whose target file no longer
-    // exists at currentHead (e.g., another device already deleted the
-    // same file). createTree returns 422 if asked to delete a path
-    // that's not in base_tree, so we strip those deletions here.
+    // Reconcile batch.deletions against the current remote head:
+    //   - Remote already deleted (theirs === null at currentHead):
+    //     drop the redundant deletion (createTree would 422 on a
+    //     deletion not in base_tree).
+    //   - Remote unchanged since baseRef (same SHA): deletion stands,
+    //     nothing to resolve — push will land it.
+    //   - Remote MODIFIED since baseRef: surface as a conflict. The
+    //     user picks what wins: keep delete, keep remote, free-form
+    //     merge, or defer (sibling file). Binary deletions stay
+    //     delete-wins for now — a 3-way merge against empty ours has
+    //     no useful UI for binary.
     for (const path of batch.deletions) {
       const theirs = await this.safeFetchContents(path, currentHead);
       if (theirs === null) {
         await this.queue.removeDeletion(batchId, path);
+        continue;
       }
+      const base = await this.safeFetchContents(path, expectedHead);
+      if (base !== null && base.sha === theirs.sha) {
+        // Remote unchanged → deletion proceeds untouched.
+        continue;
+      }
+      if (!hasTextExtension(path)) {
+        // Binary delete-vs-modify: no meaningful merge. Keep
+        // delete-wins for now.
+        continue;
+      }
+      const baseContent = base ? decodeBase64String(base.content) : "";
+      const theirsContent = decodeBase64String(theirs.content);
+      const merge = mergeText("", baseContent, theirsContent);
+      let resolved: string;
+      if (merge.kind === "clean") {
+        resolved = merge.content;
+      } else {
+        const decision = await this.onConflict({
+          path,
+          ours: "",
+          base: baseContent,
+          theirs: theirsContent,
+          conflictMarkedContent: merge.conflictMarkedContent,
+        });
+        if (decision.kind === "deferred") {
+          if (!this.conflictStore) {
+            throw new Error(
+              "Sync2 conflict deferral requested but no ConflictStore is wired",
+            );
+          }
+          let theirsAuthor = "unknown";
+          try {
+            const headCommit = await this.client.getCommit({
+              sha: currentHead,
+              retry: true,
+            });
+            theirsAuthor = parseDeviceSuffix(headCommit.message);
+          } catch {
+            // network / 404 — keep "unknown"
+          }
+          await this.conflictStore.create({
+            vaultPath: path,
+            baseContent,
+            theirsContent,
+            baseCommitSha: expectedHead,
+            theirsBlobSha: theirs.sha,
+            theirsAuthor,
+          });
+          await this.queue.removeDeletion(batchId, path);
+          await this.cascadeDeferRemoval(batchId, path);
+          await this.logger.info(
+            "Sync2 reconcile delete-vs-modify deferred via sibling file",
+            { path },
+          );
+          continue;
+        }
+        resolved = decision.content;
+      }
+      if (resolved === "") {
+        // User confirmed the deletion — keep batch.deletions as is.
+        continue;
+      }
+      // User chose to restore the file with `resolved` content. Drop
+      // the deletion from this batch, snapshot the resolved bytes
+      // into the batch's file set, and reflect them in the live
+      // vault.
+      await this.queue.removeDeletion(batchId, path);
+      const buf = new TextEncoder().encode(resolved).buffer as ArrayBuffer;
+      await this.queue.overwriteFile(batchId, path, buf);
+      await this.writeRemoteText(path, resolved);
     }
 
     // Re-target the batch onto the current head so the next step in
