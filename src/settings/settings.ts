@@ -1,4 +1,4 @@
-// Plugin settings shape. Pure sync2 after the Etap 7 cutover —
+// Plugin settings shape. Pure sync2 after the Stage 7 cutover —
 // legacy fields (firstSync, deviceName, conflictHandling,
 // conflictViewMode, keepPluginConflictCopy, syncConfigDir,
 // experimentalSync2, showConflictsRibbonButton) are no longer

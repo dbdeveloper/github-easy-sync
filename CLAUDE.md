@@ -16,9 +16,11 @@ This branch (`init-state-machine-refactoring`) sits 30+ commits ahead of upstrea
 
 Behaviour described below is shaped first by an A→E manual test sweep, then locked in by the integration tests (`pnpm test:integration`). Test series A–K each correspond to a different concern — bootstrap, adoption, resume, incremental, atomic conflicts, special chars, multi-device stress, out-of-band drift, settings lifecycle, auth/API failures, manifest corruption. The conflict view UX is the one area still openly known to be primitive; everything else is intentional.
 
-## Active engine: sync2 (Etap 7 cutover landed)
+## Active engine: sync2 (post-Stage 7 + drain refactor)
 
-The plugin is now driven by **sync2** (`src/sync2/`). The legacy `SyncManager`, `events-listener`, `decideInitAction`, and chunk-pick conflict view are **gone from src/** (see `main.ts:42` comment). The plugin id is unchanged (`github-gitless-sync`); only the engine swapped.
+The plugin is driven by **sync2** (`src/sync2/`). Legacy `SyncManager`, `events-listener`, `decideInitAction`, chunk-pick conflict view — **gone from src/**. Plugin id unchanged (`github-gitless-sync`).
+
+The drain refactor that landed on top of the Stage 7 cutover moved network I/O out of the click path: clicks now write to `.push-queue/` synchronously and return, while pull + push run inside a separate `drain()` runner that can also be triggered by the interval timer or onload. Per-file SHA-skip resume extends to incremental pull. Reconcile picks up binary atomic mtime + plugin-js semver + delete-vs-modify conflict. Progress notice is lazy-opened (bytes-based threshold). "Sync done" finale replaces Pull/Push text on the same handle. Interval timer + watchdog merged. Settings: per-file canonicalization toggle, default sync interval 5 min. Delete-vs-modify now surfaces as a conflict instead of silent delete-wins.
 
 ## Headline design intent
 
@@ -43,9 +45,9 @@ Package manager is **pnpm** (CI uses `pnpm@latest-10`).
 
 - `pnpm dev` — esbuild watch mode, emits `main.js` with inline sourcemaps. Set `OBSIDIAN_PLUGIN_DIR` env var to also mirror `main.js` / `manifest.json` / `styles.css` into a vault's plugin folder on every successful build (paths starting with `~/` are expanded). On macOS, IDE-set env vars don't pass through shell expansion — the config does that itself.
 - `pnpm build` — typecheck (`tsc -noEmit`) then production bundle. Run before committing; CI runs the same on tag pushes.
-- `pnpm test` — vitest, runs once and exits. ~76 unit tests covering pure helpers (isSyncable, classifyForConflict, decideInitAction's full decision table, GitignoreCache helpers, MetadataStore.load() invariants, etc.). Mocks the `obsidian` module via `vitest.config.ts` alias to `mock-obsidian.ts`.
+- `pnpm test` — vitest, runs once and exits. 433 unit tests across 18 spec files covering pure helpers (isSyncable, classifyForConflict, GitignoreCache helpers, IntervalScheduler decision tree, etc.) and the orchestrator under a fake client. Mocks the `obsidian` module via `vitest.config.ts` alias to `mock-obsidian.ts`. ~6 s wall-clock.
 - `pnpm test:watch` — vitest watch mode.
-- `pnpm test:integration` — full integration suite (46 tests, ~9 min end-to-end). Real GitHub round-trips via the fine-grained PAT against the private int-test repo. See "Testing" below for the env vars and layout.
+- `pnpm test:integration` — full integration suite (105 tests, ~19 min end-to-end). Real GitHub round-trips via the fine-grained PAT against the private int-test repo. Includes bootstrap (A1/A2 + 10-iter stress). See "Testing" below for env vars and layout.
 - `pnpm test:integration:bootstrap` — bootstrap suite only (uses the public ephemeral repo, classic PAT). Slow because each test deletes + recreates the repo.
 - `pnpm test:integration:nonbootstrap` — everything except bootstrap. Cheaper because branch-per-test on the persistent int-test repo.
 - `pnpm test:perf` — opt-in performance baselines under `tests/perf/`. Not part of CI; emits structured `PERF_BASELINE {…}` lines on stdout. See "Testing" below.
@@ -53,17 +55,42 @@ Package manager is **pnpm** (CI uses `pnpm@latest-10`).
 
 Releases are triggered by pushing a tag matching `[0-9].[0-9]+.[0-9]+*` (a `-beta` suffix cuts a prerelease); `version-bump.mjs` syncs `manifest.json` and `versions.json` from `package.json`.
 
-## Sync2 architecture (post-Etap 7)
+## Sync2 architecture (post-Stage 7)
 
 ### Entry points
 
-`Sync2Manager` is the only orchestrator. Three top-level public methods, all idempotent; `processQueue` is guarded by a `running` flag so concurrent calls don't double-drain:
+`Sync2Manager` is the only orchestrator. Public methods, all idempotent; `drain` is guarded by a `running` flag so concurrent calls don't double-process:
 
-- `syncAll(customMessage?: string)` — whole-vault sync. Without `customMessage`: standard template-driven commit. With: an **isolated** batch using the user's typed message verbatim.
-- `syncFile(path, customMessage?)` — single-file sync. Same custom-message split.
-- `pullOnly()` — interval-driven background pull; suppresses conflict modals (any conflict defers to the next manual sync).
+- `syncAll(customMessage?: string)` — whole-vault sync. Click body is LOCAL-ONLY after bootstrap: `reconcileRemoteIdentity` → `bootstrapIfNeeded` (one-time when `lastSyncCommitSha === null`, O(1) skip thereafter) → `invariants.enforce` → `findChanges` → `enqueueOrMerge` → `drain()`. The drain pulls + pushes; the click returns when the batch is on disk so the user can keep editing while network catches up.
+- `syncFile(path, customMessage?)` — single-file sync, same shape as `syncAll`. Custom message → isolated batch.
+- `pullOnly()` — interval-driven background pull; suppresses conflict modals (deferral fires automatically via ConflictStore for any unresolvable pull-side conflict).
+- `resumeQueue()` — thin wrapper around `drain()`. Called from `main.ts` onload to drain any pending batches left over from a previous Obsidian session, and from the interval/watchdog timer.
+- `hasPendingBatches()` — gate the watchdog uses to decide "interval OFF + queue empty → no-op".
 
 Wired in `main.ts` to four Obsidian commands: `Sync with GitHub`, `Sync with GitHub (custom message)…`, `Sync current file with GitHub`, `Sync current file with GitHub (custom message)…`.
+
+### Drain runner (`drain()`)
+
+`drain()` is the network worker. One pass per pending batch:
+
+```
+while (true) {
+  await pullIfNeeded(progress?)        ← apply remote changes since lastSync
+  ids = await queue.list()
+  if (ids.length === 0) break          ← queue empty, done
+  // Lazy-open the long-lived progress notice iff this batch's push is
+  // heavy (estimateBatchBytes > PROGRESS_BYTES_THRESHOLD, default 500 KB).
+  await processBatch(ids[0], headHint, progress?, …)
+}
+// Finale: if progress was opened, transition same handle to "Sync done"
+// + auto-hide 1 s. If not opened but drain did real work (pulled >0
+// files OR pushed >0 batches), open a brand-new brief 1-s "Sync done".
+// Genuine no-op drains stay silent.
+```
+
+The `running` boolean prevents re-entry; new batches enqueued mid-drain land on disk and the active drain picks them up on its next `queue.list()` iteration. A failed batch (`.attempted` marker survives) is retried on the next trigger (next click / interval tick / onload).
+
+Pull and push are interleaved per batch so each push lands on the freshest possible HEAD: even if a prior batch in the same drain advanced HEAD itself, the next iteration's pull re-syncs against that before computing the next batch's tree.
 
 ### Polling model (NOT event-driven)
 
@@ -93,6 +120,7 @@ Located at `<configDir>/plugins/github-gitless-sync/.push-queue/`. Each pending 
 - `createdAt` — local clock at enqueue.
 - `uploadedBlobs: Record<path, sha>` — paths whose `createBlob` succeeded in a prior attempt. TreeBuilder consults this map before re-uploading.
 - `isolated: boolean` — true for custom-message batches; blocks merge in either direction.
+- `fileMtimes: Record<path, mtime>` — per-file mtime captured at enqueue BEFORE `copyFileFromVault`'s canonical-text writeback can bump live mtime. Reconcile's binary/plugin-js atomic resolution uses this — otherwise the canonicalize-write-back path would silently flip every mtime tie toward "local wins" and break E3/E4-shaped scenarios.
 
 **Marker semantics:**
 - `.in-progress` set at start of `processBatch`, cleared on success (via `delete(id)`) OR failure (via `clearInProgress`).
@@ -130,27 +158,88 @@ Covered by `tests/integration/scenarios/sync2/bootstrap/sync2-bare-repo.test.ts`
 
 If you extend retry for a specific method, prefer using/extending `isWriteRetriableStatus` over inline 409 handling — keeps the "reads stay immediate" invariant intact.
 
-### Resume strategies (three layers)
+### Resume strategies (four layers)
 
-1. **Pull-side resume** (`bootstrapFromRemote`): the per-file loop skips `getBlob` when the local file exists with the SHA the tree announces. A bootstrap that crashed after 6 of 50 files re-runs and only fetches 7–50.
+1. **Pull-side resume (adoption)** (`bootstrapFromRemote`): per-file loop skips `getBlob` when the local file already has the SHA the tree announces. A bootstrap that crashed after 6 of 50 files re-runs and only fetches 7–50.
 
-2. **Push-side resume** (`tree-builder.ts` + `PushQueue.uploadedBlobs`): after each `createBlob` success, TreeBuilder calls `queue.recordBlobUpload(id, path, sha)`. On retry of the same batch, paths in `uploadedBlobs` skip the `createBlob` call and use the cached SHA inline. Serialized through `metaWriteQueue` so `Promise.allSettled` callbacks don't clobber each other.
+2. **Pull-side resume (incremental)** (`pullIfNeeded`): mirrors layer 1 for normal pulls. Before each `getBlob` round-trip, hashes the live file and compares to `f.sha` from `compare`; on match, skips the fetch + apply path and just stat-caches the snapshot. Drain that crashed after 45 of 50 file applies re-runs and only does the remaining 5.
 
-3. **findChanges-vs-queue bridge** (`change-detector.ts:findChanges`): before emitting "added"/"modified", consults `queue.peekPathSha(path)`. If a pending batch already holds this path with the local-computed SHA, **skip emit**. This is what stops "second sync after a crash" from creating a duplicate batch — regardless of the `accumulateOfflineSyncs` setting. The matching path stays in B1 until B1 commits.
+3. **Push-side resume** (`tree-builder.ts` + `PushQueue.uploadedBlobs`): after each `createBlob` success, TreeBuilder calls `queue.recordBlobUpload(id, path, sha)`. On retry of the same batch, paths in `uploadedBlobs` skip the `createBlob` call and use the cached SHA inline. Serialized through `metaWriteQueue` so `Promise.allSettled` callbacks don't clobber each other.
+
+4. **findChanges-vs-queue bridge** (`change-detector.ts:findChanges`): before emitting "added"/"modified", consults `queue.peekPathSha(path)`. If a pending batch already holds this path with the local-computed SHA, **skip emit**. This is what stops "second sync after a crash" from creating a duplicate batch — regardless of the `accumulateOfflineSyncs` setting. The matching path stays in B1 until B1 commits.
 
 ### Conflict resolution
 
-`applyRemoteAddOrModify` dispatches by path shape:
+Conflict resolution fires from two contexts that share the same per-type dispatch logic:
+
+**Pull-side: `applyRemoteAddOrModify`** — for paths that changed remotely but are NOT in any pending batch. Reads "ours" from the live vault; writes resolution to the live vault.
+
+**Push-side: `reconcileBatchAgainstHead`** — for paths in `batch.files` where remote moved (Case 4 in `processBatch`). Reads "ours" from the batch's snapshot in `.push-queue/<id>/vault/`; writes resolution to that snapshot + mirrors to the live vault. The push-side path was originally text-only; the drain refactor extended it to the same binary/plugin-js/text dispatch as pull-side.
+
+Dispatch by path shape (used by BOTH contexts):
 
 | Path shape | Path examples | Resolution |
 |---|---|---|
-| Non-text | `*.png`, `*.pdf`, etc. | `resolveBinaryConflict` — atomic mtime, tie → local |
-| Plugin file | `<configDir>/plugins/<id>/main.js` OR `…/manifest.json` (any depth) | `resolvePluginJsConflict` — semver from plugin's `manifest.json`, fallback to mtime on tie/parse-fail |
-| Other text | everything else with `hasTextExtension(path)` | 3-way merge against `expectedHead`; conflict → `onConflict` callback |
+| Non-text | `*.png`, `*.pdf`, etc. | `resolveBinaryConflict` — atomic mtime, tie → local. Reconcile uses `batch.fileMtimes[path]` for the local-side mtime (capture-pre-canonicalize). |
+| Plugin file | `<configDir>/plugins/<id>/main.js` OR `…/manifest.json` (any depth) | `resolvePluginJsConflict` — semver from the plugin's `manifest.json`, fallback to mtime on tie/parse-fail. Reconcile reads local manifest from the BATCH snapshot when the batch carries `manifest.json`, else from baseRef (lastSync) — never from the live vault, which pull may have just overwritten. |
+| Other text | everything else with `hasTextExtension(path)` | 3-way merge against `expectedHead`; conflict → `onConflict` callback. Deferred decisions create sibling files via ConflictStore. |
+| Local-deleted vs remote-modified | path in `batch.deletions` + remote modified the same path | NEW (post-drain-refactor) — fires conflict resolution. `ours = ""` (the deletion), `theirs = remote bytes`. User picks: resolved with empty content → keep delete; resolved with content → restore file with that content (deletion dropped, batch gains a file entry to push); deferred → sibling file + ConflictStore + cascade. Binary delete-vs-modify keeps the silent delete-wins for now (no useful UI for 3-way against empty ours on binary). |
 
 `isAtomicPluginFile(path, configDir)` (in `src/sync2/plugin-js.ts`) is the gate for the plugin-file branch. **Only `.js` AND `manifest.json` under a plugin folder match**; `styles.css`, README files, etc. go through standard text 3-way merge.
 
-**Pull defers to push-side reconcile for queue-overlap paths**: `pullIfNeeded` skips `applyRemoteAddOrModify` for any path mentioned in a pending batch, and **withholds the `lastSync` advancement** so `processBatch`'s Case 4 (`reconcileBatchAgainstHead`) runs the 3-way merge against the **batch's snapshot** instead of the live vault. Without this bridge, the batch would push its stale snapshot on top of the merged remote, losing the merge result (covered by C3 test).
+**Pull defers to push-side reconcile for queue-overlap paths**: `pullIfNeeded` skips `applyRemoteAddOrModify` for any path mentioned in a pending batch (`queue.collectAllPaths()` — covers both `batch.files` and `batch.deletions`) and **withholds the `lastSync` advancement** so `processBatch`'s Case 4 (`reconcileBatchAgainstHead`) runs the resolution against the **batch's snapshot** instead of the live vault. Pinned by C3.
+
+**ConflictStore dedup at create()**: identical `(vaultPath, theirsBlobSha)` is deduplicated — if a record already holds this exact remote version for this path, `create()` returns it instead of spawning a duplicate. Guards against drain loops that re-encounter the same compare result mid-cycle (pull's queuedPaths-defer in iter 1 + reconcile defer + iter 2 pull re-firing on the same unchanged remote head). Different `theirsBlobSha` still spawns new records — multi-copy semantics intact.
+
+**`cascadeDeferRemoval`**: a path the user just deferred in reconcile also drops out of every subsequent queued batch (from the current one onwards). The current batch's removal is left to processBatch's empty-batch-skip (so reconcile's post-resolve `updateMeta` can still run against an intact dir); later batches are deleted immediately if they become empty after the cascade.
+
+**ConflictStore orphan cleanup at load()**: on every `load()`, for each indexed record, the store verifies the sibling file still exists. Missing sibling → treat the conflict as implicitly resolved (rmdir the `.conflicts/<id>/` folder, skip indexing). Handles "user deleted the sibling via vim/cli while Obsidian was closed" without leaving the record forever stuck filtering the path out of every push.
+
+### Lazy progress notice + Sync done finale (UX contract)
+
+Notice handling is split across two independent handles so the click feels instant on idle vaults and detailed on heavy syncs:
+
+**Click-time brief flashes** (independent `Notice`, ~700 ms auto-hide):
+- Local commit succeeded with N changes → "Commit N files" (or "Commit 1 file")
+- findChanges empty AND queue empty → "No changes"
+
+Wired via `onLocalCommitted(count)` / `onNoLocalChanges()` callbacks. main.ts shows the toast; tests pass spies.
+
+**Drain-level long-lived handle** (`onProgress`), opened LAZILY:
+- Pull is "heavy" iff total tree size of syncable changes > `PROGRESS_BYTES_THRESHOLD` (default 500 KB; tunable via `Sync2ManagerDeps.progressBytesThreshold` — tests pass 0 to force-open).
+- Push is "heavy" iff `estimateBatchBytes(id) > PROGRESS_BYTES_THRESHOLD`.
+- Single-file heavy phase: "Pull file from GitHub…" / "Push to GitHub…". Multi-file heavy: "Pull N/M files from GitHub" / `Push X/N…` with the tree-builder hooks ticking the counter.
+- Drain finale: queue empty → if the long-lived handle was opened anywhere during the run, update its text to **"Sync done"** (or "Sync done (N files updated from GitHub)" when `pulledFilesThisSync > 0`) and `setTimeout(hide, 1000)`. Single handle, smooth transition, no flicker. When the handle was never opened but drain did real work (pulled OR pushed), a brand-new 1-s "Sync done" briefly flashes. True no-op drains stay silent — `onNoLocalChanges` already covered the click.
+
+`pulledFilesThisSync` is the user-visible "vault was changed by sync" counter. Bumps at every local-mutation site inside the drain: pull's applyRemoteDeletion + applyRemoteAddOrModify, every ConflictStore.create (sibling file landed in the vault).
+
+`onSyncCompleted({pushedFiles, pulledFiles})` is now an observability hook only — kept on the deps surface for tests + future wiring but main.ts treats it as a no-op since the drain itself owns the visible "Sync done".
+
+### IntervalScheduler
+
+`src/sync2/interval-scheduler.ts` owns the periodic timer + startup orchestration. Lives outside `main.ts` so all three decision branches are unit-testable (`tests/sync2/interval-scheduler.test.ts`, 21 cases with an injected fake-timer).
+
+Three modes:
+
+1. **Interval enabled + autoCommitOnSync ON** — every tick + startup runs the full sync (commit + pull + push) like a manual Sync click.
+2. **Interval enabled + autoCommitOnSync OFF** — every tick + startup runs `pullOnly` + `drain`. The user's own edits stay uncommitted; only pending batches and remote changes move.
+3. **Interval disabled (watchdog)** — tick fires `drain` ONLY when the on-disk queue has pending batches (retries pushes that failed earlier). Empty queue + interval disabled → no-op, no GitHub poll. Startup behaviour is the same as mode 2: "Sync on startup" overrides the disabled strategy for the one-shot startup pulse.
+
+Cadence: user's `syncInterval` minutes when enabled (clamped to ≥ 1); hardcoded 5 min when disabled (watchdog default). `Sync interval` default is **5 min** (lowered from 1 in the post-drain-refactor) — the typical job is "retry stuck drains in the background", not aggressive polling.
+
+`IntervalScheduler.getTimerId()` exposes the live Window.setInterval handle so `main.ts` can pass it to Obsidian's `registerInterval()` for the plugin-unload cleanup hook.
+
+### Text canonicalization toggle (`autoCanonicalizeTextFiles`)
+
+Default `true`. Text files (per `hasTextExtension`) get rewritten locally to LF / no-BOM / trailing-NL on both pull (after fetching from GitHub) and on enqueue (before snapshotting into the batch). The toggle gates:
+
+1. `Sync2Manager.writeRemoteText` — pull-side normalization. When off, raw bytes are written verbatim, `canonicalSha === blob.sha`, `changed = false`, so the snapshot lands a recordSync on first pass.
+2. `PushQueue.copyFileFromVault` — enqueue-time normalization of the user's edits. When off, the live vault file is NOT rewritten and bytes go to the batch verbatim.
+3. `PushQueue.overwriteFile` — reconcile-resolved writeback. When off, resolved bytes land in the batch dir verbatim.
+
+When canonicalization is on AND a write changed bytes, `recordSync` is INTENTIONALLY SKIPPED. The next `findChanges` sees the local-vs-snapshot divergence and emits the file as modified; the next push uploads the canonical bytes back. This replaced the old `republishPaths` + `appendRepublishChanges` inline mechanism — convergence happens on the next click (a documented one-click delay) but the engine has one fewer special path.
+
+Toggle threaded via live getters into both `PushQueue` and `Sync2Manager` so flipping it in the settings tab takes effect on the very next sync.
 
 ### Custom-message commits & accumulate semantics
 
@@ -200,13 +289,14 @@ Settings-tab UI peculiarity: `toggle.setValue(v)` called from an **async** conte
 ```
 src/sync2/
 ├── sync2-manager.ts        # entry, queue runner, conflict resolution
+├── interval-scheduler.ts   # periodic tick + onload startup (testable)
 ├── change-detector.ts      # vault walk + findChanges + queue bridge
 ├── push-queue.ts           # .push-queue/ persistence + markers + meta serdes
 ├── tree-builder.ts         # batch → tree entries (with uploadedBlobs skip)
 ├── snapshot-store.ts       # github-easy-sync-metadata.json (file name is historic)
 ├── gitignore-invariants.ts # the three invariant .gitignore files
 ├── commit-templates.ts     # {date}/{time}/… placeholders + device suffix
-├── conflict-store.ts       # deferred conflicts, sibling files (Etap 6.5)
+├── conflict-store.ts       # deferred conflicts, sibling files (Stage 6.5)
 ├── conflict-merge-all.ts   # merge-into-one resolution path
 ├── plugin-js.ts            # isAtomicPluginFile, compareSemver, etc.
 ├── three-way-merge.ts      # mergeText (diff3-style)
@@ -231,7 +321,7 @@ sync2/
 ├── api-failures/          # J1–J4: invalid token, 429 retry, wrong repo, network drop
 ├── manifest-corruption/   # K1–K5: invalid JSON, deleted, stale lastSync, unknown fields, empty files map
 ├── accumulate/            # L1–L4: accumulate semantics + attempted-marker
-├── conflicts/             # ConflictStore-driven deferred-conflict tests (Etap 6.5)
+├── conflicts/             # ConflictStore-driven deferred-conflict tests (Stage 6.5)
 ├── gitignore/             # gitignore + rename interaction (covers legacy E4)
 └── empty-progression.test.ts
 ```
@@ -277,12 +367,16 @@ Implemented in `main.ts:resetPluginState()` (the action) + `src/settings/tab.ts:
 
 - No event-listener (polling is enough and simpler; no missed-events failure mode).
 - No legacy-manifest migration on adoption (anything that needs sync history must run a sync via the previous tool first).
-- No state-machine routing (`decideInitAction` and friends are gone). Branching lives inside `processBatch` (Cases 1–4) and `applyRemoteAddOrModify`.
-- No legacy "atomic plugin .js + conflict-sibling backup" `.conflict-(local|remote)-…` files (sync2 has Etap 6.5 conflict-sibling files with a different naming scheme: `.conflict-from-<label>-<iso-no-colons>Z<ext>`; these stay strictly local via the root gitignore invariant block).
+- No state-machine routing (`decideInitAction` and friends are gone). Branching lives inside `processBatch` (Cases 1–4) and `applyRemoteAddOrModify` / `reconcileBatchAgainstHead`.
+- No legacy "atomic plugin .js + conflict-sibling backup" `.conflict-(local|remote)-…` files (sync2 has Stage 6.5 conflict-sibling files with a different naming scheme: `.conflict-from-<label>-<iso-no-colons>Z<ext>`; these stay strictly local via the root gitignore invariant block).
+- No `republishPaths` / `appendRepublishChanges` / `synthesizeRepublishChange` (replaced by canonicalize-without-recordSync: the next findChanges picks up the divergence naturally).
+- No eager click-time "Syncing with GitHub…" notice. Progress notice opens lazily inside drain only when a phase is heavy enough; idle syncs run silent.
+- No "delete wins" for delete-vs-modify (replaced by conflict resolution that lets the user keep delete, keep remote, merge, or defer).
+- No scheduler logic in `main.ts`. The periodic-tick and onload-startup decisions live in `IntervalScheduler` so they can be unit-tested.
 
 ## Legacy architecture (pre-cutover, historical only — code is gone from src/)
 
-The sections that follow describe the engine as it existed before the Etap 7 cutover. The code (`sync-manager.ts`, `sync-state.ts`, `metadata-store.ts`, `events-listener.ts`, the `decideInitAction` state machine, the chunk-pick conflict view) is **no longer in the repo**. Documentation is kept here so:
+The sections that follow describe the engine as it existed before the Stage 7 cutover. The code (`sync-manager.ts`, `sync-state.ts`, `metadata-store.ts`, `events-listener.ts`, the `decideInitAction` state machine, the chunk-pick conflict view) is **no longer in the repo**. Documentation is kept here so:
 
 - old PRs / commit messages remain readable;
 - removed symbols can be grep'd from this file;
@@ -463,7 +557,7 @@ Build sanity (`pnpm build`) runs `tsc -noEmit` before bundling — keep it green
 
 ### Unit suite (`tests/sync2/` + `tests/gi.test.ts`, `pnpm test`)
 
-17 spec files, ~390 cases, ~6 s. Mocks the `obsidian` module via `vitest.config.ts` alias → `mock-obsidian.ts`. No network, no GitHub PAT required — runs anywhere `pnpm install` succeeded.
+18 spec files, 433 cases, ~6 s. Mocks the `obsidian` module via `vitest.config.ts` alias → `mock-obsidian.ts`. No network, no GitHub PAT required — runs anywhere `pnpm install` succeeded.
 
 What's covered:
 
@@ -486,6 +580,7 @@ What's covered:
 | `tests/sync2/text-normalize.test.ts` | CRLF→LF, BOM strip, trailing-NL canonicalisation |
 | `tests/sync2/three-way-merge.test.ts` | `mergeText` (diff3-style) — clean merges + conflict-marker shape |
 | `tests/sync2/tree-builder.test.ts` | Batch → tree entries, `uploadedBlobs` skip, `Promise.allSettled` over `createBlob` |
+| `tests/sync2/interval-scheduler.test.ts` | start/stop, cadence selection (interval-min vs watchdog 5-min), all four `fullCycle` branches × 2 entry points (tick / startup), watchdog empty-queue no-op, error-swallow with correct log label, fake-timer fire integration |
 
 Run a single spec:
 ```
@@ -494,7 +589,7 @@ pnpm vitest run tests/sync2/push-queue.test.ts
 
 ### Integration suite (`tests/integration/`, `pnpm test:integration`)
 
-60 test files, ~95 cases (some `it.each` unfold further at runtime), ~9 min full wall-clock. Real GitHub round-trips on every test; `vitest.integration.config.ts` loads `.env.test` from repo root, aliases `obsidian` to `mock-obsidian.ts` exactly like the unit suite, but does NOT bundle.
+64 test files, 105 cases (some `it.each` unfold further at runtime), ~19 min full wall-clock (bootstrap suite makes up ~9 min of that). Real GitHub round-trips on every test; `vitest.integration.config.ts` loads `.env.test` from repo root, aliases `obsidian` to `mock-obsidian.ts` exactly like the unit suite, but does NOT bundle.
 
 **Env vars** (`.env.test` at repo root):
 - `GITHUB_TOKEN` — fine-grained PAT scoped to one private repo. Permissions: Contents R/W, Metadata R. CANNOT create or delete repos, which is intentional — leak blast radius is that one repo's contents. Used by every test except the bootstrap suite.
@@ -519,7 +614,7 @@ The bucket form takes a glob — `tests/integration/scenarios/sync2/conflicts*` 
 | `bootstrap/sync2-bare-repo.test.ts` | A1, A2 | Two-step bare-repo bootstrap (Contents API seed + Git Data API root commit), 10-iter stress against eventual-consistency 409. Only suite that needs the bootstrap PAT. |
 | `adoption/B1-identical.test.ts` … `B6-binary-remote-newer.test.ts` | B1–B6 | First sync against a non-bare remote: identical (B1), non-overlapping (B2), text local-newer (B3), text remote-newer (B4), binary local-newer (B5), binary remote-newer (B6). Non-destructive contract pinned here. |
 | `normalization/` (9 files) | C1, C2, C3 + CRLF/BOM | C1 resumes bootstrap pull, C2 resumes push-blob (with remote-race variant), C3 pull-defers-to-push reconcile. CRLF/BOM/idempotency round-trips, multi-device convergence on canonicalisation, binary byte-exactness. |
-| `incremental/D1-incremental-upload.test.ts` … `D8-same-file-deleted-both.test.ts` | D1–D8 | Post-adoption incremental: upload (D1), download (D2), bidirectional deletes (D3), local-delete-vs-remote-modify on different files (D4) + same file (D6), local-modify-vs-remote-delete on different files (D5) + same file (D7, resurrection), both-sides-delete (D8). |
+| `incremental/D1-incremental-upload.test.ts` … `D8-same-file-deleted-both.test.ts` | D1–D8 | Post-adoption incremental: upload (D1), download (D2), bidirectional deletes (D3), local-delete-vs-remote-modify on different files (D4) + same file (D6 — **4 sub-tests** covering keep-delete / keep-remote / merge / defer per the new delete-vs-modify conflict contract), local-modify-vs-remote-delete on different files (D5) + same file (D7, resurrection), both-sides-delete (D8). |
 | `conflicts-misc/E1-reconcile-onload.test.ts` … `E4-plugin-js-same-version-mtime.test.ts` | E1–E4 | Onload reconcile after vault edits while sync2 was disabled (E1), binary atomic mtime (E2), plugin-js semver atomic (E3), plugin-js same-version → mtime tie-break (E4). |
 | `edges/F-special-chars-and-content.test.ts` | F | Cyrillic paths + content, spaces/brackets in filenames, empty files, 1 MB long-line, 150-char filename, remote-side Cyrillic path pulled into fresh vault. 6 `it()` sub-cases in one file. |
 | `multi-device/G1-three-device-rotation.test.ts` … `G4-binary-atomic-across-devices.test.ts` | G1–G4 | Three-device rotation A→B→C→A (G1), two-device disjoint same-file edits → 3-way merge (G2), same-line conflict resolved on the second pusher (G3), binary atomic mtime across two real sync2 devices (G4). |
@@ -528,7 +623,7 @@ The bucket form takes a glob — `tests/integration/scenarios/sync2/conflicts*` 
 | `api-failures/J1-invalid-token.test.ts` … `J4-network-drop.test.ts` | J1–J4 | Invalid token 401 (J1), 429 backoff (J2), wrong repo 404 (J3), simulated network drop on first call (J4). Each pins fail-fast + batch persistence + recovery on next sync. |
 | `manifest-corruption/K1-invalid-json.test.ts` … `K5-empty-files-map.test.ts` | K1–K5 | Garbage JSON in snapshot manifest (K1), file deleted (K2), bogus `lastSyncCommitSha` → `compare` 404 → auto-advance to live head (K3), unknown top-level + per-file fields ignored (K4), files: {} with lastSync intact (K5). |
 | `accumulate/L1-sequential-clicks.test.ts` … `L4-attempted-locks-merge.test.ts` | L1–L4 | Sequential clicks fold (L1), custom-message stays isolated (L2), syncAll with custom message (L3), attempted-marker locks a failed batch out of merge (L4). |
-| `conflicts/` (4 files) | Etap 6.5 | Deferred + sibling-delete close (defer-then-resolve-via-sibling-delete), merge-into-one resolver, multi-copy pair resolution, pending-conflict blocks push. |
+| `conflicts/` (4 files) | Stage 6.5 | Deferred + sibling-delete close (defer-then-resolve-via-sibling-delete), merge-into-one resolver, multi-copy pair resolution, pending-conflict blocks push. |
 | `gitignore/gitignore-rename-suite.test.ts` | — | gitignore-driven filtering interacting with renames. Covers what was legacy E4. |
 | `empty-progression.test.ts` | — | "Nothing in vault, nothing on remote, click sync" path stays no-op. |
 

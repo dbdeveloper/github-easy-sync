@@ -18,7 +18,7 @@ export interface InvariantFileState {
 export interface Sync2InvariantState {
   configDirGitignore?: InvariantFileState;
   selfPluginGitignore?: InvariantFileState;
-  // Root <vault>/.gitignore — managed since Etap 6.5 to forcibly
+  // Root <vault>/.gitignore — managed since Stage 6.5 to forcibly
   // hide conflict-sibling files from sync. Same shape as the other
   // two: mtime+hash cache, splice-on-edit invariant block.
   rootGitignore?: InvariantFileState;

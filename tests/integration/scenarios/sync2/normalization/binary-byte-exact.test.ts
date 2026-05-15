@@ -23,7 +23,7 @@ import {
   sync2AllAndAssertNoErrors,
 } from "../helpers";
 
-// Etap 6.6 — binaries are byte-exact regardless of byte sequences
+// Stage 6.6 — binaries are byte-exact regardless of byte sequences
 // that look like CRLF or BOM. PNG files routinely contain 0x0D 0x0A
 // pairs (the standard PNG signature ends with one) and arbitrary
 // 0xFE 0xFF bytes that decoders would interpret as BOM-like. None

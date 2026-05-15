@@ -1,6 +1,6 @@
 import { App, Modal, Setting } from "obsidian";
 
-// Per-file conflict modal (Etap 6.5). Pops up once for each file
+// Per-file conflict modal (Stage 6.5). Pops up once for each file
 // that hits an unresolvable 3-way merge during a sync. The user
 // picks one of:
 //

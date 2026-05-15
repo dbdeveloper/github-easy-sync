@@ -42,7 +42,7 @@ export async function isSyncable(
   // user content and we'd push them on the next sync.
   const queuePrefix = `${configDir}/plugins/${selfPluginId}/.push-queue/`;
   if (path.startsWith(queuePrefix)) return false;
-  // Same protection for the Etap 6.5 conflict-store: meta.json + the
+  // Same protection for the Stage 6.5 conflict-store: meta.json + the
   // captured (base, theirs) snapshots are per-device internals. The
   // strict-allowlist `<configDir>/plugins/<self>/.gitignore` already
   // blocks them when sync2's invariant gitignore is in place, but the
@@ -52,7 +52,7 @@ export async function isSyncable(
   if (path.startsWith(conflictsPrefix)) return false;
   if (path === ".git" || path.startsWith(".git/")) return false;
   if (path.includes("/.git/")) return false;
-  // Etap 6.5 conflict-resolver sibling files (`<base>.conflict-from-
+  // Stage 6.5 conflict-resolver sibling files (`<base>.conflict-from-
   // <label>-<ts>.<ext>`) are per-device markers — they sit visibly in
   // the vault for the user to reconcile, but pushing them to GitHub
   // would propagate one device's deferred-conflict state to others

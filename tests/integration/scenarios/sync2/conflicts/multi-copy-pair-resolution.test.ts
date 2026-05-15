@@ -24,7 +24,7 @@ import {
   sync2AllAndAssertNoErrors,
 } from "../helpers";
 
-// Etap 6.5 — multi-copy resolution. Two consecutive deferred
+// Stage 6.5 — multi-copy resolution. Two consecutive deferred
 // conflicts on the same path produce two sibling files. Resolving
 // the first one (sibling A) leaves the second pending — sync still
 // excludes the path. Resolving the second one finally unblocks the

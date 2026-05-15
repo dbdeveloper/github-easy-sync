@@ -25,7 +25,7 @@ import {
   sync2AllAndAssertNoErrors,
 } from "../helpers";
 
-// Etap 6.5 — defer + resolve via sibling-delete, end to end against
+// Stage 6.5 — defer + resolve via sibling-delete, end to end against
 // real GitHub. The user picks "Later" on a conflict modal: a sibling
 // file lands in the vault, the path is excluded from push, and on
 // the NEXT sync nothing about it changes on remote. Then the user

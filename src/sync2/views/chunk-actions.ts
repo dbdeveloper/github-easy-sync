@@ -18,7 +18,7 @@ import {
 } from "@codemirror/merge";
 
 // Per-chunk action bar mounted on the THEIRS side of a CM6 MergeView
-// (Etap 6.5 conflict resolver UX). For each diverging chunk, renders
+// (Stage 6.5 conflict resolver UX). For each diverging chunk, renders
 // a 2- or 3-button block widget directly above the chunk:
 //
 //     ┌──────────────────────────────────────────┐

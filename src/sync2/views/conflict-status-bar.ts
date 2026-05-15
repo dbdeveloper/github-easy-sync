@@ -1,4 +1,4 @@
-// Status-bar widget that shows pending conflict count (Etap 6.5).
+// Status-bar widget that shows pending conflict count (Stage 6.5).
 // Hidden when there are no pending conflicts; visible as `🔀 N`
 // otherwise. Click opens the Conflict View workspace leaf.
 //

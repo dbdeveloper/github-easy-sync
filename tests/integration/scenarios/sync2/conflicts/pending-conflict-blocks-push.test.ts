@@ -24,7 +24,7 @@ import {
   sync2AllAndAssertNoErrors,
 } from "../helpers";
 
-// Etap 6.5 — `enqueueOrMerge` filters out file changes whose path
+// Stage 6.5 — `enqueueOrMerge` filters out file changes whose path
 // has an active conflict record. This test pre-creates a conflict,
 // then edits BOTH the conflicted path and a clean path, and asserts
 // only the clean path lands on GitHub. After the conflict is

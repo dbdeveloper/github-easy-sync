@@ -25,7 +25,7 @@ import {
   sync2AllAndAssertNoErrors,
 } from "../helpers";
 
-// Etap 6.5 — markdown "merge into one" auto-resolution. The user
+// Stage 6.5 — markdown "merge into one" auto-resolution. The user
 // picks the third button on the modal; sync2 builds an Obsidian
 // callout block under the original with theirs content, writes the
 // merged document locally, and pushes to GitHub in the same sync.

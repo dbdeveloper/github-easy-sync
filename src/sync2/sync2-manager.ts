@@ -203,7 +203,7 @@ export interface Sync2ManagerDeps {
   // conflict-store.ts for the consumers. Live-readable for the same
   // reason as the templates above.
   deviceLabel: string | (() => string);
-  // Optional ConflictStore for Etap 6.5 deferred / sibling-file
+  // Optional ConflictStore for Stage 6.5 deferred / sibling-file
   // workflow. Plugin code passes a real one; unit tests that stick
   // entirely to the "resolved" callback return shape can omit it.
   // When omitted, calling onConflict with `kind: "deferred"` throws —
@@ -504,7 +504,7 @@ export class Sync2Manager {
     }
   }
 
-  // resumeQueue — full implementation in Etap 6d. For 6a, drain
+  // resumeQueue — full implementation in Stage 6d. For 6a, drain
   // is callable on its own and behaves correctly when called fresh.
   async resumeQueue(): Promise<void> {
     await this.drain();
@@ -1397,7 +1397,7 @@ export class Sync2Manager {
   // there's already a non-in-progress batch waiting. mergeIntoLatest
   // returns null when no candidate exists; we then create a new one.
   //
-  // Etap 6.5: paths with pending conflicts (sibling file present,
+  // Stage 6.5: paths with pending conflicts (sibling file present,
   // .conflicts/<id>/ persisted, awaiting user resolution) are dropped
   // here BEFORE enqueueing — pushing the local "ours" mid-resolution
   // would commit a half-merged version. The path comes back into the
@@ -1457,7 +1457,7 @@ export class Sync2Manager {
     });
     return {
       // Always-trailing " (deviceLabel)" lets a future viewer
-      // (Etap 8 file-history) read the source-device off any sync2
+      // (Stage 8 file-history) read the source-device off any sync2
       // commit on GitHub regardless of how the user customized the
       // template. See commit-templates.ts → appendDeviceSuffix.
       commitMessage: appendDeviceSuffix(base, this.deviceLabel()),

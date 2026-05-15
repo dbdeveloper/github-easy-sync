@@ -23,7 +23,7 @@ import {
   sync2AllAndAssertNoErrors,
 } from "../helpers";
 
-// Etap 6.6 — push-side write-back. User pastes CRLF text into a
+// Stage 6.6 — push-side write-back. User pastes CRLF text into a
 // local file (e.g. from a Windows-authored email body), then hits
 // Sync. The push pipeline canonicalises the snapshot AND writes the
 // canonical form back to the live vault file, so after the sync the

@@ -24,7 +24,7 @@ import {
   sync2AllAndAssertNoErrors,
 } from "../helpers";
 
-// Etap 6.6 — multi-device convergence. Device A authors a CRLF file
+// Stage 6.6 — multi-device convergence. Device A authors a CRLF file
 // and pushes (push-side write-back canonicalizes both A's local
 // copy and what lands on GitHub). Device B pulls — sees LF locally
 // straight away. B's next sync, with no further changes, must be a

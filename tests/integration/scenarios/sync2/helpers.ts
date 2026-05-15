@@ -78,7 +78,7 @@ export interface Sync2TestClient {
   client: GithubClient;
   logger: Logger;
   // Always present in the integration fixture so tests don't have
-  // to wire it up themselves. Etap 6.5 conflict-resolver tests use
+  // to wire it up themselves. Stage 6.5 conflict-resolver tests use
   // it directly to assert on pending records / sibling files.
   conflictStore: ConflictStore;
   branch: string;

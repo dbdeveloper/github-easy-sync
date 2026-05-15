@@ -24,7 +24,7 @@ import {
   sync2AllAndAssertNoErrors,
 } from "../helpers";
 
-// Etap 6.6 — pull-side text canonicalisation against a real GitHub
+// Stage 6.6 — pull-side text canonicalisation against a real GitHub
 // branch. Web-UI committed a CRLF-laden file before our sync ever
 // touched it; the first syncAll must:
 //   1. Write the LF version locally.

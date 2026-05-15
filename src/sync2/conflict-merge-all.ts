@@ -1,11 +1,11 @@
-// "Merge into one" option for the Etap 6.5 conflict resolver — markdown
+// "Merge into one" option for the Stage 6.5 conflict resolver — markdown
 // only. Folds every conflict-copy under the original via Obsidian-style
 // callout blocks, so the result stays valid markdown that renders nicely
 // in preview mode and is searchable by "Changing N" / "from <device>".
 
 export interface ConflictCopyForMerge {
   // Raw text of the conflict-copy (sibling) file. Already canonical per
-  // Etap 6.6 (LF, no BOM, trailing-NL invariant) — we don't re-normalize
+  // Stage 6.6 (LF, no BOM, trailing-NL invariant) — we don't re-normalize
   // here because the caller controls the upstream pipeline.
   content: string;
   // Label of the device that authored this copy (from the metadata in

@@ -24,7 +24,7 @@ import {
   sync2AllAndAssertNoErrors,
 } from "../helpers";
 
-// Etap 6.6 — UTF-8 BOM at the start of a remote text file is the
+// Stage 6.6 — UTF-8 BOM at the start of a remote text file is the
 // canonical-violation case GitHub's web view renders as a literal
 // "﻿" glyph at the top of the page. Sync2 strips it locally and
 // republishes the cleaned version so the server displays the file

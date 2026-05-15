@@ -107,7 +107,7 @@ export type MergeResult =
 
 // What the user (or test stub) chose when sync2 surfaced a conflict
 // it couldn't auto-resolve. Three flavours, matching the per-file
-// modal in Etap 6.5:
+// modal in Stage 6.5:
 //   - resolved        — user picked "Resolve now" and finished merging
 //                       through the diff editor. `content` overwrites
 //                       the local file and goes up on the next push.

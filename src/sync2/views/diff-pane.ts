@@ -13,7 +13,7 @@ import {
   ChunkAction,
 } from "./chunk-actions";
 
-// Reusable diff/merge component (Etap 6.5). Wraps `@codemirror/merge`
+// Reusable diff/merge component (Stage 6.5). Wraps `@codemirror/merge`
 // with two operating modes:
 //
 //   - merge mode (conflict view): both panes editable, auto-finalize
@@ -21,7 +21,7 @@ import {
 //                                 equal, the user converges them via
 //                                 CM's built-in revert controls or by
 //                                 typing.
-//   - reference mode (Etap 8 file history): theirs pane is read-only,
+//   - reference mode (Stage 8 file history): theirs pane is read-only,
 //                                 the user browses an old version and
 //                                 selects+copies; ours pane is still
 //                                 editable.
@@ -52,7 +52,7 @@ export interface DiffPaneProps {
   // `markdown()` extension; everything else stays plain).
   path: string;
   // Initial pane content. Caller is responsible for normalizing
-  // line endings ahead of time (Etap 6.6 already does this for
+  // line endings ahead of time (Stage 6.6 already does this for
   // bytes coming through the sync pipeline).
   oursText: string;
   theirsText: string;
@@ -63,7 +63,7 @@ export interface DiffPaneProps {
   oursLabel?: string;
   theirsLabel?: string;
   // When true, the theirs (GitHub-side) pane is read-only — for the
-  // file history viewer (Etap 8). Conflict view sets this to false
+  // file history viewer (Stage 8). Conflict view sets this to false
   // so the user can edit either side as needed.
   theirsReadOnly?: boolean;
   // Fired on every keystroke / chunk-revert in either pane. Caller
@@ -273,10 +273,10 @@ export class DiffPane {
     const langExt = isMd ? [markdown()] : [];
     const oursLabel = this.props.oursLabel ?? DEFAULT_OURS_LABEL;
     const theirsLabel = this.props.theirsLabel ?? DEFAULT_THEIRS_LABEL;
-    // Pane convention (Etap 6.5): theirs (GitHub) on the LEFT (a),
+    // Pane convention (Stage 6.5): theirs (GitHub) on the LEFT (a),
     // ours (device) on the RIGHT (b). Matches the header labels
     // and the natural reading order "incoming → local". For the
-    // file-history viewer (Etap 8) the left pane (a, theirs/GitHub)
+    // file-history viewer (Stage 8) the left pane (a, theirs/GitHub)
     // becomes read-only so the user can browse history without
     // accidentally mutating it.
     //

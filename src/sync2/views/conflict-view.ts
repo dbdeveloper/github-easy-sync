@@ -12,7 +12,7 @@ export { formatTs, groupByVaultPath };
 // plugin.registerView(VIEW_TYPE_SYNC2_CONFLICT, ...).
 export const VIEW_TYPE_SYNC2_CONFLICT = "sync2-conflict-view";
 
-// ItemView orchestrator (Etap 6.5). Layout:
+// ItemView orchestrator (Stage 6.5). Layout:
 //
 //   ┌─ Conflicts (N) ─────────┐ ┌─ <selected file> ──────────────┐
 //   │ ▼ note.md  (2 versions) │ │   OURS               THEIRS    │
@@ -40,7 +40,7 @@ export interface ConflictViewDeps {
   // Reads the live ours content from the vault. Plumbed from main.ts
   // so the view doesn't reach into Vault directly.
   readOurs(vaultPath: string): Promise<string>;
-  // Writes the resolved content to the live ours file. Etap 6.6
+  // Writes the resolved content to the live ours file. Stage 6.6
   // canonicalisation already happens upstream in writeRemoteText
   // when sync2 owns the write; here the user already produced the
   // final form via the diff editor, so we pass through.

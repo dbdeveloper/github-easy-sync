@@ -455,7 +455,7 @@ async function shaOf(content: string): Promise<string> {
   return await calculateGitBlobSHA(buf);
 }
 
-describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
+describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
   let f: ReturnType<typeof fixture>;
 
   beforeEach(async () => {
@@ -516,7 +516,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
 
     await f.manager.syncAll();
 
-    // New defaults (Etap 6.5): "Sync at {date} {time}" template + auto-
+    // New defaults (Stage 6.5): "Sync at {date} {time}" template + auto-
     // appended " (deviceLabel)" suffix from appendDeviceSuffix.
     expect(f.client.state.lastCommit?.message).toBe(
       "Sync at 2026-05-03 09:38:23.000 (test-device)",
@@ -742,7 +742,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
 
     const commits = f.client.calls.filter((c) => c.op === "createCommit");
     expect(commits).toHaveLength(1);
-    // Etap 6.5: "Update {filename} at {date} {time}" + " (test-device)"
+    // Stage 6.5: "Update {filename} at {date} {time}" + " (test-device)"
     // suffix appended via appendDeviceSuffix.
     expect((commits[0].args as { message: string }).message).toBe(
       "Update note.md at 2026-05-03 09:38:23.000 (test-device)",
@@ -812,7 +812,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
     expect(f.store.get("b.md")).toBeUndefined();
   });
 
-  describe("conflict reconciliation (Etap 6c)", () => {
+  describe("conflict reconciliation (Stage 6c)", () => {
     it("clean 3-way merge when remote and local touched non-overlapping parts", async () => {
       // 5-line base with 'middle' between the two edit zones so
       // node-diff3 treats them as separate hunks.
@@ -885,7 +885,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       const tree = f2.client.state.lastTree!;
       const xEntry = tree.find((e) => e.path === "x.md")!;
       // Resolver returns "user-picked-ours" without a trailing NL; the
-      // text-canonicalisation pipeline (Etap 6.6) adds one before the
+      // text-canonicalisation pipeline (Stage 6.6) adds one before the
       // content lands in the snapshot/tree.
       expect(xEntry.content).toBe("user-picked-ours\n");
 
@@ -925,7 +925,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
 
       // Pull's 3-way merge with base="" treats both sides as additions
       // → conflict → resolver wins → resolved lands in vault and gets
-      // pushed. Etap 6.6 normalizes the resolver output before storage,
+      // pushed. Stage 6.6 normalizes the resolver output before storage,
       // so the trailing-NL invariant adds the missing \n.
       const tree = f3.client.state.lastTree!;
       const xEntry = tree.find((e) => e.path === "x.md")!;
@@ -1051,7 +1051,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
     it("downloads every remote file when lastSyncCommitSha is null and branch has commits", async () => {
       f.client.setBranchHead("FRESH_HEAD");
       f.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
-      // Inputs are canonical (LF + trailing-NL) so the Etap 6.6
+      // Inputs are canonical (LF + trailing-NL) so the Stage 6.6
       // pull-side normalizer is a no-op for them — the test stays a
       // clean bootstrap-only scenario without follow-up republish.
       f.client.setContentAtRef("FRESH_HEAD", "Notes/a.md", "alpha\n");
@@ -1132,7 +1132,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
     });
   });
 
-  describe("pullIfNeeded (Etap 6c-pull)", () => {
+  describe("pullIfNeeded (Stage 6c-pull)", () => {
     it("no-op when lastSyncCommitSha is null (first sync)", async () => {
       writeVaultFile(f.root, "x.md", "v");
       // No setLastSync, but a remote already exists.
@@ -1157,7 +1157,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       f.store.setLastSync("BASE_HEAD", "BASE_TREE");
       f.client.setBranchHead("NEW_HEAD");
       f.client.setTreeShaForCommit("NEW_HEAD", "NEW_TREE");
-      // Canonical input → Etap 6.6 normalizer is a no-op, so this
+      // Canonical input → Stage 6.6 normalizer is a no-op, so this
       // test stays focused on pull-detection rather than republish.
       f.client.setContentAtRef("NEW_HEAD", "Notes/new.md", "fresh content\n");
       f.client.setCompareResult("BASE_HEAD", "NEW_HEAD", {
@@ -1343,7 +1343,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
     });
   });
 
-  // ── Etap 6.6 — text canonicalisation on pull -----------------------
+  // ── Stage 6.6 — text canonicalisation on pull -----------------------
   // Pull-side normalization is non-negotiable ("ГОЛОВНЕ ПРАВИЛО":
   // locally everything is canonical regardless of what's on remote).
   // When the remote bytes for a text file aren't already canonical,
@@ -1351,7 +1351,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
   // recordSync. The next findChanges pass sees the file as new/
   // modified and the next syncAll pushes the canonical bytes back —
   // the server converges on the canonical form over one extra click.
-  describe("text canonicalisation on pull (Etap 6.6)", () => {
+  describe("text canonicalisation on pull (Stage 6.6)", () => {
     it("CRLF in remote text → local LF + next syncAll pushes canonical", async () => {
       f.store.setLastSync("BASE_HEAD", "BASE_TREE");
       f.client.setBranchHead("NEW_HEAD");
@@ -1481,7 +1481,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
     it("merge-resolved content also gets canonicalized + republished if needed", async () => {
       // Local has its own edit; remote has a different one (overlap →
       // conflict). Conflict resolver returns "manual-resolution"
-      // (no trailing NL). Etap 6.6 normalizes that to
+      // (no trailing NL). Stage 6.6 normalizes that to
       // "manual-resolution\n" before storing/pushing.
       const f2 = fixture({
         onConflict: async () => ({
@@ -1583,13 +1583,13 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
     });
   });
 
-  // ── Etap 6.5 — conflict resolver contract -------------------------
+  // ── Stage 6.5 — conflict resolver contract -------------------------
   // Sync2Manager's onConflict callback now returns a discriminated
   // union (resolved / deferred / merged-into-one). These tests pin
   // each branch through the manager flow without going through the
   // real diff modal — the modal is a UI layer that just produces
   // these decision shapes.
-  describe("OnConflict contract (Etap 6.5)", () => {
+  describe("OnConflict contract (Stage 6.5)", () => {
     it("kind=resolved: content is written to disk, recorded, and pushed", async () => {
       const f2 = fixture({
         onConflict: async () => ({
@@ -1628,7 +1628,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
     });
 
     it("kind=merged-into-one: content overwrites local + pushes (treated like resolved)", async () => {
-      // The Etap 6.5 markdown auto-merge feeds its result through the
+      // The Stage 6.5 markdown auto-merge feeds its result through the
       // same kind=merged-into-one return; manager treats it
       // identically to resolved. The kind tag is only for telemetry.
       const merged =
@@ -2284,7 +2284,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
     });
   });
 
-  describe("resumeQueue + accumulateOfflineSyncs (Etap 6d)", () => {
+  describe("resumeQueue + accumulateOfflineSyncs (Stage 6d)", () => {
     it("resumeQueue picks up a pending batch left over from a previous run", async () => {
       // Simulate a previous Sync2Manager that enqueued but crashed
       // before pushing.
@@ -2342,7 +2342,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
     });
   });
 
-  describe("accumulateOfflineSyncs (Etap 6d)", () => {
+  describe("accumulateOfflineSyncs (Stage 6d)", () => {
     function brokenNetworkFixture() {
       // Helper: client whose updateBranchHead always throws so the
       // first push fails and leaves the batch on disk.

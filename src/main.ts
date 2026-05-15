@@ -39,7 +39,7 @@ import manifest from "../manifest.json";
 // short enough that consecutive Sync clicks don't stack notices.
 const BRIEF_NOTICE_MS = 700;
 
-// Plugin entry point. After the Etap 7 cutover this only orchestrates
+// Plugin entry point. After the Stage 7 cutover this only orchestrates
 // sync2: legacy SyncManager, events-listener, and the chunk-pick
 // conflict view are gone. The plugin id (`github-gitless-sync`) is
 // kept verbatim — only the engine changed.

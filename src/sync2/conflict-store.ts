@@ -2,7 +2,7 @@ import { Vault } from "obsidian";
 import { hasTextExtension } from "../utils";
 import { UNKNOWN_DEVICE_LABEL } from "./commit-templates";
 
-// Persistent state for sync2's text conflict resolver (Etap 6.5).
+// Persistent state for sync2's text conflict resolver (Stage 6.5).
 //
 // On a real text conflict (3-way merge with overlapping edits), sync2
 // captures (base, theirs) bytes here so the user can defer resolution
@@ -12,7 +12,7 @@ import { UNKNOWN_DEVICE_LABEL } from "./commit-templates";
 // vault so the conflict is visible in the file tree.
 //
 // Layout under the plugin's own directory (already covered by the
-// strict-allowlist .gitignore from Etap 1; nothing here ever leaks to
+// strict-allowlist .gitignore from Stage 1; nothing here ever leaks to
 // GitHub):
 //
 //   <configDir>/plugins/<self>/.conflicts/
@@ -386,7 +386,7 @@ export default class ConflictStore {
     originalPath: string,
   ): Promise<void> {
     // Mirror push-queue's text/binary distinction so binary files that
-    // happen to come through this path (rare — current Etap 6.5 only
+    // happen to come through this path (rare — current Stage 6.5 only
     // routes text conflicts here, but be robust) round-trip byte-exact.
     if (hasTextExtension(originalPath)) {
       await this.vault.adapter.write(targetPath, content);

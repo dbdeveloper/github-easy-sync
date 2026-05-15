@@ -24,7 +24,7 @@ import {
 } from "../helpers";
 
 // E1 — reconcile after the plugin was "disabled" between syncs.
-// Sync2 has no events-listener (deliberately, post-Etap 7), so file
+// Sync2 has no events-listener (deliberately, post-Stage 7), so file
 // changes that happened while the plugin was inactive get picked up
 // by findChanges' full vault walk on the next click. This test
 // proves that disable + offline edit + re-enable doesn't lose the

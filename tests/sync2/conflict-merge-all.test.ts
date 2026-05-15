@@ -4,7 +4,7 @@ import {
   ConflictCopyForMerge,
 } from "../../src/sync2/conflict-merge-all";
 
-// Etap 6.5 "Merge into one" — markdown-only auto-merge that folds every
+// Stage 6.5 "Merge into one" — markdown-only auto-merge that folds every
 // conflict-copy under the original via `> [!info]` callouts. Pure
 // function, no I/O, deterministic with the given timestamp inputs.
 //

@@ -608,7 +608,7 @@ async function getDefaultBranchName(env: RepoEnv): Promise<string> {
 }
 
 // Legacy SyncManager-based TestClient + createClient + sync wrappers
-// were here before the Etap 7 cutover. Sync2 tests instead use
+// were here before the Stage 7 cutover. Sync2 tests instead use
 // `tests/integration/scenarios/sync2/helpers.ts` → createSync2Client
 // and sync2AllAndAssertNoErrors. Vault content helpers (writeVault…)
 // are unused by sync2 tests — they hit fs directly to keep the test

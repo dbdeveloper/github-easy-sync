@@ -83,7 +83,7 @@ const SELF_PLUGIN_GITIGNORE = `*
 !.gitignore
 `;
 
-// Body of the invariant block in the ROOT <vault>/.gitignore (Etap
+// Body of the invariant block in the ROOT <vault>/.gitignore (Stage
 // 6.5). Forces conflict-sibling files (`<base>.conflict-from-<label>-
 // <iso-no-colons>.<ext>`) to never be pushed: they're per-device
 // markers, propagating them across devices would create feedback

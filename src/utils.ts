@@ -1,6 +1,6 @@
 import { base64ToArrayBuffer } from "obsidian";
 
-// Sync2-only utility functions surviving the Etap 7 cutover. Legacy
+// Sync2-only utility functions surviving the Stage 7 cutover. Legacy
 // helpers (isSyncable, classifyForConflict, compareSemver, …) lived
 // here pre-cutover; the new engine doesn't need them.
 
