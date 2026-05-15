@@ -198,13 +198,14 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Auto-commit on automatic sync")
+      .setName("Auto-commit on interval sync")
       .setDesc(
         "Governs interval-driven syncs AND sync-on-startup. " +
-          "When ENABLED, automatic syncs do a full commit + pull + push " +
-          "(same as clicking the Sync button). When DISABLED, " +
-          "automatic syncs only pull remote changes silently — your local " +
-          "edits are left for you to commit manually.",
+          "When ENABLED, every automatic tick does a full commit + pull + " +
+          "push of your local edits (same as clicking the Sync button) — " +
+          "no confirmation, every interval. When DISABLED (default), " +
+          "automatic ticks only pull remote changes silently; your local " +
+          "edits stay uncommitted until you click Sync yourself.",
       )
       .addToggle((toggle) => {
         toggle
