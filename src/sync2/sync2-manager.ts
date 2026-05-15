@@ -394,7 +394,12 @@ export class Sync2Manager {
           : this.fullSyncMeta();
       const enqueued = await this.enqueueOrMerge(changes, meta);
       syncedFiles = enqueued;
-      if (enqueued > 0) this.onLocalCommitted?.(enqueued);
+      if (enqueued > 0) {
+        this.onLocalCommitted?.(enqueued);
+        progress?.update(
+          enqueued === 1 ? "Commit 1 file" : `Commit ${enqueued} files`,
+        );
+      }
       await this.drain(progress);
     } finally {
       progress?.hide();
@@ -464,7 +469,10 @@ export class Sync2Manager {
         isolated: customMessage !== undefined,
       });
       syncedFiles = enqueued;
-      if (enqueued > 0) this.onLocalCommitted?.(enqueued);
+      if (enqueued > 0) {
+        this.onLocalCommitted?.(enqueued);
+        progress?.update("Commit 1 file");
+      }
       await this.drain(progress);
     } finally {
       progress?.hide();
@@ -622,11 +630,11 @@ export class Sync2Manager {
     if (syncableChanges.length > 0) {
       if (pullProgress === null && this.onProgress) {
         pullProgress = this.onProgress(
-          `Downloading 0/${syncableChanges.length} files from GitHub…`,
+          `Pull 0/${syncableChanges.length}`,
         );
       } else if (pullProgress) {
         pullProgress.update(
-          `Downloading 0/${syncableChanges.length} files from GitHub…`,
+          `Pull 0/${syncableChanges.length}`,
         );
       }
     }
@@ -635,7 +643,7 @@ export class Sync2Manager {
       processed += 1;
       if (pullProgress) {
         pullProgress.update(
-          `Downloading ${processed}/${syncableChanges.length} files from GitHub…`,
+          `Pull ${processed}/${syncableChanges.length}`,
         );
       }
     };
@@ -870,11 +878,11 @@ export class Sync2Manager {
     if (syncablePaths.length > 0) {
       if (pullProgress === null && this.onProgress) {
         pullProgress = this.onProgress(
-          `Reconciling 0/${syncablePaths.length} files with GitHub…`,
+          `Preparing GitHub syncing…`,
         );
       } else if (pullProgress) {
         pullProgress.update(
-          `Reconciling 0/${syncablePaths.length} files with GitHub…`,
+          `Preparing GitHub syncing…`,
         );
       }
     }
@@ -883,7 +891,7 @@ export class Sync2Manager {
       processed += 1;
       if (pullProgress) {
         pullProgress.update(
-          `Reconciling ${processed}/${syncablePaths.length} files with GitHub…`,
+          `Preparing GitHub syncing: ${processed}/${syncablePaths.length}`,
         );
       }
     };
@@ -1586,13 +1594,13 @@ export class Sync2Manager {
           onUploadStart: (total) => {
             if (!progress) return;
             progress.update(
-              `Uploading ${commitPrefix}0/${total} files${sizeHint} to GitHub…`,
+              `Push ${commitPrefix}0/${total}${sizeHint}`,
             );
           },
           onFileProcessed: (done, total) => {
             if (!progress) return;
             progress.update(
-              `Uploading ${commitPrefix}${done}/${total} files${sizeHint} to GitHub…`,
+              `Push ${commitPrefix}${done}/${total}${sizeHint}`,
             );
           },
         });
@@ -1613,7 +1621,7 @@ export class Sync2Manager {
       // "Uploading N/N files…" through those steps. Switch to a
       // dedicated phase label so the user sees we've moved on.
       if (progress) {
-        progress.update(`Committing${sizeHint} to GitHub…`);
+        progress.update(`Push: committing${sizeHint}`);
       }
 
       // Build path → blob SHA map for snapshot updates after success.

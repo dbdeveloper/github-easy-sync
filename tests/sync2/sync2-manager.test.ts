@@ -2567,7 +2567,7 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       // No assertion needed beyond completion.
     });
 
-    it("live N/M counter: progress messages tick through 'Uploading X/N files…'", async () => {
+    it("live N/M counter: progress messages tick through 'Push X/N'", async () => {
       const messages: string[] = [];
       const f2 = fixture({
         onProgress: (initial) => {
@@ -2589,20 +2589,16 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
 
       await f2.manager.syncAll();
 
-      // Initial broad notice + at least one "Uploading X/4 files…"
-      // line + the terminal "Committing…" notice.
+      // Initial broad notice + at least one "Push X/4" line + the
+      // terminal "Push: committing" notice.
       expect(messages[0]).toMatch(/Syncing with GitHub/);
-      expect(messages.some((m) => /Uploading 0\/4 files/.test(m))).toBe(
-        true,
-      );
-      expect(messages.some((m) => /Uploading 4\/4 files/.test(m))).toBe(
-        true,
-      );
-      expect(messages.some((m) => /^Committing/.test(m))).toBe(true);
+      expect(messages.some((m) => /Push 0\/4/.test(m))).toBe(true);
+      expect(messages.some((m) => /Push 4\/4/.test(m))).toBe(true);
+      expect(messages.some((m) => /^Push: committing/.test(m))).toBe(true);
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 
-    it("pull-side counter: bootstrap-from-remote ticks 'Reconciling X/N…'", async () => {
+    it("pull-side counter: bootstrap-from-remote ticks 'Preparing GitHub syncing: X/N'", async () => {
       // Adoption path (fresh vault, remote has content). Adoption is
       // a comparison pass — for vaults previously synced via another
       // tool most paths SHA-match and only a subset actually pulls,
@@ -2625,10 +2621,10 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
 
       await f2.manager.syncAll();
 
-      expect(messages.some((m) => /Reconciling 0\/3 files/.test(m))).toBe(
+      expect(messages.some((m) => /Preparing GitHub syncing/.test(m))).toBe(
         true,
       );
-      expect(messages.some((m) => /Reconciling 3\/3 files/.test(m))).toBe(
+      expect(messages.some((m) => /Preparing GitHub syncing: 3\/3/.test(m))).toBe(
         true,
       );
       fs.rmSync(f2.root, { recursive: true, force: true });
@@ -2754,12 +2750,8 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
 
       await f2.manager.syncAll();
 
-      expect(messages.some((m) => /Downloading 0\/2 files/.test(m))).toBe(
-        true,
-      );
-      expect(messages.some((m) => /Downloading 2\/2 files/.test(m))).toBe(
-        true,
-      );
+      expect(messages.some((m) => /Pull 0\/2/.test(m))).toBe(true);
+      expect(messages.some((m) => /Pull 2\/2/.test(m))).toBe(true);
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 
@@ -2788,16 +2780,11 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
 
       await f2.manager.syncAll();
 
-      // The "Downloading…" message must not have fired — every path
-      // in the remote tree got filtered before the loop.
-      // (.gitignore itself is syncable so the notice text could
-      // mention "1/1"; the assertion below tolerates that and only
-      // pins "no spurious bigger counts".)
-      const downloadFires = messages.filter((m) => /Downloading /.test(m));
-      for (const m of downloadFires) {
-        // We allow 0..1 downloads (the gitignore itself) but nothing
-        // beyond.
-        expect(m).toMatch(/Downloading [01]\/1 /);
+      // The "Pull…" message must not have fired with anything beyond
+      // the gitignore itself — every other remote path got filtered.
+      const pullFires = messages.filter((m) => /^Pull /.test(m));
+      for (const m of pullFires) {
+        expect(m).toMatch(/Pull [01]\/1/);
       }
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
