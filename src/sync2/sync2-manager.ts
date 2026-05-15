@@ -285,9 +285,9 @@ export class Sync2Manager {
   private pulledFilesThisSync = 0;
   private readonly remoteIdentity: (() => RemoteIdentity) | undefined;
   private readonly now: () => number;
-  // Guard against re-entrant processQueue. The runner only loops one
+  // Guard against re-entrant drain. The runner only loops one
   // batch at a time; if a second syncAll() lands while the first is
-  // still pushing, we let it enqueue but skip the second processQueue
+  // still pushing, we let it enqueue but skip the second drain
   // invocation — the first one will pick the new batch up.
   private running = false;
 
@@ -384,11 +384,11 @@ export class Sync2Manager {
         // "Nothing local AND nothing pending in the queue" is the
         // truly idle case — fire onNoLocalChanges so plugin code can
         // flash a brief "No changes" notice. If the queue still has
-        // pending batches (offline-accumulate case), processQueue
+        // pending batches (offline-accumulate case), drain
         // picks them up and onProgress takes over the user feedback.
         const pendingBatches = await this.queue.list();
         if (pendingBatches.length === 0) this.onNoLocalChanges?.();
-        await this.processQueue(headAfterPull, progress);
+        await this.drain(headAfterPull, progress);
         await this.logger.info("Sync2 syncAll: nothing to sync");
         return;
       }
@@ -411,7 +411,7 @@ export class Sync2Manager {
       const enqueued = await this.enqueueOrMerge(combined, meta);
       syncedFiles = enqueued;
       if (enqueued > 0) this.onLocalCommitted?.(enqueued);
-      await this.processQueue(headAfterPull, progress);
+      await this.drain(headAfterPull, progress);
     } finally {
       progress?.hide();
       this.onSyncCompleted?.({
@@ -474,7 +474,7 @@ export class Sync2Manager {
         await this.store.save();
         const pendingBatches = await this.queue.list();
         if (pendingBatches.length === 0) this.onNoLocalChanges?.();
-        await this.processQueue(headAfterPull, progress);
+        await this.drain(headAfterPull, progress);
         await this.logger.info(`Sync2 syncFile: nothing to sync`, { path });
         return;
       }
@@ -496,7 +496,7 @@ export class Sync2Manager {
       });
       syncedFiles = enqueued;
       if (enqueued > 0) this.onLocalCommitted?.(enqueued);
-      await this.processQueue(headAfterPull, progress);
+      await this.drain(headAfterPull, progress);
     } finally {
       progress?.hide();
       this.onSyncCompleted?.({
@@ -506,10 +506,10 @@ export class Sync2Manager {
     }
   }
 
-  // resumeQueue — full implementation in Etap 6d. For 6a, processQueue
+  // resumeQueue — full implementation in Etap 6d. For 6a, drain
   // is callable on its own and behaves correctly when called fresh.
   async resumeQueue(): Promise<void> {
-    await this.processQueue();
+    await this.drain();
   }
 
   // Pull-only entry point for interval-driven background syncs (when
@@ -519,7 +519,7 @@ export class Sync2Manager {
   // but DELIBERATELY skips:
   //   - invariants.enforce (no mass rewrite of `.gitignore`s on a
   //     timer; reserved for explicit Sync clicks)
-  //   - findChanges + enqueueOrMerge + processQueue (no commits)
+  //   - findChanges + enqueueOrMerge + drain (no commits)
   //   - republishPaths follow-up (Etap 6.6 best-effort canonicalisation
   //     stays best-effort; the next manual syncAll picks it up)
   //
@@ -808,7 +808,7 @@ export class Sync2Manager {
   // letting the user's first push silently overwrite history.
   //
   // Returns the head SHA observed (so callers can pass it as a hint
-  // to processQueue), or null when the branch is bare or there's
+  // to drain), or null when the branch is bare or there's
   // nothing to bootstrap (lastSyncCommitSha already set).
   private async bootstrapIfNeeded(
     republishPaths: Set<string>,
@@ -1479,7 +1479,7 @@ export class Sync2Manager {
   // we have nothing fresh). The first batch processed in this drain
   // can use it to skip its own getBranchHeadSha; subsequent batches
   // re-fetch since each prior batch may have moved HEAD itself.
-  private async processQueue(
+  private async drain(
     headHint: string | null = null,
     sharedProgress: ProgressHandle | null = null,
   ): Promise<void> {
@@ -1587,7 +1587,7 @@ export class Sync2Manager {
       } else if (currentHead !== null) {
         // Case 3 (expectedHead set + currentHead matches), but the
         // batch's recorded parent may be stale: if an earlier batch
-        // in this same processQueue drain already committed, this
+        // in this same drain already committed, this
         // batch's parentCommitSha now lags behind reality. Without
         // a re-target, createCommit would build on the stale parent
         // and updateBranchHead would reject the non-fast-forward
@@ -1748,7 +1748,7 @@ export class Sync2Manager {
   // Seed a bare repo with a single Contents API write of
   // <vault>/.gitignore — guaranteed to exist after
   // GitignoreInvariants.enforce() (run by syncAll before
-  // processQueue). Git Data API endpoints return 409 "Git Repository
+  // drain). Git Data API endpoints return 409 "Git Repository
   // is empty" until the branch has at least one ref, so this is the
   // only way to bootstrap. After this call the branch has one commit
   // ("Init at {date} {time} (label)") and we rewrite the batch's
