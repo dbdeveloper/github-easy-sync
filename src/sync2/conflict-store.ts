@@ -126,6 +126,19 @@ export default class ConflictStore {
     theirsBlobSha: string;
     theirsAuthor: string;
   }): Promise<ConflictRecord> {
+    // Dedup: if an existing record for this path already holds the same
+    // remote version (theirsBlobSha matches), return it instead of
+    // creating a duplicate. This guards against drain loops that
+    // re-encounter the same compare result mid-cycle (pull's
+    // queuedPaths-defer in iter 1 + reconcile defer + iter 2 pull
+    // re-firing on the same unchanged remote head). Different remote
+    // versions still create new records — multi-copy semantics intact.
+    if (args.theirsBlobSha.length > 0) {
+      const existing = this.forPath(args.vaultPath).find(
+        (r) => r.theirsBlobSha === args.theirsBlobSha,
+      );
+      if (existing) return existing;
+    }
     const ts = this.now().getTime();
     const id = await this.allocateUniqueId(ts);
     const author =

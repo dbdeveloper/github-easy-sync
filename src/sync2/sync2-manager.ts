@@ -642,21 +642,6 @@ export class Sync2Manager {
           continue;
         }
 
-        // Already have a pending conflict record for THIS exact remote
-        // version (matched by theirsBlobSha): user picked "Later" on
-        // this file/version already; re-firing the modal would create
-        // a duplicate sibling. Skip. If the remote has moved on to a
-        // newer SHA since the last defer, fall through — new version,
-        // new modal, new sibling (multi-copy semantics).
-        if (this.conflictStore && f.sha) {
-          const pending = this.conflictStore.forPath(f.filename);
-          if (pending.some((rec) => rec.theirsBlobSha === f.sha)) {
-            anyOverlapDeferred = true;
-            tickPull();
-            continue;
-          }
-        }
-
         if (f.status === "removed") {
           await this.applyRemoteDeletion(f.filename, expectedHead);
           this.pulledFilesThisSync++;
@@ -1983,6 +1968,11 @@ export class Sync2Manager {
       // helper was called (we only cascade to AFTER it).
       if (id !== fromBatchId && batch.inProgress) continue;
       await this.queue.removeFile(id, path);
+      // For the current batch we let processBatch's empty-batch-skip
+      // handle the delete — reconcile still wants to run updateMeta
+      // and other post-resolve steps against it. Later batches are
+      // safe to delete here so drain doesn't process empty pushes.
+      if (id === fromBatchId) continue;
       const refreshed = await this.queue.read(id);
       if (
         refreshed.files.length === 0 &&
