@@ -1,3 +1,7 @@
+// Authored and tested by Claude Code under the attentive guidance of
+// Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
+
 // Local type declaration. node-diff3 ships its types via package.json
 // "exports", which tsconfig's moduleResolution: "node" can't resolve.
 // Re-declaring just the surface sync2 uses keeps us off the upgrade

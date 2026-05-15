@@ -1,3 +1,7 @@
+// Authored and tested by Claude Code under the attentive guidance of
+// Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
+
 // "Merge into one" option for the Stage 6.5 conflict resolver — markdown
 // only. Folds every conflict-copy under the original via Obsidian-style
 // callout blocks, so the result stays valid markdown that renders nicely

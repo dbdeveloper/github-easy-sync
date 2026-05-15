@@ -15,7 +15,7 @@ const prod = process.argv[2] === "production";
 
 // Optional: after each successful build, mirror the plugin outputs into a
 // vault's plugin folder so Obsidian picks them up immediately. Set
-// OBSIDIAN_PLUGIN_DIR to <Vault>/.obsidian/plugins/github-gitless-sync.
+// OBSIDIAN_PLUGIN_DIR to <Vault>/.obsidian/plugins/github-easy-sync.
 // data.json is intentionally not mirrored — that file is vault-specific
 // state owned by Obsidian, not a build output.
 //

@@ -94,7 +94,7 @@ Implication: vault edits made while the plugin was disabled get picked up on the
 
 ### PushQueue: persisted commit intent
 
-Located at `<configDir>/plugins/github-gitless-sync/.push-queue/`. Each pending sync is a directory:
+Located at `<configDir>/plugins/github-easy-sync/.push-queue/`. Each pending sync is a directory:
 
 ```
 .push-queue/
@@ -280,7 +280,7 @@ Implementation:
 Settings-tab UI peculiarity: `toggle.setValue(v)` called from an **async** context (a `.then()` callback) triggers an infinite re-entry inside Obsidian's settings pipeline that freezes the renderer at 100% CPU. The cause is in Obsidian internals, not our code (verified by replacing the I/O with a static `Promise.resolve(true).then(toggle.setValue)` — still froze). Workaround: read the toggle state ONCE at `onload` and cache on `plugin.pushPluginsDataJsonCached`; the settings tab uses the cached value **synchronously** in `display()`. The cache stays fresh because every successful `setPushPluginsDataJson` call from `onChange` also updates the cache. The drawback — if a peer device pushes a toggled gitignore between sessions, our cache is stale until the next `onload` — is acceptable; the user re-opens settings to see the propagated state.
 
 **OUR plugin's own `data.json` is ALWAYS blocked**, regardless of this toggle, by two redundant layers:
-1. The self-plugin gitignore at `<configDir>/plugins/github-gitless-sync/.gitignore` (auto-rewritten on every plugin load to `* / !main.js / !manifest.json / !styles.css / !.gitignore`) — `data.json` matches `*` with no allow exception.
+1. The self-plugin gitignore at `<configDir>/plugins/github-easy-sync/.gitignore` (auto-rewritten on every plugin load to `* / !main.js / !manifest.json / !styles.css / !.gitignore`) — `data.json` matches `*` with no allow exception.
 2. A hardcoded denylist in `isSyncable` (`change-detector.ts:29`) — defense in depth in case the self-plugin gitignore is tampered with. Our `data.json` carries the GitHub token; no toggle should ever expose it.
 
 ### "Sync configs" toggle (`syncConfigDir`)

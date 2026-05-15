@@ -77,7 +77,7 @@ import {
         expect(remoteFiles).toContain(".gitignore");
         expect(remoteFiles).toContain(".obsidian/.gitignore");
         expect(remoteFiles).toContain(
-          ".obsidian/plugins/github-gitless-sync/.gitignore",
+          ".obsidian/plugins/github-easy-sync/.gitignore",
         );
         // Root-level user note lands.
         expect(remoteFiles).toContain("Welcome.md");

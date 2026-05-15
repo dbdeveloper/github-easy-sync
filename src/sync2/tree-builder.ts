@@ -1,3 +1,7 @@
+// Authored and tested by Claude Code under the attentive guidance of
+// Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
+
 import { arrayBufferToBase64, Vault } from "obsidian";
 import { NewTreeRequestItem } from "../github/client";
 import { hasTextExtension } from "../utils";

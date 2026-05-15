@@ -1,3 +1,7 @@
+// Authored and tested by Claude Code under the attentive guidance of
+// Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
+
 // Helpers for sync2's plugin-js conflict resolution path. Obsidian
 // plugin bundles (`<configDir>/plugins/<id>/main.js`) are minified
 // single-line megabytes-of-text blobs — a 3-way text merge on them

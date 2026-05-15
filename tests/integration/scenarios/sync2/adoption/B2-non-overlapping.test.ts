@@ -116,7 +116,7 @@ describe.skipIf(!integrationEnabled())(
         expect(remoteFiles).toContain("Notes/local-only.md");
         expect(remoteFiles).toContain(".obsidian/.gitignore");
         expect(remoteFiles).toContain(
-          ".obsidian/plugins/github-gitless-sync/.gitignore",
+          ".obsidian/plugins/github-easy-sync/.gitignore",
         );
         expect(await readRemoteFile(branch, "Notes/local-only.md")).toBe(
           "private journal\n",

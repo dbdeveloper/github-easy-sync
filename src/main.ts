@@ -1,3 +1,7 @@
+// Originally authored by Silvano Cerza (https://silvanocerza.com).
+// Modified by Claude Code under the attentive guidance of Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
+
 import {
   EventRef,
   MarkdownView,
@@ -39,10 +43,9 @@ import manifest from "../manifest.json";
 // short enough that consecutive Sync clicks don't stack notices.
 const BRIEF_NOTICE_MS = 700;
 
-// Plugin entry point. After the Stage 7 cutover this only orchestrates
-// sync2: legacy SyncManager, events-listener, and the chunk-pick
-// conflict view are gone. The plugin id (`github-gitless-sync`) is
-// kept verbatim — only the engine changed.
+// Plugin entry point. Orchestrates Sync2Manager + ConflictStore;
+// commands, ribbons, settings tab, and IntervalScheduler wiring live
+// here.
 export default class GitHubSyncPlugin extends Plugin {
   settings: GitHubSyncSettings;
   // Sync2Manager + ConflictStore are constructed once during onload

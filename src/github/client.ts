@@ -1,3 +1,7 @@
+// Originally authored by Silvano Cerza (https://silvanocerza.com).
+// Modified by Claude Code under the attentive guidance of Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
+
 import { requestUrl } from "obsidian";
 import Logger from "src/logger";
 import { GitHubSyncSettings } from "src/settings/settings";

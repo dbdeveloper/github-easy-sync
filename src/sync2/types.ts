@@ -1,3 +1,7 @@
+// Authored and tested by Claude Code under the attentive guidance of
+// Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
+
 // Types shared across the sync2 stack. Kept deliberately small and free
 // of legacy field carry-over: sync2 builds its own state model, it does
 // not consume the legacy manifest schema.

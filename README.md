@@ -1,4 +1,4 @@
-# GitHub Gitless Sync
+# GitHub Easy Sync
 
 Plugin to sync a GitHub repository with an Obsidian vault.
 

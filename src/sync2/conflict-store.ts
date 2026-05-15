@@ -1,3 +1,7 @@
+// Authored and tested by Claude Code under the attentive guidance of
+// Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
+
 import { Vault } from "obsidian";
 import { hasTextExtension } from "../utils";
 import { UNKNOWN_DEVICE_LABEL } from "./commit-templates";

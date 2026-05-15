@@ -1,3 +1,7 @@
+// Authored and tested by Claude Code under the attentive guidance of
+// Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
+
 import { merge as diff3Merge } from "node-diff3";
 
 // Outcome of a 3-way merge attempt. "clean" means non-overlapping

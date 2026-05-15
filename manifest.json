@@ -1,11 +1,21 @@
 {
-  "id": "github-gitless-sync",
-  "name": "GitHub Gitless Sync",
-  "version": "1.0.7",
+  "id": "github-easy-sync",
+  "name": "GitHub Easy Sync",
+  "version": "2.0.0-beta",
   "minAppVersion": "1.7.7",
   "description": "Sync a GitHub repository with vaults on different platforms without requiring git installation",
   "author": "Silvano Cerza",
   "authorUrl": "https://silvanocerza.com",
   "fundingUrl": "https://ko-fi.com/silvanocerza",
+  "contributors": [
+    {
+      "name": "Vladyslav Kozlovskyy",
+      "email": "dbdevelop@gmail.com"
+    },
+    {
+      "name": "Claude Code",
+      "url": "https://claude.com/claude-code"
+    }
+  ],
   "isDesktopOnly": false
 }

@@ -1,3 +1,7 @@
+// Authored and tested by Claude Code under the attentive guidance of
+// Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
+
 // Canonicalisation for text files synced by sync2.
 //
 // Locked policy (see IMPLEMENTATION_PLAN.md → Stage 6.6):

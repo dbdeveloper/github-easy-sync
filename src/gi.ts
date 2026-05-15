@@ -1,3 +1,7 @@
+// Authored and tested by Claude Code under the attentive guidance of
+// Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
+
 import ignore, { Ignore } from "ignore";
 // path-browserify is a pure-JS implementation of Node's `path` module,
 // safe to load on Obsidian Mobile (no Node runtime). A top-level

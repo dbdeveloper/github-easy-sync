@@ -1,3 +1,7 @@
+// Authored and tested by Claude Code under the attentive guidance of
+// Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
+
 // IntervalScheduler — the timer + startup orchestration that drives
 // background syncs and the watchdog drain. Lives outside main.ts so
 // its three decision branches (interval-enabled, watchdog, startup)

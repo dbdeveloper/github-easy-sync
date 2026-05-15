@@ -1,3 +1,7 @@
+// Authored and tested by Claude Code under the attentive guidance of
+// Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
+
 // Status-bar widget that shows pending conflict count (Stage 6.5).
 // Hidden when there are no pending conflicts; visible as `🔀 N`
 // otherwise. Click opens the Conflict View workspace leaf.

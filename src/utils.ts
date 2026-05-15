@@ -1,8 +1,8 @@
-import { base64ToArrayBuffer } from "obsidian";
+// Originally authored by Silvano Cerza (https://silvanocerza.com).
+// Modified by Claude Code under the attentive guidance of Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
 
-// Sync2-only utility functions surviving the Stage 7 cutover. Legacy
-// helpers (isSyncable, classifyForConflict, compareSemver, …) lived
-// here pre-cutover; the new engine doesn't need them.
+import { base64ToArrayBuffer } from "obsidian";
 
 const TEXT_EXTENSIONS = [
   // Notes / docs

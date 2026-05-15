@@ -1,3 +1,7 @@
+// Authored and tested by Claude Code under the attentive guidance of
+// Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
+
 // Pure helpers for ConflictView. Extracted from conflict-view.ts so
 // tests can import them without dragging in Obsidian's ItemView
 // (which crashes outside the live Obsidian environment).

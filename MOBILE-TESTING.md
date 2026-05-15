@@ -53,7 +53,7 @@ Run each of these on the device, with the result column filled in. "Pass" means 
 
 | # | Scenario | Expected | Result |
 |---|---|---|---|
-| 13 | Turn on airplane mode, click Sync 3× with different edits between each | Each click queues a new batch (visible as folders under `.obsidian/plugins/github-gitless-sync/.push-queue/`). Notice flashes "Commit N files" each time; no error toast. | |
+| 13 | Turn on airplane mode, click Sync 3× with different edits between each | Each click queues a new batch (visible as folders under `.obsidian/plugins/github-easy-sync/.push-queue/`). Notice flashes "Commit N files" each time; no error toast. | |
 | 14 | Turn off airplane mode; wait for next interval tick (5 min by default) | Watchdog drain fires; all 3 batches push sequentially to GitHub. Final flash "Sync done". | |
 | 15 | Force-quit Obsidian mid-push, relaunch | onload's drain picks up the half-pushed batch; resume layer (uploadedBlobs) skips blobs already on GitHub | |
 
@@ -89,5 +89,5 @@ Open a GitHub issue with:
 - Device + Android/iOS version + Obsidian version
 - The scenario number above that failed
 - Expected vs observed result
-- A snapshot of `<vault>/.obsidian/plugins/github-gitless-sync/.push-queue/` (paths only — content may carry private data)
+- A snapshot of `<vault>/.obsidian/plugins/github-easy-sync/.push-queue/` (paths only — content may carry private data)
 - Anything `<vault>/.obsidian/github-easy-sync.log` says when "Enable logging" was on

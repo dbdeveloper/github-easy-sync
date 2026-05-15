@@ -1,10 +1,10 @@
-// Plugin settings shape. Pure sync2 after the Stage 7 cutover —
-// legacy fields (firstSync, deviceName, conflictHandling,
-// conflictViewMode, keepPluginConflictCopy, syncConfigDir,
-// experimentalSync2, showConflictsRibbonButton) are no longer
-// declared here; if older data.json files contain them, they
-// silently load into Object.assign and remain in memory but
-// nothing reads them. Saving normalises back to the shape below.
+// Originally authored by Silvano Cerza (https://silvanocerza.com).
+// Modified by Claude Code under the attentive guidance of Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
+// AGPL-3.0 — see LICENSE.
+
+// Plugin settings shape. Older data.json files may contain fields
+// no longer declared here; Object.assign loads them into memory but
+// nothing reads them, and saving normalises back to the shape below.
 export interface GitHubSyncSettings {
   // GitHub repo coordinates.
   githubToken: string;
