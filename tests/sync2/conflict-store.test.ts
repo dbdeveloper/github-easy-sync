@@ -315,6 +315,36 @@ describe("ConflictStore", () => {
       expect(store2.get(r.id)?.theirsBlobSha).toBe("sha");
     });
 
+    it("orphan record (sibling file gone) is cleaned up on load", async () => {
+      // Create a conflict, then delete the sibling file outside any
+      // listener (simulating "user deleted via vim/cli while Obsidian
+      // was closed"). On the next plugin load, the conflict-store
+      // should treat the record as implicitly resolved.
+      const r = await f.store.create({
+        vaultPath: "x.md",
+        baseContent: "b",
+        theirsContent: "t",
+        baseCommitSha: null,
+        theirsBlobSha: "sha",
+        theirsAuthor: DEVICE_LABEL,
+      });
+      fs.rmSync(path.join(f.root, r.siblingPath));
+
+      const store2 = new ConflictStore({
+        vault: f.vault as unknown as import("obsidian").Vault,
+        configDir: CONFIG_DIR,
+        selfPluginId: SELF_PLUGIN_ID,
+      });
+      await store2.load();
+
+      expect(store2.hasPending("x.md")).toBe(false);
+      expect(store2.list()).toEqual([]);
+      // Conflict folder physically gone.
+      expect(
+        fs.existsSync(path.join(f.conflictsRoot, r.id)),
+      ).toBe(false);
+    });
+
     it("ignores non-conflict folders inside .conflicts/ root", async () => {
       // Drop a stray dir that doesn't match the 17-digit pattern.
       fs.mkdirSync(path.join(f.conflictsRoot, "scratch"), { recursive: true });

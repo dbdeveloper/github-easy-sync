@@ -94,9 +94,18 @@ export default class ConflictStore {
       try {
         const text = await this.vault.adapter.read(metaPath);
         const record = JSON.parse(text) as ConflictRecord;
-        if (this.isValidRecord(record)) {
-          this.indexRecord(record);
+        if (!this.isValidRecord(record)) continue;
+        // Orphan check: if the sibling file is gone (user deleted it
+        // while Obsidian was closed, or otherwise outside the vault
+        // delete-listener's reach), treat the conflict as resolved.
+        // Without this, the record would stay indexed forever and
+        // enqueueOrMerge would silently keep filtering the path out
+        // of every future push.
+        if (!(await this.vault.adapter.exists(record.siblingPath))) {
+          await this.vault.adapter.rmdir(folder, true);
+          continue;
         }
+        this.indexRecord(record);
       } catch {
         // Malformed meta.json — skip silently. The conflict survives on
         // disk; an admin can clean it up manually. We don't surface
