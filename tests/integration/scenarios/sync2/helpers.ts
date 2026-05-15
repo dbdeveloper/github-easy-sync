@@ -65,6 +65,12 @@ export interface Sync2ClientOpts {
   // syncing configDir paths the way they did before the toggle
   // landed. I-series tests opt into false explicitly.
   syncConfigDir?: boolean;
+  // Default `true` here for back-compat with existing C-series tests
+  // that exercise normalization. Production default flipped to false
+  // in DEFAULT_SETTINGS to avoid the "convergence push" surprise on
+  // first adoption — tests that exercise that surprise (interrupted
+  // adoption resume) should pass `autoCanonicalize: true` explicitly.
+  autoCanonicalize?: boolean;
 }
 
 export interface Sync2TestClient {
@@ -189,6 +195,7 @@ export async function createSync2Client(
     conflictStore,
     onConflict,
     accumulateOfflineSyncs: opts.accumulateOfflineSyncs ?? false,
+    autoCanonicalize: () => opts.autoCanonicalize ?? true,
   });
 
   return {

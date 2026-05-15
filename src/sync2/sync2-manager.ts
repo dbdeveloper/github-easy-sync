@@ -390,7 +390,7 @@ export class Sync2Manager {
         await this.store.save();
         // "Nothing local AND nothing pending in the queue" is the
         // truly idle case — fire onNoLocalChanges so plugin code can
-        // flash a brief "No changes" notice. If the queue still has
+        // flash a brief "Nothing to commit" notice. If the queue still has
         // pending batches (offline-accumulate case), drain
         // picks them up and onProgress takes over the user feedback.
         const pendingBatches = await this.queue.list();
@@ -950,6 +950,34 @@ export class Sync2Manager {
           continue;
         }
 
+        // Canonicalize-aware resume: when the local copy matches what
+        // we WOULD write under autoCanonicalize, the file is our own
+        // interrupted-adoption leftover from a previous run that was
+        // killed (e.g., Android process suspended) before recordSync
+        // landed for this entry. Without this branch, the mtime-newer
+        // check below would mis-classify it as user-edited "local
+        // wins" and push the canonicalized bytes back to GitHub
+        // pretending they're user content — exactly the surprise
+        // 96-file re-push reported on first Android setup.
+        if (
+          hasTextExtension(filePath) &&
+          this.autoCanonicalize() &&
+          (await this.canonicalMatchesLocal(filePath, item.sha, localSha))
+        ) {
+          const stat = await this.vault.adapter.stat(filePath);
+          if (stat) {
+            this.store.set(filePath, {
+              path: filePath,
+              remoteSha: localSha,
+              mtime: stat.mtime,
+              size: stat.size,
+            });
+          }
+          identical++;
+          tickPull();
+          continue;
+        }
+
         const stat = await this.vault.adapter.stat(filePath);
         const localMtimeMs = stat?.mtime ?? 0;
         if (localMtimeMs >= remoteHeadDateMs) {
@@ -1352,6 +1380,33 @@ export class Sync2Manager {
     return { canonicalSha, changed };
   }
 
+  // Fetch the remote text blob, run it through the same canonicalize
+  // logic writeRemoteText would apply, and compare its git-blob SHA to
+  // the local file's SHA. Used by adoption resume to recognize files
+  // that the previous (interrupted) bootstrap already wrote out in
+  // canonical form but didn't get to recordSync. Adds one getBlob per
+  // candidate path during adoption only — the post-adoption fast path
+  // (pullIfNeeded) never reaches this code.
+  private async canonicalMatchesLocal(
+    filePath: string,
+    remoteSha: string,
+    localSha: string,
+  ): Promise<boolean> {
+    try {
+      const blob = await this.client.getBlob({ sha: remoteSha, retry: true });
+      const remoteText = decodeBase64String(blob.content);
+      const { content: canonical } = normalizeText(remoteText);
+      const canonicalBytes = new TextEncoder().encode(canonical)
+        .buffer as ArrayBuffer;
+      const canonicalSha = await calculateGitBlobSHA(canonicalBytes);
+      return localSha === canonicalSha;
+    } catch {
+      // Fail closed: if we can't fetch / decode the blob, fall through
+      // to the mtime branch — same behavior as before the resume hint.
+      return false;
+    }
+  }
+
   private async ensureParentDir(filePath: string): Promise<void> {
     const slash = filePath.lastIndexOf("/");
     if (slash <= 0) return;
@@ -1471,6 +1526,18 @@ export class Sync2Manager {
     let progress: ProgressHandle | null = sharedProgress;
     let commitNum = 0;
     try {
+      // First-ever sync against this remote needs the bootstrap probe
+      // BEFORE pullIfNeeded — adoption resolves identical/local-only/
+      // remote-only/diverging files, sets lastSyncCommitSha. Click
+      // paths (syncAll/syncFile) already call this in their body, but
+      // background entry points (onload's resumeQueue, interval-tick
+      // backgroundDrain) reach drain directly without going through
+      // the click body — they MUST bootstrap here or fresh devices
+      // would silently no-op forever.
+      // bootstrapIfNeeded short-circuits in O(1) when
+      // lastSyncCommitSha !== null, so the click-path callers pay
+      // nothing for this defensive call.
+      await this.bootstrapIfNeeded(progress);
       let pushedAnyBatch = false;
       while (true) {
         const headHint = await this.pullIfNeeded(progress);

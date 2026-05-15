@@ -52,7 +52,10 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           .setPlaceholder("Token")
           .setValue(this.plugin.settings.githubToken)
           .onChange(async (value) => {
-            this.plugin.settings.githubToken = value;
+            // Android paste reliably appends trailing whitespace; trim
+            // here so a paste-then-leave-field sequence doesn't save a
+            // token that 401s against GitHub for "no apparent reason".
+            this.plugin.settings.githubToken = value.trim();
             await this.plugin.saveSettings();
           }).inputEl.type = "password";
         tokenInput = text;
@@ -66,7 +69,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           .setPlaceholder("Owner")
           .setValue(this.plugin.settings.githubOwner)
           .onChange(async (value) => {
-            this.plugin.settings.githubOwner = value;
+            this.plugin.settings.githubOwner = value.trim();
             await this.plugin.saveSettings();
           }),
       );
@@ -79,7 +82,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           .setPlaceholder("Repository")
           .setValue(this.plugin.settings.githubRepo)
           .onChange(async (value) => {
-            this.plugin.settings.githubRepo = value;
+            this.plugin.settings.githubRepo = value.trim();
             await this.plugin.saveSettings();
           }),
       );
@@ -92,7 +95,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           .setPlaceholder("Branch name")
           .setValue(this.plugin.settings.githubBranch)
           .onChange(async (value) => {
-            this.plugin.settings.githubBranch = value;
+            this.plugin.settings.githubBranch = value.trim();
             await this.plugin.saveSettings();
           }),
       );
@@ -289,7 +292,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       )
       .addToggle((toggle) =>
         toggle
-          .setValue(this.plugin.settings.autoCanonicalizeTextFiles ?? true)
+          .setValue(this.plugin.settings.autoCanonicalizeTextFiles ?? false)
           .onChange(async (value) => {
             this.plugin.settings.autoCanonicalizeTextFiles = value;
             await this.plugin.saveSettings();

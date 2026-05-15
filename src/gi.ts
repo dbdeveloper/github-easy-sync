@@ -1,6 +1,12 @@
 import ignore, { Ignore } from "ignore";
-import * as fs from "fs";
-import * as path from "path";
+// path-browserify is a pure-JS implementation of Node's `path` module,
+// safe to load on Obsidian Mobile (no Node runtime). A top-level
+// `import "path"` would leave a `require("path")` at the top of the
+// bundle (esbuild marks "path" as external by default), which throws
+// at load time on mobile and silently crashes the plugin during
+// "Enable" in the community-plugins list. Same problem applied to fs;
+// see defaultReadFile below for how that one is handled.
+import * as path from "path-browserify";
 
 type ReadFile = (absPath: string) => string | null;
 type AsyncReadFile = (absPath: string) => Promise<string | null>;
@@ -34,9 +40,19 @@ interface Node {
 // still picking up between-sync edits at the start of the next one.
 const STAT_COOLDOWN_MS = 500;
 
+// Production sync path: vault-adapter-backed reader injected via
+// change-detector.ts → ignoredAsync(). Default below is only used by
+// unit tests, hence lazy-require so mobile (no Node) doesn't fail at
+// module load.
 const defaultReadFile: ReadFile = (absPath) => {
+  let fsMod: typeof import("fs");
   try {
-    return fs.readFileSync(absPath, "utf8");
+    fsMod = require("fs");
+  } catch {
+    return null;
+  }
+  try {
+    return fsMod.readFileSync(absPath, "utf8");
   } catch (err) {
     const e = err as NodeJS.ErrnoException;
     if (e.code === "ENOENT" || e.code === "EISDIR" || e.code === "ENOTDIR") {
@@ -46,16 +62,23 @@ const defaultReadFile: ReadFile = (absPath) => {
   }
 };
 
+
 export default class GI {
   private rootDir: string;
   private root: Node;
   private readFile: ReadFile;
 
   constructor(rootDir: string, readFile: ReadFile = defaultReadFile) {
-    if (!path.isAbsolute(rootDir)) {
-      throw new Error(`GI: rootDir must be absolute, got "${rootDir}"`);
+    // Empty rootDir is allowed: some mobile vault adapters return ""
+    // for basePath, and callers already feed us vault-relative paths
+    // in that case, so "no prefix" is a valid mode.
+    if (rootDir !== "" && !path.isAbsolute(rootDir)) {
+      throw new Error(
+        `GI: rootDir must be absolute or empty, got "${rootDir}"`,
+      );
     }
-    this.rootDir = path.resolve(rootDir).split(path.sep).join("/");
+    this.rootDir =
+      rootDir === "" ? "" : path.resolve(rootDir).split(path.sep).join("/");
     this.readFile = readFile;
     this.root = makeNode("");
   }
@@ -211,10 +234,19 @@ export default class GI {
     // Relative inputs are anchored to rootDir, not to process.cwd() — the
     // caller thinks in vault-relative terms. Absolute inputs are resolved
     // as-is and then trimmed against rootDir below.
-    const absRaw = path.isAbsolute(normalized)
-      ? path.resolve(normalized)
-      : path.resolve(this.rootDir, normalized);
+    let absRaw: string;
+    if (path.isAbsolute(normalized)) {
+      absRaw = path.resolve(normalized);
+    } else if (this.rootDir === "") {
+      absRaw = path.resolve("/", normalized);
+    } else {
+      absRaw = path.resolve(this.rootDir, normalized);
+    }
     const abs = absRaw.split(path.sep).join("/");
+    if (this.rootDir === "") {
+      // No prefix to strip — return abs without the leading "/".
+      return abs.startsWith("/") ? abs.slice(1) : abs;
+    }
     if (abs === this.rootDir) return "";
     const prefix = this.rootDir + "/";
     if (!abs.startsWith(prefix)) return null;

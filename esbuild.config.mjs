@@ -73,7 +73,11 @@ const context = await esbuild.context({
     "@lezer/common",
     "@lezer/highlight",
     "@lezer/lr",
-    ...builtins,
+    // `path` is intentionally NOT externalized: src/gi.ts imports
+    // path-browserify (pure JS, mobile-safe) and esbuild needs to
+    // bundle it rather than leave a top-level require("path") that
+    // would crash on Obsidian Mobile.
+    ...builtins.filter((m) => m !== "path"),
   ],
   format: "cjs",
   target: "es2018",

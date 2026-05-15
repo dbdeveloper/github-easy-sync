@@ -121,5 +121,13 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   accumulateOfflineSyncs: false,
   deviceLabel: "Obsidian",
   syncConfigDir: false,
-  autoCanonicalizeTextFiles: true,
+  // Off by default: a "true" default surprised first-time users by
+  // turning their initial adoption into a "convergence push" (we
+  // canonicalize remote bytes on pull, skip recordSync because bytes
+  // changed, then findChanges emits the file as modified and pushes
+  // canonical bytes back). For repos with CRLF/BOM history that's
+  // tens to hundreds of phantom commits on first setup. Opt-in keeps
+  // the safe behavior and lets users who actually want canonical
+  // text on disk turn it on knowingly.
+  autoCanonicalizeTextFiles: false,
 };

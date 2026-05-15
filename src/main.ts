@@ -223,6 +223,31 @@ export default class GitHubSyncPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    // One-pass sanitize for GitHub identity fields: Android's
+    // paste-with-suggestion-bar appends trailing whitespace silently,
+    // and a single trailing space in any of these makes the entire
+    // REST API answer 404 for the affected token (GitHub returns 404
+    // rather than 401 for "valid token, repo outside scope" — which
+    // covers the trailing-space case since `owner/repo` no longer
+    // matches anything). Rewrite once on load so existing installs
+    // self-heal without forcing the user to re-type each field.
+    const before = JSON.stringify({
+      t: this.settings.githubToken,
+      o: this.settings.githubOwner,
+      r: this.settings.githubRepo,
+      b: this.settings.githubBranch,
+    });
+    this.settings.githubToken = (this.settings.githubToken ?? "").trim();
+    this.settings.githubOwner = (this.settings.githubOwner ?? "").trim();
+    this.settings.githubRepo = (this.settings.githubRepo ?? "").trim();
+    this.settings.githubBranch = (this.settings.githubBranch ?? "").trim();
+    const after = JSON.stringify({
+      t: this.settings.githubToken,
+      o: this.settings.githubOwner,
+      r: this.settings.githubRepo,
+      b: this.settings.githubBranch,
+    });
+    if (before !== after) await this.saveSettings();
   }
 
   async saveSettings(): Promise<void> {
@@ -281,7 +306,7 @@ export default class GitHubSyncPlugin extends Plugin {
       vault: this.app.vault,
       configDir: this.app.vault.configDir,
       selfPluginId: manifest.id,
-      autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? true,
+      autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? false,
     });
     const detector = new ChangeDetector({
       vault: this.app.vault,
@@ -354,7 +379,7 @@ export default class GitHubSyncPlugin extends Plugin {
       conflictStore,
       onConflict: (args) => this.handleSync2Conflict(args),
       accumulateOfflineSyncs: this.settings.accumulateOfflineSyncs ?? false,
-      autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? true,
+      autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? false,
       onProgress: (initial: string) => {
         // Long-lived notice during the network phase — stays visible
         // until processQueue calls handle.hide(). The text is the
@@ -390,12 +415,12 @@ export default class GitHubSyncPlugin extends Plugin {
         );
       },
       onNoLocalChanges: () => {
-        new Notice("No changes", BRIEF_NOTICE_MS);
+        new Notice("Nothing to commit", BRIEF_NOTICE_MS);
       },
       // Observability hook only. The three user-visible notices in
       // sync2's new UX contract are handled elsewhere:
       //   - "Commit N files" via onLocalCommitted (click-time ack)
-      //   - "No changes" via onNoLocalChanges (click on idle vault)
+      //   - "Nothing to commit" via onNoLocalChanges (click on idle vault)
       //   - "Sync done" via the drain's own progress handle (replaces
       //     the Pull/Push notice on heavy syncs; brief flash on light
       //     syncs that did real work).

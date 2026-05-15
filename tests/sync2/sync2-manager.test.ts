@@ -2147,7 +2147,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
 
       await f2.manager.syncAll();
 
-      // Queue had work → not idle → no "No changes" notice.
+      // Queue had work → not idle → no "Nothing to commit" notice.
       expect(noChangesCalls).toEqual([]);
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
@@ -2185,6 +2185,53 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
 
       expect(noChangesCalls).toEqual([1]);
       fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+  });
+
+  describe("resumeQueue / drain — bootstrap entry point", () => {
+    // Regression guard for the "fresh device, never clicked Sync,
+    // interval timer or onload fires backgroundDrain → drain →
+    // pullIfNeeded" path. Drain must call bootstrapIfNeeded itself
+    // since these background entry points bypass the click-body that
+    // would normally bootstrap. Without this, fresh-install
+    // users with autoCommit OFF + syncOnStartup ON would see drain
+    // exit silently and never adopt the remote content.
+    it("drain on a fresh client (lastSync=null) triggers bootstrap-from-remote", async () => {
+      const f2 = fixture({});
+      // Fresh client: no lastSync recorded, no local files.
+      f2.client.setBranchHead("FRESH_HEAD");
+      f2.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
+      f2.client.setContentAtRef("FRESH_HEAD", "Notes/alpha.md", "alpha\n");
+      f2.client.setContentAtRef("FRESH_HEAD", "Notes/beta.md", "beta\n");
+
+      await f2.manager.resumeQueue();
+
+      // Bootstrap-from-remote pulled the remote files into the vault.
+      expect(
+        fs.readFileSync(path.join(f2.root, "Notes/alpha.md"), "utf8"),
+      ).toBe("alpha\n");
+      expect(
+        fs.readFileSync(path.join(f2.root, "Notes/beta.md"), "utf8"),
+      ).toBe("beta\n");
+      // lastSync now set — subsequent calls skip bootstrap.
+      expect(f2.store.getLastSyncCommitSha()).toBe("FRESH_HEAD");
+      fs.rmSync(f2.root, { recursive: true, force: true });
+    });
+
+    it("drain on an already-bootstrapped client doesn't re-bootstrap", async () => {
+      // After lastSync is set, bootstrapIfNeeded returns null in O(1)
+      // — no getRepoContent call, no re-adoption.
+      f.store.setLastSync("HEAD_X", "TREE_X");
+      f.client.setBranchHead("HEAD_X");
+
+      await f.manager.resumeQueue();
+
+      // Defensive check: no extra getRepoContent calls (the only
+      // surface the bootstrap path uses to fetch the tree).
+      const tree = f.client.calls.filter(
+        (c) => c.op === "getRepoContent",
+      );
+      expect(tree).toEqual([]);
     });
   });
 
@@ -2538,7 +2585,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
       // With the lazy-open contract there's no eager click-time notice
       // anymore. Trivially idle syncs run completely silent — neither
       // pull nor push opens the long-lived progress handle. The
-      // onNoLocalChanges callback handles the brief "No changes" flash
+      // onNoLocalChanges callback handles the brief "Nothing to commit" flash
       // separately.
       const messages: string[] = [];
       const f2 = fixture({

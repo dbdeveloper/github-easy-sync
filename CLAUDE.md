@@ -132,13 +132,16 @@ Located at `<configDir>/plugins/github-gitless-sync/.push-queue/`. Each pending 
 
 - Local missing → pull, write vault, recordSync.
 - Local exists, SHA matches remote → recordSync only (no transfer, no overwrite, mtime preserved).
+- Local exists, SHA differs **AND canonicalize is ON AND file is text** → canonicalize-aware resume probe: fetch the remote blob, run it through the same `normalizeText` we'd apply on write, recompute its git-blob SHA, and compare to local. **Match → recordSync against the canonical SHA, treat as identical** (this is our own previous interrupted-adoption write, not a user edit). No match → fall through to the atomic mtime branch below.
 - Local exists, SHA differs → atomic mtime resolution:
   - `local.mtime >= remoteHeadCommit.committerDate` → **keep local**. No recordSync; findChanges later emits "added" and the next push lifts local to remote.
   - Else → pull, **overwrite local in place**, recordSync.
 
 Local-only files (in vault, not in remote tree) are untouched here; findChanges picks them up post-adoption as "added".
 
-Tie on mtime → local wins. No "deleted-on-this-device" detection (no history); README must instruct users to pre-sync via their previous tool. Covered by **B1–B6** tests under `tests/integration/scenarios/sync2/adoption/`.
+Tie on mtime → local wins. No "deleted-on-this-device" detection (no history); README must instruct users to pre-sync via their previous tool. Covered by **B1–B7** tests under `tests/integration/scenarios/sync2/adoption/`.
+
+**Why the canonicalize-aware probe exists.** Without it, the sequence "fresh client + canonicalize ON + Android suspends Obsidian mid-adoption + user re-foregrounds and clicks Sync" produced a surprise N-file convergence push on first setup. Step-by-step: first attempt pulled M files and wrote them out as canonical bytes (LF / no-BOM / trailing-NL), but `recordSync` was intentionally skipped (canonicalization changed bytes → snapshot stays stale by design — see "Text canonicalization toggle" below). Process died before `setLastSync` at the end of `bootstrapFromRemote`, so on disk we had M canonical files but no snapshot entries and `lastSyncCommitSha === null`. Second attempt re-entered `bootstrapFromRemote`, saw the local files, computed their **canonical** git-blob SHA, compared to remote tree's **raw** git-blob SHA (with original CRLF/BOM), found them different, fell into the mtime branch, decided local won (mtime is "just now"), and skipped recordSync again. `findChanges` then emitted all M files as "added", pushing canonical bytes back to GitHub as if user-edited. The probe closes this gap: one extra `getBlob` per non-identical text file during adoption only — post-adoption fast path (`pullIfNeeded`) never reaches this code. Pinned by **B7**.
 
 ### Bare-repo bootstrap
 
@@ -230,13 +233,15 @@ Cadence: user's `syncInterval` minutes when enabled (clamped to ≥ 1); hardcode
 
 ### Text canonicalization toggle (`autoCanonicalizeTextFiles`)
 
-Default `true`. Text files (per `hasTextExtension`) get rewritten locally to LF / no-BOM / trailing-NL on both pull (after fetching from GitHub) and on enqueue (before snapshotting into the batch). The toggle gates:
+Default **`false`** (opt-in). Text files (per `hasTextExtension`) get rewritten locally to LF / no-BOM / trailing-NL on both pull (after fetching from GitHub) and on enqueue (before snapshotting into the batch). The toggle gates:
 
 1. `Sync2Manager.writeRemoteText` — pull-side normalization. When off, raw bytes are written verbatim, `canonicalSha === blob.sha`, `changed = false`, so the snapshot lands a recordSync on first pass.
 2. `PushQueue.copyFileFromVault` — enqueue-time normalization of the user's edits. When off, the live vault file is NOT rewritten and bytes go to the batch verbatim.
 3. `PushQueue.overwriteFile` — reconcile-resolved writeback. When off, resolved bytes land in the batch dir verbatim.
 
 When canonicalization is on AND a write changed bytes, `recordSync` is INTENTIONALLY SKIPPED. The next `findChanges` sees the local-vs-snapshot divergence and emits the file as modified; the next push uploads the canonical bytes back. This replaced the old `republishPaths` + `appendRepublishChanges` inline mechanism — convergence happens on the next click (a documented one-click delay) but the engine has one fewer special path.
+
+**Why the default flipped from `true` to `false`.** With the previous `true` default, a first adoption against a repo with CRLF / BOM / missing-trailing-NL history (very common: Windows users, repos previously synced via obsidian-git, anything pulled from a Windows-authored upstream) produced an unexpected "convergence push" on the very first click — every non-canonical text file got pulled, rewritten locally, then pushed back as if user-edited. A real user reported a 96-file commit appearing on first Android setup against a vault they hadn't touched. The fix in `bootstrapFromRemote` (canonicalize-aware resume probe — see "Adoption" above) makes the interrupted-mid-adoption case safe, but the convergence push on `true` is still a UX surprise on first setup. Flipping the default to `false` gives byte-exact passthrough out of the box; users who genuinely want canonical text on disk turn it on explicitly via the settings tab.
 
 Toggle threaded via live getters into both `PushQueue` and `Sync2Manager` so flipping it in the settings tab takes effect on the very next sync.
 
@@ -309,7 +314,7 @@ src/sync2/
 ```
 sync2/
 ├── bootstrap/             # A1, A2: bare-repo bootstrap + 10-iter stress
-├── adoption/              # B1–B6: first sync against non-bare remote
+├── adoption/              # B1–B7: first sync against non-bare remote (B7 = interrupted-resume with canonicalize ON)
 ├── normalization/         # C1, C2, C3 (resume) + CRLF/BOM round-trips
 ├── incremental/           # D1–D8: post-adoption + delete races
 ├── conflicts-misc/        # E1–E4: reconcile-onload, binary atomic, plugin-js semver/mtime
@@ -671,7 +676,8 @@ Predates the integration suite. Drives a real first-sync against GitHub via SSH-
 
 - **Paths** always through `normalizePath` from `obsidian` before touching the adapter.
 - **`main.js` at repo root** is the build output Obsidian loads (`manifest.json` points at it). It's not source.
-- **Mobile support**: `isDesktopOnly: false` in `manifest.json`. Don't introduce Node-only APIs in `src/`; `benchmark.ts` and `mock-obsidian.ts` are the only Node-side files and aren't bundled.
+- **Mobile support**: `isDesktopOnly: false` in `manifest.json`. Don't introduce Node-only APIs in `src/`; `benchmark.ts` and `mock-obsidian.ts` are the only Node-side files and aren't bundled. A top-level `import * as fs from "fs"` (or `path`, `os`, `crypto`, etc.) leaves a `require("fs")` at the top of the bundle (esbuild marks these as external by default) and **throws on Obsidian Mobile at module load** — there is no Node runtime in the Capacitor WebView — silently crashing the plugin during "Enable" in the community-plugins list. Two valid patterns: (a) use a pure-JS polyfill (`src/gi.ts` uses `path-browserify`; remove the polyfill's name from the esbuild `external` list so it gets bundled instead of `require`'d); or (b) wrap the require inside a function body with `try/catch` so it's never evaluated at module load — see `defaultReadFile` in `src/gi.ts` for the fs case (only test-time code path; production injects a vault-adapter reader instead). To verify, grep the production bundle: `grep -E "=require\\(\\\"fs\\\"\\)|=require\\(\\\"path\\\"\\)" main.js` must return zero matches at file scope.
+- **Settings-tab text inputs must trim user input.** Android keyboards (and several third-party iOS ones) reliably append trailing whitespace to paste operations from the suggestion bar. A token like `ghp_abc123 ` (one trailing space) makes every GitHub REST call return 404 with valid permission headers — GitHub masks "valid token, repo outside scope" as 404 to avoid leaking private-repo existence, and a whitespaced token never matches the configured repo's scope. `src/settings/tab.ts` calls `.trim()` in every `onChange` for token/owner/repo/branch, and `src/main.ts:loadSettings` runs a one-pass sanitize on read so existing installs with whitespace-poisoned values self-heal on plugin restart.
 - **Don't add files to the hardcoded `isSyncable` blocklist** without a real reason. The default for new "should we sync this?" rules is to add patterns to the seeded gitignore (`CONFIG_DIR_SEED` / `ROOT_SEED` in `gitignore-cache.ts`) — that way users can opt out.
 - **Don't ship per-device manifest fields to remote**. `commitSync` and the bootstrap/adoption helpers strip `firstSyncFromRemoteInProgress`, `firstSyncFromLocalInProgress`, `pluginCreatedGitignores`, and `preExistingGitignoreShas` from the manifest content before push. They're per-device progress markers / install metadata, not shared state. If you add a new manifest field of this kind, add it to the strip list in all three places (search for `delete manifestForRemote.`).
 - **The conflict view UI is fragile** on mobile and long text files. Atomic resolution carries most of the load; if you add new conflict shapes, check whether they belong in the atomic path before plumbing them through the diff modal.
