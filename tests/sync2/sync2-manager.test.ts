@@ -1337,21 +1337,19 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
   // Pull-side normalization is non-negotiable ("ГОЛОВНЕ ПРАВИЛО":
   // locally everything is canonical regardless of what's on remote).
   // When the remote bytes for a text file aren't already canonical,
-  // sync2 writes the canonical form locally AND auto-republishes back
-  // to GitHub in the same syncAll, so the server converges on the
-  // canonical form too ("preferred clean server").
+  // sync2 writes the canonical form locally and intentionally skips
+  // recordSync. The next findChanges pass sees the file as new/
+  // modified and the next syncAll pushes the canonical bytes back —
+  // the server converges on the canonical form over one extra click.
   describe("text canonicalisation on pull (Etap 6.6)", () => {
-    it("CRLF in remote text → local LF + auto-republish push fires in same syncAll", async () => {
+    it("CRLF in remote text → local LF + next syncAll pushes canonical", async () => {
       f.store.setLastSync("BASE_HEAD", "BASE_TREE");
       f.client.setBranchHead("NEW_HEAD");
       f.client.setTreeShaForCommit("NEW_HEAD", "NEW_TREE");
-      // Remote has a CRLF-laden version of the file.
       f.client.setContentAtRef("NEW_HEAD", "doc.md", "line1\r\nline2\r\n");
       f.client.setCompareResult("BASE_HEAD", "NEW_HEAD", {
         status: "ahead",
-        files: [
-          { filename: "doc.md", status: "added", sha: "blob-crlf" },
-        ],
+        files: [{ filename: "doc.md", status: "added", sha: "blob-crlf" }],
       });
 
       await f.manager.syncAll();
@@ -1360,58 +1358,56 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       expect(
         fs.readFileSync(path.join(f.root, "doc.md"), "utf8"),
       ).toBe("line1\nline2\n");
+      // First syncAll deliberately does NOT recordSync the canonical
+      // SHA — that's how the next findChanges spots the divergence.
+      expect(f.store.get("doc.md")).toBeUndefined();
+      // No commit fired in this first syncAll — just pull.
+      expect(f.client.calls.filter((c) => c.op === "createCommit"))
+        .toEqual([]);
 
-      // Auto-republish fired: tree push contains the canonical bytes.
+      // Second syncAll: findChanges sees doc.md as untracked, enqueues
+      // it, drain pushes the canonical bytes back to GitHub.
+      await f.manager.syncAll();
       const tree = f.client.state.lastTree!;
-      const entry = tree.find((e) => e.path === "doc.md");
-      expect(entry?.content).toBe("line1\nline2\n");
-
-      // Snapshot tracks the canonical SHA, not the remote-as-was SHA.
+      expect(tree.find((e) => e.path === "doc.md")?.content).toBe(
+        "line1\nline2\n",
+      );
       expect(f.store.get("doc.md")?.remoteSha).toBe(
         await shaOf("line1\nline2\n"),
       );
-
-      // Republish push moved lastSync past NEW_HEAD.
-      expect(f.store.getLastSyncCommitSha()).not.toBe("NEW_HEAD");
     });
 
-    it("BOM-prefixed remote text → BOM stripped locally + auto-republish", async () => {
+    it("BOM-prefixed remote text → BOM stripped locally + next syncAll pushes canonical", async () => {
       f.store.setLastSync("BASE_HEAD", "BASE_TREE");
       f.client.setBranchHead("NEW_HEAD");
       f.client.setTreeShaForCommit("NEW_HEAD", "NEW_TREE");
-      // Setting content as a JS string with the U+FEFF code point at
-      // index 0; the fake client base64-encodes this on the way out
-      // and the manager decodes it back, so the BOM survives the
-      // round-trip into normalizeText.
       f.client.setContentAtRef("NEW_HEAD", "doc.md", "﻿title\n");
       f.client.setCompareResult("BASE_HEAD", "NEW_HEAD", {
         status: "ahead",
-        files: [
-          { filename: "doc.md", status: "added", sha: "blob-bom" },
-        ],
+        files: [{ filename: "doc.md", status: "added", sha: "blob-bom" }],
       });
 
       await f.manager.syncAll();
 
-      // BOM is gone locally.
-      const local = fs.readFileSync(path.join(f.root, "doc.md"), "utf8");
-      expect(local).toBe("title\n");
+      expect(
+        fs.readFileSync(path.join(f.root, "doc.md"), "utf8"),
+      ).toBe("title\n");
+      expect(f.client.calls.filter((c) => c.op === "createCommit"))
+        .toEqual([]);
 
-      // Auto-republish pushed the canonical version.
+      await f.manager.syncAll();
       const tree = f.client.state.lastTree!;
       expect(tree.find((e) => e.path === "doc.md")?.content).toBe("title\n");
     });
 
-    it("missing trailing newline on remote → \\n added locally + auto-republish", async () => {
+    it("missing trailing newline on remote → \\n added locally + next syncAll pushes canonical", async () => {
       f.store.setLastSync("BASE_HEAD", "BASE_TREE");
       f.client.setBranchHead("NEW_HEAD");
       f.client.setTreeShaForCommit("NEW_HEAD", "NEW_TREE");
       f.client.setContentAtRef("NEW_HEAD", "doc.md", "no trailing nl");
       f.client.setCompareResult("BASE_HEAD", "NEW_HEAD", {
         status: "ahead",
-        files: [
-          { filename: "doc.md", status: "added", sha: "blob-no-nl" },
-        ],
+        files: [{ filename: "doc.md", status: "added", sha: "blob-no-nl" }],
       });
 
       await f.manager.syncAll();
@@ -1419,6 +1415,10 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       expect(
         fs.readFileSync(path.join(f.root, "doc.md"), "utf8"),
       ).toBe("no trailing nl\n");
+      expect(f.client.calls.filter((c) => c.op === "createCommit"))
+        .toEqual([]);
+
+      await f.manager.syncAll();
       const tree = f.client.state.lastTree!;
       expect(tree.find((e) => e.path === "doc.md")?.content).toBe(
         "no trailing nl\n",
@@ -1514,20 +1514,29 @@ describe("Sync2Manager.syncAll — basic flow (Etap 6a)", () => {
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 
-    it("syncFile: target normalized during pull → republished in this batch", async () => {
+    it("syncFile: target normalized during pull → next syncFile pushes canonical", async () => {
       f.store.setLastSync("BASE_HEAD", "BASE_TREE");
       f.client.setBranchHead("NEW_HEAD");
       f.client.setTreeShaForCommit("NEW_HEAD", "NEW_TREE");
       f.client.setContentAtRef("NEW_HEAD", "x.md", "content\r\n");
       f.client.setCompareResult("BASE_HEAD", "NEW_HEAD", {
         status: "ahead",
-        files: [
-          { filename: "x.md", status: "modified", sha: "blob-crlf" },
-        ],
+        files: [{ filename: "x.md", status: "modified", sha: "blob-crlf" }],
       });
 
       await f.manager.syncFile("x.md");
 
+      // Local is canonical after pull, but no push fired yet — the
+      // path wasn't in any batch at click time.
+      expect(
+        fs.readFileSync(path.join(f.root, "x.md"), "utf8"),
+      ).toBe("content\n");
+      expect(f.client.calls.filter((c) => c.op === "createCommit"))
+        .toEqual([]);
+
+      // Second syncFile picks the canonical local up as "added" and
+      // pushes it back to GitHub.
+      await f.manager.syncFile("x.md");
       const tree = f.client.state.lastTree!;
       expect(tree.find((e) => e.path === "x.md")?.content).toBe("content\n");
     });

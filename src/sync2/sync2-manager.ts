@@ -1931,8 +1931,13 @@ export class Sync2Manager {
         resolved = decision.content;
       }
 
+      // Write resolved to BOTH the batch snapshot (what gets pushed)
+      // and the live vault (what the user sees). After push the
+      // snapshot will recordSync against the resolved SHA, so live ==
+      // snapshot == batch == future remote.
       const buf = new TextEncoder().encode(resolved).buffer as ArrayBuffer;
       await this.queue.overwriteFile(batchId, path, buf);
+      await this.writeRemoteText(path, resolved);
       resolvedPerPath.set(path, { oldOurs: oursContent, newOurs: resolved });
     }
 
