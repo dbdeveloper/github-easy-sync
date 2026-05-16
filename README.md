@@ -191,6 +191,164 @@ What happens on the first click depends on what's on each side:
 
 ---
 
+## Migrating from another GitHub sync plugin
+
+If you're switching from a different Obsidian-to-GitHub sync plugin
+(`obsidian-git`, `github-gitless-sync`, `Obsidian-GitHub-Sync`, etc.),
+follow this sequence. It's the least invasive, most accurate way to
+switch and won't lose edits — the previous plugin does the
+convergence, and GitHub Easy Sync just observes the converged state.
+
+### 1. Sync your local vault and remote repo through the previous plugin
+
+Run a full sync with the old plugin until **both sides are identical**:
+no pending local edits, no remote commits the vault hasn't pulled,
+no unresolved conflicts. This is the single most important step —
+GitHub Easy Sync adopts what it sees, it does not reconstruct any
+history the old plugin produced.
+
+### 2. Disable the previous plugin
+
+**Settings → Community plugins → Installed plugins** → toggle the old
+plugin OFF. Leaving two sync plugins enabled at once produces
+duplicate commits and races over `<configDir>/` files.
+
+### 3. Install and enable GitHub Easy Sync
+
+Follow [Installing the plugin](#installing-the-plugin) for the BRAT
+install + enable steps.
+
+### 4. Fill in credentials
+
+Use **the same repository and branch** the previous plugin was
+syncing to. See [Fill in credentials](#3-fill-in-credentials) for
+each field (GitHub token, owner, repository, branch), and run the
+**Test** button before continuing.
+
+### 5. Click `Sync with GitHub`
+
+In the side ribbon, or via the `Sync with GitHub` command in the
+command palette. Because step 1 made both sides identical,
+[adoption](#5-first-sync) matches every local file to its remote
+counterpart by SHA and records them silently — no transfers, no
+overwrites, no surprise convergence commit.
+
+> **Why this path is the safest.** GitHub Easy Sync's adoption is
+> non-destructive per-file: local files are never overwritten without
+> an mtime check that says the remote is newer. So even if step 1
+> was imperfect, the worst case is "the newer side wins file-by-file"
+> — your edits aren't silently destroyed. Getting step 1 right just
+> means the first sync is a silent no-op instead of a convergence
+> commit, which is the cleanest possible handoff between plugins.
+
+### 6. Delete the old `.git` directory (optional, recommended on mobile)
+
+GitHub Easy Sync syncs through GitHub's REST API and does **not**
+need a local `.git/` folder — all version history lives on GitHub.
+If your previous plugin used real `git` or `isomorphic-git`
+(`obsidian-git`, `Obsidian-GitHub-Sync`), it left a hidden `.git/`
+folder at your vault root. On older vaults this routinely grows to
+tens or hundreds of megabytes — material weight on phones, where
+storage is far more precious than on a laptop.
+
+Once steps 1–5 are done and you've confirmed a sync works, you can
+safely delete `<vault>/.git/` to reclaim that space:
+
+- **Desktop**: enable "show hidden files" in your file manager and
+  trash `.git/`, or run `rm -rf <vault>/.git` in a terminal.
+- **Android**: use a file manager that shows hidden folders (e.g.
+  Material Files, Solid Explorer) and delete `.git/` from the vault.
+- **iOS**: the stock Files app hides dotfiles — easiest is to delete
+  `.git/` from a desktop where the vault is mirrored (iCloud,
+  Syncthing, etc.).
+
+> The actual commit history is preserved on GitHub — only the local
+> object store is removed. GitHub Easy Sync's own state lives under
+> `<configDir>/plugins/github-easy-sync/` and is not affected.
+> If you migrated from `github-gitless-sync` (REST-API-only, like
+> this plugin), there's no `.git/` to clean up — skip this step.
+
+### Alternative for mobile: bootstrap from GitHub repository
+
+If you're setting up the mobile side of the migration from scratch,
+you can skip the `.git/` cleanup entirely by **starting the mobile
+vault empty** and letting GitHub Easy Sync pull everything from the
+remote:
+
+1. On your desktop, finish steps 1–5 above so the GitHub repo holds
+   the authoritative latest state of the vault.
+2. On mobile, create a **new empty Obsidian vault**.
+3. Install only GitHub Easy Sync via BRAT (see
+   [Installing the plugin](#installing-the-plugin)) — you don’t need 
+   an y previous plugins for syncing with GitHub.
+4. [Fill in credentials](#3-fill-in-credentials) pointing at the same
+   repository and branch as desktop.
+5. Click `Sync with GitHub`. The plugin sees `Empty local + Has-files
+   remote` and pulls the entire vault from GitHub
+   (see [First sync](#5-first-sync)).
+
+Because nothing was ever copied from the desktop vault, no `.git/`
+directory appears on the phone — only the files you actually need.
+This is especially attractive on Android and iOS, where finding and
+deleting a hidden folder is far more cumbersome than on desktop.
+
+> This approach assumes step 1 captured everything from your old
+> mobile setup too (if the old plugin was also installed on the
+> phone). Any local-only edits on mobile that never reached GitHub
+> won't survive — they'd be on the old phone vault, which you're
+> replacing.
+
+### Bonus: cloning plugins (and their settings) to the new device
+
+After bootstrapping a fresh mobile vault from GitHub, you don't have
+to re-install every community plugin by hand — sync can do most of
+it for you.
+
+**With `Sync configs` ON on both devices** (Settings → GitHub Easy
+Sync → `Sync configs`): the entire `<vault>/.obsidian/` directory is
+part of the sync, including each plugin's bundled code (`main.js`,
+`manifest.json`, `styles.css`). After the first pull, every plugin
+folder from desktop is already on the phone. To activate the ones
+you want on mobile:
+
+1. Obsidian → **Settings → Community plugins → Installed plugins**.
+2. Hit the reload/refresh icon at the top of the installed list
+   (or restart Obsidian) — the plugins folder is rescanned.
+3. Toggle on the plugins you want to use on this device.
+
+**Plugin updates propagate the same way.** With `Sync configs` ON,
+you only need to update community plugins on **one** device
+(typically desktop, via BRAT or the Community Plugins store). The
+fresh `main.js` / `manifest.json` ride the next sync to the phone.
+To actually load the new version on the receiving device after the
+pull: hit the reload icon in **Installed plugins**, or close and
+reopen Obsidian — until then, the previous version stays loaded in
+memory.
+
+**With `Push plugins data.json` ALSO ON on both devices**: plugin
+settings travel with the plugin code, so each plugin lands on mobile
+already configured identically to desktop — no per-plugin
+reconfiguration needed.
+
+> **When NOT to enable `Push plugins data.json`.**
+> - A plugin stores **secrets** in its `data.json` — API tokens,
+>   account credentials, license keys. Pushing those into a GitHub
+>   repo (even a private one) is a risk you usually don't want.
+> - You want **different settings per device** (different hotkeys,
+>   plugin tuning, sync targets, etc.). With this toggle on,
+>   whichever device pushed last wins, so per-device preferences
+>   ping-pong on every sync.
+>
+> If either applies, leave `Push plugins data.json` **OFF** and
+> reconfigure those mobile plugins by hand — a one-time cost that
+> avoids leaking secrets or overwriting preferences.
+
+Combined with the empty-vault bootstrap above, this is the fastest
+way to spin up a new device during a migration: empty vault →
+credentials → one Sync click → reload → done.
+
+---
+
 ## Settings reference
 
 ### Remote repository
