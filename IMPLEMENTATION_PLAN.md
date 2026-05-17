@@ -349,8 +349,8 @@ Top toolbar (detail):
 зникає зі списку:
 - TrashStore підписаний на `vault.on('create', file)`: при матчі
   `originalPath` запис прибирається з in-memory index (фізично
-  `.trash/<id>/` ще лежить на диску — для можливого manual recovery
-  через filesystem, але у UI його нема).
+  `.trash/<id>/` ще лежить на диску до наступного [Sync with GitHub] —
+  для можливого manual recovery через filesystem, але у UI його нема).
 - GitHub-history entries фільтруються лінивим API на момент рендеру
   списку.
 
@@ -492,14 +492,35 @@ N окремих записів — користувач бачить повну
 Кожен запис trash містить:
 ```
 .trash/<id>/
-  meta.json   ← TrashRecord {id, originalPath, deletedAt, deviceLabel, sha, size, mtime}
-  <basename.ext>   ← фактичний файл (move, не copy)
+  meta.json              ← TrashRecord {id, originalPath, deletedAt, deviceLabel, sha, size, mtime}
+  vault/                 ← дзеркало vault-структури — як у .push-queue/<id>/vault/
+    <originalPath>       ← фактичний файл (move, не copy)
+  .conflicts/            ← опціонально, лише для bundle (R4.1 T3)
+    <conflictId>/
+      meta.json
+      base.<ext>
+      theirs.<ext>
 ```
+
+Структура `vault/<originalPath>` важлива: вона **повторює повний path
+з vault-кореня** (наприклад, `vault/Folder1/note.md`), не просто
+basename. Це:
+- Уникає колізій, якщо в trash потрапили файли з однаковим basename
+  з різних папок vault-у (наприклад, `Folder1/note.md` та
+  `Folder2/note.md` в одному bundle або у різних entries з близьким
+  timestamp).
+- Self-documenting: подивившись у `.trash/<id>/vault/`, одразу видно
+  з якого місця vault-а файл походить, без необхідності читати
+  `meta.json`.
+- Узгоджується з конвенцією `.push-queue/<id>/vault/<path>`,
+  яка вже використовується sync-движком для байт-снапшоту батча.
 
 **R3.2. Move, не copy.** При локальному видаленні файлу через UI
 плагін перехоплює подію `vault.on('delete', file)` і **переміщує**
-файл (`adapter.rename`) у `.trash/<id>/<basename>`. Дисковий простір
-не дублюється; ліміти на розмір не вводяться у v1.
+файл (`adapter.rename`) у `.trash/<id>/vault/<originalPath>`,
+створюючи проміжні підкаталоги за потреби (повторюючи структуру
+оригінального шляху). Дисковий простір не дублюється; ліміти на
+розмір не вводяться у v1.
 
 **Виняток для conflict-sibling**: якщо `file.path` — це
 sibling-файл (`*.conflict-from-*`), він **НЕ** йде у `.trash`. Це
@@ -508,15 +529,74 @@ sibling-файл (`*.conflict-from-*`), він **НЕ** йде у `.trash`. Це
 `.trash/<id>/` директорій, які видаляються cascade-cleanup-ом (R4.1
 T3) — вони видаляються atomically, без рекурсивного `.trash`.
 
-**R3.3. Move/rename hardening.** Obsidian для перейменування зазвичай
-видає `rename` event, але для деяких drag-drop сценаріїв може бути
-послідовність `delete` + `create`. Якщо протягом ~500мс після `delete`
-прийде `create` для файлу з тим самим (SHA+size), вважаємо що це був
-move — просто видаляємо запис з `.trash` (файл уже існує під новим
-ім'ям, нічого повертати не треба).
+**R3.3. Move/rename — конфлікти слідують за файлом.**
 
-Реалізація: `pendingDeletes: Map<sha+size, {id, timer}>`. Подія
-`create` шукає у мапі — match → cancel timer + видалити trash entry.
+**Базова rename-detection** (для файлів **без** pending конфліктів):
+
+Obsidian для перейменування зазвичай видає `rename` event, але для
+деяких drag-drop сценаріїв може бути послідовність `delete` + `create`.
+Якщо протягом ~500мс після `delete` прийде `create` для файлу з тим
+самим (SHA+size), вважаємо що це був move — просто видаляємо запис
+з `.trash` (файл уже існує під новим ім'ям, нічого повертати не треба).
+
+Реалізація: `pendingDeletes: Map<sha+size, {id, timer, oldPath,
+hadConflicts}>`. Подія `create` шукає у мапі — match → cancel timer
++ видалити trash entry.
+
+**Для файлів з pending конфліктами — конфлікти переміщуються разом**:
+
+Якщо файл `Folder1/note.md` має N pending конфліктів (siblings
+`Folder1/note.conflict-from-*.md` і відповідні `.conflicts/<id>/`
+записи), і користувач переміщує його у `Folder2/note.md`, то **всі
+N конфліктів переміщуються разом** атомарно:
+
+- `vault.on('rename', file, oldPath)` для файлу з конфліктами:
+  для кожного запису ConflictStore з `vaultPath === oldPath`:
+  - Обчислити новий sibling-шлях за тим самим шаблоном
+    `buildSiblingPath()`, але з новим vault-path-ом: наприклад
+    `Folder2/note.conflict-from-Phone-<ts>.md`.
+  - `adapter.rename(oldSiblingPath, newSiblingPath)` — фізично
+    переміщуємо sibling.
+  - Оновити `record.vaultPath` і `record.siblingPath` у пам'яті;
+    переписати `.conflicts/<id>/meta.json` зі свіжими полями.
+  - Перерахувати in-memory indexes (`byVaultPath` re-keying з
+    `oldPath` на `newPath`, `bySiblingPath` re-keying відповідно).
+
+- `vault.on('delete', file)` + `create` (drag-drop edge case) для
+  файлу з конфліктами: коли `create` у 500мс-вікні матчиться як move,
+  замість простого drop trash entry виконуємо migration:
+  - Кожен `.conflicts/<conflictId>/` повертається з trash-bundle
+    (`.trash/<id>/.conflicts/<conflictId>/`) у плагін-config dir
+    `<configDir>/plugins/<self>/.conflicts/<conflictId>/`.
+  - Sibling-файли пишуться у vault під **новими** шляхами (на основі
+    `newPath` + buildSiblingPath шаблона) з theirs-байтів.
+  - ConflictStore re-індексує записи з новими vaultPath/siblingPath.
+  - Trash-bundle видаляється (move виявився легітимним).
+
+Семантика: **конфлікти — це анотації над path-ом, які логічно
+прив'язані до файлу як артефакта**, а не до конкретного path-у.
+Користувач очікує, що переміщення файлу веде до переміщення усіх
+пов'язаних з ним метаданих (так само як bundle у trash переїжджає
+атомарно у R4.1 T3).
+
+Це **простіше і безпечніше** за альтернативу "блокувати rename, поки
+є конфлікти": нема відкату через `adapter.rename`, нема ризику
+неконсистентного wiki-link оновлення, нема потреби пояснювати
+користувачу чому його drag-drop "не спрацював".
+
+Edge cases:
+- **Move цілої папки**: Obsidian fire-ить rename для кожного файлу
+  всередині. Кожен файл з конфліктами обробляється індивідуально
+  (його sibling-и теж переміщуються). Sibling-и інших файлів папки
+  переміщуються через звичайний vault-rename, без участі ConflictStore.
+- **Колізія імен на новому path-і**: малоймовірно, бо в назві
+  sibling-у міститься timestamp (`-<YYYY-MM-DDTHH-MM-SS>Z`), що
+  робить collision практично неможливою.
+- **Sibling-у не існує у vault на момент rename** (наприклад, був
+  видалений вручну поза Obsidian-сесією — orphan): ConflictStore
+  обробить це через існуючий orphan-cleanup на `load()` (CLAUDE.md
+  ConflictStore orphan cleanup). Rename-handler може це додатково
+  перевіряти і пропускати такі записи без помилки.
 
 **R3.4. Pull-deletes НЕ йдуть у trash.** Якщо видалення прийшло з
 GitHub (через `applyRemoteDeletion`), `.trash` обходиться: файл
@@ -559,16 +639,19 @@ Diff-Edit-у користувач не розрізняє джерела. Спи
   (resolve як ours, бо файли вже однакові — дилеми нема). Sibling
   видаляється.
 - (T3) **Основний файл видаляється — bundle до trash разом з усіма
-  його конфліктами**. Якщо користувач видаляє `note.md`, який має N
-  pending конфліктів, то:
-  - `note.md` переміщується у `.trash/<id>/note.md` (звичайний trash).
-  - **Усі N sibling-файлів `note.conflict-from-*.md` видаляються з
-    vault**, але їх `theirs`-контент і ConflictStore-метадані
-    зберігаються у `.trash/<id>/.conflicts/<conflictId>/` (та сама
-    структура, що й оригінальний `.conflicts/`).
+  його конфліктами**. Якщо користувач видаляє `Folder/note.md`,
+  який має N pending конфліктів, то:
+  - `Folder/note.md` переміщується у `.trash/<id>/vault/Folder/note.md`
+    (звичайний trash, з повторенням vault-структури — R3.1).
+  - **Усі N sibling-файлів `Folder/note.conflict-from-*.md`
+    видаляються з vault**, але їх `theirs`-контент і
+    ConflictStore-метадані зберігаються у
+    `.trash/<id>/.conflicts/<conflictId>/` (та сама структура, що й
+    оригінальний `.conflicts/`).
   - Trash meta.json фіксує `bundledConflicts: [{conflictId, siblingPath,
     deviceLabel, ts, theirsBlobSha}, ...]` — щоб на restore точно
-    знати, що відтворювати.
+    знати, що відтворювати (siblingPath тут — повний vault-path
+    sibling-файлу, не basename).
   - In-memory indexes ConflictStore очищуються для цих записів;
     подія `conflict-resolved` emit-иться для кожного, щоб UI
     оновився.
@@ -577,7 +660,8 @@ Diff-Edit-у користувач не розрізняє джерела. Спи
   records) — це **одне ціле**, яке мандрує в trash і назад **atomically**.
 
   **Restore до sync** повертає bundle цілком:
-  - `note.md` ← з `.trash/<id>/note.md` на оригінальний path
+  - `Folder/note.md` ← з `.trash/<id>/vault/Folder/note.md` на
+    оригінальний path
   - Для кожного `conflictId` у bundle: `.conflicts/<conflictId>/`
     повертається у `<configDir>/plugins/<self>/.conflicts/<conflictId>/`,
     sibling-файл записується у vault з theirs-байтів
