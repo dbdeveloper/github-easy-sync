@@ -338,12 +338,32 @@ Top toolbar:
 
 Top toolbar (detail):
 - `[←]` — back to list view.
-- `[Restore]` — повернути файл за оригінальним path-ом. Якщо у vault
-  вже існує файл з тим самим іменем (наприклад, користувач створив
-  новий пізніше) — модалка "Файл вже існує. `[Overwrite]` /
-  `[Restore as new name…]` / `[Cancel]`".
-- `[Restore as…]` — окрема кнопка для безпечного відновлення під
-  іншим іменем (одразу відкриває rename-промпт).
+- `[Restore]` — повернути файл за оригінальним path-ом. Колізії немає
+  за визначенням (див. нижче "Path-only-when-empty filter").
+
+**Path-only-when-empty filter.** Recently deleted list (як local-trash,
+так і GitHub-history entries) рендериться через фільтр: запис
+показується **лише якщо path зараз порожній у vault**
+(`app.vault.getAbstractFileByPath(path) === null`). Якщо користувач
+створив новий файл з тим самим іменем — запис автоматично
+зникає зі списку:
+- TrashStore підписаний на `vault.on('create', file)`: при матчі
+  `originalPath` запис прибирається з in-memory index (фізично
+  `.trash/<id>/` ще лежить на диску — для можливого manual recovery
+  через filesystem, але у UI його нема).
+- GitHub-history entries фільтруються лінивим API на момент рендеру
+  списку.
+
+Логіка: система **не розрізняє** "файл був видалений і відновлений"
+vs "файл був видалений і створено новий за тим самим іменем" — для
+неї це просто історія path-а. Минулі версії того, що було за цим path-ом
+до повторного створення, доступні через File history mode (R2.3) —
+там видно ланцюжок "...commits, deletion commit, ...commits,
+re-creation commit, ...current commits", як у звичайному `git log <path>`.
+
+Кнопка `[Restore as…]` (відновлення під іншим іменем) **не потрібна** —
+у списку немає колізій за визначенням, тому єдина дія "restore" завжди
+безпечна.
 
 Diff-Edit widget (R7) **переюзовується**, але з прапорцем
 `mode: "preview"` (на додачу до існуючого `mode: "merge"`, який буде
@@ -895,9 +915,9 @@ History / Compare / Deleted). Спільне: `[←]` back завжди перш
 
 **R7.9d. Deleted mode (R2.4) detail toolbar:**
 - `[←]` back to deleted list.
-- `[Restore]` — повернути файл за оригінальним path-ом (з модалкою
-  "Файл вже існує" якщо потрібно).
-- `[Restore as…]` — restore під іншим іменем.
+- `[Restore]` — повернути файл за оригінальним path-ом. Колізій немає
+  за визначенням — список R2.4 фільтрує entries за умовою "path
+  зараз порожній" (path-only-when-empty filter, R2.4).
 - `[Open in external tool]` (desktop).
 - **Завжди read-only** — нема активної версії для edit-у.
 
