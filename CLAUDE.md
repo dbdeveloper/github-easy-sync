@@ -14,6 +14,8 @@ An Obsidian plugin that syncs a local vault with a GitHub repository using **onl
 
 The conflict-view UX is the one area still openly known to be primitive; everything else is intentional. All behaviour described below is locked in by the integration tests (`pnpm test:integration`). Test series A–L each correspond to a different concern — bootstrap, adoption, normalization, incremental, atomic conflicts, special chars, multi-device stress, out-of-band drift, settings lifecycle, auth/API failures, manifest corruption, accumulate semantics.
 
+> **⚠️ Planned rework — Diff-Edit widget.** The conflict-view UX is being reworked per [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md). That sub-project replaces the `ConflictModal` per-file dialog with a summary modal, redesigns the `ConflictView` as a single-pane unified Diff-Edit widget with four modes (Conflicts / Compare / File history / Recently deleted), adds a local trash (`.trash/<id>/`) with bundled-restore for files-with-conflicts, makes auto-resolve reactive on SHA-convergence, and introduces an optional desktop external diff tool integration. **The text below describes the currently-in-force behaviour until the corresponding phases of that plan land.** Each phase brings its own CLAUDE.md edits in the same PR — do not edit conflict-resolution sections here without coordinating with the plan's phase tracker. See `IMPLEMENTATION_PLAN.md` → "Принципи реалізації" for the implementation-discipline rules.
+
 ## Headline design intent
 
 **The sync tries to behave like a primitive git client — but with predictable, easy-to-explain semantics, so users know what to expect.** The engine deliberately rejects features a power-user might want from a real git workflow (no branches, no rebase, no manual stash) and instead picks one safe default per scenario. Concretely:
@@ -191,6 +193,21 @@ Dispatch by path shape (used by BOTH contexts):
 **`cascadeDeferRemoval`**: a path the user just deferred in reconcile also drops out of every subsequent queued batch (from the current one onwards). The current batch's removal is left to processBatch's empty-batch-skip (so reconcile's post-resolve `updateMeta` can still run against an intact dir); later batches are deleted immediately if they become empty after the cascade.
 
 **ConflictStore orphan cleanup at load()**: on every `load()`, for each indexed record, the store verifies the sibling file still exists. Missing sibling → treat the conflict as implicitly resolved (rmdir the `.conflicts/<id>/` folder, skip indexing). Handles "user deleted the sibling via vim/cli while Obsidian was closed" without leaving the record forever stuck filtering the path out of every push.
+
+### Diff-Edit widget (planned)
+
+**Status: planned, not yet implemented.** Full design in [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md). Brief summary of the upcoming reshape (each bullet maps to one of the plan's R-sections — refer to the plan for the full contract before touching related code):
+
+- **No more per-file `ConflictModal`** during sync. New conflicts are created silently as siblings; a single summary modal at the end of sync says "N pending conflicts. `[Open in Diff-Edit]`" (R1).
+- **Single-pane unified Diff-Edit view** (view type `sync2-diff-edit`) replacing the two-pane `ConflictView` (view type `sync2-conflict-view`). Mobile-first; mode switching list ↔ detail via `[←]` back-arrow. Side-by-side `MergeView` branch removed; only `unifiedMergeView`-style remains (R2.0, R7.1).
+- **Four functional modes** in the same widget: Conflicts list, Compare any two files, File history (GitHub + push-queue fallback), Recently deleted. Each with its own mode-aware top toolbar (R2, R7.9a–d).
+- **Reactive auto-resolve** of conflicts when (T1) sibling deleted (already works), (T2) `gitBlobSha(ours) === gitBlobSha(sibling)` and sizes match, (T3) main file deleted → bundle main + all sibling/conflict records to `.trash/<id>/` atomically; restore brings them all back (R4).
+- **Local `.trash/<id>/`** for recently-deleted files. Move (not copy), pull-deletes skip trash, TTL=0 after sync confirms deletion. Unified "Recently deleted" UX merging trash + GitHub-history-recovery (R3).
+- **Sync refuses on files with pending conflicts.** `Sync this file` shows a Notice with `[Open in Diff-Edit]`; `Sync all` silently skips them and reports `K files skipped` in the summary modal (R2.6).
+- **Optional desktop-only external diff tool** (`gvimdiff`, `meld`, `windiff`, `code --diff`, etc.) via a configurable command template launched through secure `spawn` without shell. Mobile completely opted out via `Platform.isDesktopApp` guard (R6).
+- **No default hotkeys.** All actions exposed as Obsidian commands; users bind their own via the Hotkeys settings page (macOS `Alt-N` is `ñ`, mobile has no keyboard) (R7.9).
+
+**For implementers**: when working on conflict resolution, see `IMPLEMENTATION_PLAN.md` → "Принципи реалізації" for the 7-point discipline rules (scope strictly to plan, do not modify A–L tests without explicit permission, phase-by-phase rollout, etc.). Each phase brings its own CLAUDE.md edits that *replace* the relevant parts of the "Conflict resolution" section above with the new behaviour — until that happens, the existing text remains authoritative for currently-shipping code.
 
 ### Lazy progress notice + Sync done finale (UX contract)
 
