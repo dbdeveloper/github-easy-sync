@@ -42,21 +42,21 @@
 **Цей розділ — обов'язковий до прочитання перед будь-якою кодовою
 зміною за цим планом.**
 
-1. **Скоуп — суворо в межах цього плану.** Застосовувати **тільки**
+1. **Scope — суворо в межах цього плану.** Застосовувати **тільки**
    зміни, які стосуються Diff-Edit widget і пов'язаних з ним вимог
-   (R1–R7). Не "заодно" причісувати інший код, не рефакторити
+   (R1–R7). Не причісувати інший код "заодно", не рефакторити
    суміжні модулі, не "виправляти що очі бачать".
 
 2. **Не порушувати роботу основного плагіну.** `github-easy-sync` —
    це working production-плагін з 429 unit-тестами і ~106 integration-
    тестами (серії A–L, див. CLAUDE.md). Уся існуюча поведінка sync-
-   движка (bootstrap, adoption, normalize, incremental, atomic
+   рушія (bootstrap, adoption, normalize, incremental, atomic
    conflicts, multi-device, drift, settings, auth, manifest,
    accumulate) має лишитись **бітово ідентичною** після реалізації
    цього плану. Будь-який regression-сигнал у існуючих тестах =
    стоп-сигнал.
 
-3. **Мінімізувати дотики за межами Diff-Edit.** За замовчуванням
+3. **Мінімізувати модифікації за межами Diff-Edit.** За замовчуванням
    нові файли під `src/diff2/` (новий каталог підпроекту) +
    точкові правки у `src/main.ts` для wire-up. Якщо план вимагає
    зміни у `sync2-manager.ts`, `change-detector.ts`,
@@ -97,7 +97,7 @@
 - Існує `ConflictView` (`sync2-conflict-view`) з DiffPane, але вона
   обмежена сценарієм "вирішити готовий конфлікт" — не дозволяє ані
   порівняти довільні два файли, ані подивитись історію змін, ані
-  відновити видалене.
+  відновити видалене. Кром того, вона не працююча у багатьох сценаріях.
 - Авто-resolve конфлікту, коли користувач сам довів основний файл і
   його sibling до однакового стану поза Diff-Edit редактором, **не
   спрацьовує** — конфлікт лишається у списку та статусбарі.
@@ -132,15 +132,15 @@ Sync2-manager при отриманні конфлікту повинен **за
 створено хоча б один новий запис у ConflictStore, показати **одну**
 summary-модалку:
 
-> **З'явились нові конфлікти!**
+> **New conflicts have appeared!**
 >
-> Тепер у вас `NNN` невирішених конфліктів.
+> You now have `NNN` unresolved conflicts.
 >
-> `[ OK ]`    `[ Перейти до Diff-Edit ]`
+> `[ OK ]`    `[ Go to Diff-Edit ]`
 
 де `NNN` — поточна повна кількість записів у ConflictStore (тобто сума
-старих + нових). Кнопка "Перейти до Diff-Edit" відкриває Diff-Edit tab
-(view type, що замінить чи розширить `sync2-conflict-view`).
+старих + нових). Кнопка "Go to Diff-Edit" відкриває Diff-Edit tab
+(view type, що замінить `sync2-conflict-view`).
 
 **R1.3.** ConflictModal (файл `src/sync2/views/conflict-modal.ts`)
 видалити цілком разом з тестом `tests/sync2/conflict-modal.test.ts`.
@@ -289,10 +289,6 @@ vault path. Список займає **усю ширину tab-у**.
   (theirs додається як `> blockquote` callout під ours). Кнопка
   прихована або disabled, якщо у списку немає markdown-конфліктів,
   щоб не наводити користувача на помилку.
-- `[Remove all changes]` *(markdown only)* — видалити обидві версії
-  всіх конфліктів (chunks стають порожніми, лишається тільки
-  спільний контекст). Md-only бо для JSON/YAML видалення може зламати
-  синтаксис.
 
 Кожен елемент списку клікабельний → перехід у **detail view** з
 DiffPane (R7), де є додатковий top-toolbar з тими ж операціями, але
@@ -394,8 +390,6 @@ delete-vs-modify і викликає `onConflict` з `ours = ""` (порожнь
   забирається з `batch.deletions`; sibling + запис очищуються.
 - `[Join all]` *(md only)* — **сховано** для delete-vs-modify (нема
   ours щоб об'єднувати з; результат був би просто theirs).
-- `[Remove all changes]` *(md only)* — еквівалент `[Keep all local]`
-  у цьому випадку (видалення обох сторін → empty → видалення).
 
 *Auto-resolve T2 (R4)*: якщо користувач створює файл `note.md` у vault
 вручну і він стає байт-рівним sibling-у — конфлікт resolve-иться
@@ -856,8 +850,6 @@ History / Compare / Deleted). Спільне: `[←]` back завжди перш
   `conflict-merge-all.ts::mergeIntoOne()`; theirs додається як
   `> blockquote` callout під ours з header-ом "`> changes from
   <remoteDeviceName> at <date> <time>`".
-- `[Remove all changes]` *(markdown only)* — видалити всі chunks
-  (лишити тільки спільний контекст).
 - Toggle `⏩` **Auto-advance** — коли увімкнено, після resolve будь-якого
   одного chunk-у (через `[select]/[remove]` per-chunk кнопки)
   автоматично переходимо до наступного нерозв'язаного chunk-у:
@@ -906,11 +898,10 @@ History / Compare / Deleted). Спільне: `[←]` back завжди перш
 - `[Open in external tool]` (desktop).
 - **Завжди read-only** — нема активної версії для edit-у.
 
-**Md-only safety** (R7.9a): `[Join all]` і `[Remove all]` рендеряться
-**тільки** для файлів з markdown-розширенням (`isMarkdown(path) ===
-true`). Для JSON/YAML/CSS/CSV ці операції можуть зламати синтаксис
-(blockquote вставка корумпує не-md формати; повне видалення chunks
-може лишити дірки у структурі).
+**Md-only safety** (R7.9a): `[Join all]` рендериться **тільки** для
+файлів з markdown-розширенням (`isMarkdown(path) === true`). Для
+JSON/YAML/CSS/CSV blockquote вставка корумпує синтаксис, тому
+операція там недоступна.
 
 **Footer** (внизу DiffPane, у всіх режимах однаковий):
 - Лічильник "`N` unresolved chunks · `M` resolved" (live update при
@@ -935,10 +926,10 @@ take ours / take theirs / take both / resolve all / open external)
 конфліктує з його ОС.
 
 **Назви кнопок — TBD**: робочі назви у цьому плані (`Keep all local`,
-`Apply all remote`, `Join all`, `Remove all`, `select`, `remove`)
-залишаються відкритими. Можливі альтернативи: `apply`/`delete`,
-`take`/`drop`, або інше. Фінальний набір обирається на UI-полірувальному
-етапі Phase 7; принципово — узгоджена пара "залишити цю сторону" /
+`Apply all remote`, `Join all`, `select`, `remove`) залишаються
+відкритими. Можливі альтернативи: `apply`/`delete`, `take`/`drop`,
+або інше. Фінальний набір обирається на UI-полірувальному етапі
+Phase 7; принципово — узгоджена пара "залишити цю сторону" /
 "видалити цю сторону" і назви не змінюються між різними частинами UI.
 
 **R7.10. Compare & history mode** використовує ту ж форму, але без
@@ -1166,16 +1157,15 @@ take ours / take theirs / take both / resolve all / open external)
 - [ ] Single-pane shell (R2.0): state-машина "list view" / "detail
   view" у `DiffEditView`. Без двопанельного layout-у.
 - [ ] Top toolbar в detail view (R7.9): `[←]` + group-action buttons
-  + (desktop) external diff button. Md-only guards для
-  `[Join all]` / `[Remove all]`.
+  + (desktop) external diff button. Md-only guard для `[Join all]`.
 - [ ] Top toolbar в list view (R2.2): group-action buttons для
   усіх конфліктів одночасно. Кнопки md-only сховані якщо у списку
   немає md-файлів.
 - [ ] Footer (R7.9): лічильник `N unresolved · M resolved`,
   навігаційні кнопки `[↑ prev]`/`[↓ next]`.
 - [ ] **Жодних дефолтних hotkey-ів.** Команди для command palette:
-  next/prev chunk, take ours/theirs, join all, remove all, open
-  external (per file). Без `defaultHotkeys`.
+  next/prev chunk, take ours/theirs, join all, open external
+  (per file). Без `defaultHotkeys`.
 - [ ] Прибрати з `main.ts` існуючі команди з дефолтними Alt-N/Alt-1/2/3
   hotkey-ами.
 - [ ] Compare & history mode (R7.10): та сама pane без marker
