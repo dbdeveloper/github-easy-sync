@@ -17,22 +17,20 @@ import GitignoreInvariants from "./gitignore-invariants";
 import PushQueue, { EnqueueMeta } from "./push-queue";
 import SnapshotStore, { RemoteIdentity } from "./snapshot-store";
 import TreeBuilder from "./tree-builder";
-import { mergeText } from "./three-way-merge";
-import {
-  compareSemver,
-  isAtomicPluginFile,
-  pluginRootOf,
-  readPluginVersion,
-} from "./plugin-js";
+import { isAtomicPluginFile, pluginRootOf, readPluginVersion } from "./plugin-js";
 import {
   applyTemplate,
   appendDeviceSuffix,
   DEFAULT_INIT_COMMIT_MESSAGE,
   parseDeviceSuffix,
 } from "./commit-templates";
-import ConflictStore from "./conflict-store-old";
+import ConflictStore, { ConflictKind } from "./conflict-store";
+import {
+  attemptAutoMerge,
+  PluginJsContext,
+} from "./conflict-detection";
 import { normalizeText } from "./text-normalize";
-import { ConflictResolution, FileChange } from "./types";
+import { FileChange } from "./types";
 
 // Minimal client surface Sync2Manager needs. Lets tests inject a stub
 // without dragging the real GithubClient (settings, retries, logger…).
@@ -151,27 +149,6 @@ export interface ProgressHandle {
 }
 export type ProgressFactory = (initialMessage: string) => ProgressHandle;
 
-// Sync2Manager fires this when 3-way merge can't auto-resolve. The
-// callback shows the per-file modal (or any UI) and returns a
-// ConflictResolution describing what the user picked:
-//
-//   - { kind: "resolved", content }       — diff editor finished
-//   - { kind: "deferred" }                — sibling file already
-//                                           created via ConflictStore
-//   - { kind: "merged-into-one", content }— markdown auto-merge
-//
-// Returning `kind: "resolved"` with conflict-marked content is also
-// valid (legacy stub behaviour: write the markers and let the user
-// reconcile in the editor) — but production callers go through the
-// real diff editor path.
-export type OnConflictCallback = (args: {
-  path: string;
-  ours: string;
-  base: string;
-  theirs: string;
-  conflictMarkedContent: string;
-}) => Promise<ConflictResolution>;
-
 // Thin async logger surface — Sync2Manager records phase markers and
 // errors so the same `github-easy-sync.log` line format used by legacy
 // instrumentation continues to work.
@@ -207,15 +184,11 @@ export interface Sync2ManagerDeps {
   // conflict-store.ts for the consumers. Live-readable for the same
   // reason as the templates above.
   deviceLabel: string | (() => string);
-  // Optional ConflictStore for Stage 6.5 deferred / sibling-file
-  // workflow. Plugin code passes a real one; unit tests that stick
-  // entirely to the "resolved" callback return shape can omit it.
-  // When omitted, calling onConflict with `kind: "deferred"` throws —
-  // there's nowhere to persist the deferral.
+  // Pseudo-merge ConflictStore. Receives a record whenever detection
+  // can't auto-resolve a conflict. Required in production; unit tests
+  // that don't exercise the conflict path can omit it (the manager
+  // throws if a conflict tries to register and the store is missing).
   conflictStore?: ConflictStore;
-  // Fired when reconciliation hits a conflict that 3-way merge can't
-  // resolve. UI surface plugs in here.
-  onConflict: OnConflictCallback;
   // UI hook for queue-drain progress. main.ts wires this to a long-
   // lived Notice; tests omit it. Returns a handle whose update()
   // changes the displayed text and hide() dismisses the notice.
@@ -292,7 +265,6 @@ export class Sync2Manager {
   private readonly commitMessageFile: () => string;
   private readonly deviceLabel: () => string;
   private readonly conflictStore: ConflictStore | undefined;
-  private readonly onConflict: OnConflictCallback;
   private readonly accumulateOfflineSyncs: boolean;
   private readonly onProgress: ProgressFactory | undefined;
   private readonly onLocalCommitted:
@@ -342,7 +314,6 @@ export class Sync2Manager {
         ? deps.deviceLabel
         : () => deps.deviceLabel as string;
     this.conflictStore = deps.conflictStore;
-    this.onConflict = deps.onConflict;
     this.accumulateOfflineSyncs = deps.accumulateOfflineSyncs ?? false;
     this.onProgress = deps.onProgress;
     this.onLocalCommitted = deps.onLocalCommitted;
@@ -656,7 +627,7 @@ export class Sync2Manager {
         }
 
         if (f.status === "removed") {
-          await this.applyRemoteDeletion(f.filename, expectedHead);
+          await this.applyRemoteDeletion(f.filename, expectedHead, currentHead);
           this.pulledFilesThisSync++;
           tickPull();
           continue;
@@ -695,7 +666,7 @@ export class Sync2Manager {
           f.previous_filename &&
           (await this.detector.checkSyncable(f.previous_filename))
         ) {
-          await this.applyRemoteDeletion(f.previous_filename, expectedHead);
+          await this.applyRemoteDeletion(f.previous_filename, expectedHead, currentHead);
         }
         await this.applyRemoteAddOrModify(
           f.filename,
@@ -1039,12 +1010,11 @@ export class Sync2Manager {
     const blob = await this.safeFetchContents(path, headRef);
     if (!blob) return; // raced with a subsequent remote delete; skip
 
-    // Is the local version dirty against snapshot?
     const localChange = await this.detector.findChangeForPath(path);
     const exists = await this.vault.adapter.exists(path);
 
+    // Case 1: local is clean against snapshot → pull straight in.
     if (localChange === null) {
-      // Local matches snapshot (or doesn't exist). Pull straight in.
       if (hasTextExtension(path)) {
         const remoteText = decodeBase64String(blob.content);
         const { canonicalSha, changed } = await this.writeRemoteText(
@@ -1065,233 +1035,88 @@ export class Sync2Manager {
       }
       return;
     }
-    const remoteContent = hasTextExtension(path)
-      ? decodeBase64String(blob.content)
-      : "";
 
+    const theirsBytes = base64ToArrayBuffer(blob.content) as ArrayBuffer;
+
+    // Case 2: ours deleted, theirs modified → delete-vs-modify.
     if (localChange.kind === "deleted") {
-      // Local says "I deleted this", remote says "I edited it". Delete
-      // wins on local for now — but we DON'T record-sync, so the next
-      // push surfaces the deletion. Conservative: leave the file
-      // missing locally; user's intent stands.
+      await this.registerConflictAndDropPath({
+        vaultPath: path,
+        kind: "delete-vs-modify",
+        theirsContent: theirsBytes,
+        theirsBlobSha: blob.sha,
+        oursBlobSha: null,
+        remoteDevice: await this.fetchRemoteDevice(headRef),
+        fromBatchId: null,
+      });
       return;
     }
 
-    if (!hasTextExtension(path)) {
-      // Binary divergence: text-style 3-way merge would corrupt the
-      // file. Resolve atomically by timestamp instead — whichever
-      // side touched the file most recently wins. Tie goes to local
-      // ("ours wins" is the safer default since the user is sitting
-      // in front of the local copy).
-      await this.resolveBinaryConflict(path, headRef, blob);
-      return;
-    }
-    if (isAtomicPluginFile(path, this.configDir)) {
-      // Plugin JS bundles are minified single-line megabytes; a
-      // 3-way text merge produces incoherent garbage that crashes
-      // Obsidian on load. Resolve atomically via the plugin's
-      // semver (read from manifest.json), falling back to mtime
-      // on tie — same shape the legacy plugin used.
-      await this.resolvePluginJsConflict(path, headRef, blob);
-      return;
-    }
-
-    const baseFetched = await this.safeFetchContents(path, baseRef);
-    const baseContent = baseFetched
-      ? decodeBase64String(baseFetched.content)
-      : "";
+    // Case 3: both modified → try auto-merge, register if it fails.
     const oursBytes = exists
       ? await this.vault.adapter.readBinary(path)
       : new ArrayBuffer(0);
-    const oursContent = new TextDecoder().decode(oursBytes);
-
-    const merge = mergeText(oursContent, baseContent, remoteContent);
-    let resolved: string;
-    if (merge.kind === "clean") {
-      resolved = merge.content;
-    } else {
-      const decision = await this.onConflict({
-        path,
-        ours: oursContent,
-        base: baseContent,
-        theirs: remoteContent,
-        conflictMarkedContent: merge.conflictMarkedContent,
-      });
-      if (decision.kind === "deferred") {
-        // User picked "Later". Snapshot (base, theirs) and the sibling
-        // file via ConflictStore so the conflict is visible in the
-        // vault and survives a deferred resolution. Local file stays
-        // as ours — we deliberately do NOT writeRemoteText here and
-        // do NOT recordSync. The path is
-        // excluded from push (enqueueOrMerge filters it) until
-        // ConflictStore.resolve fires, at which point the next sync
-        // picks it up like any other modified file.
-        if (!this.conflictStore) {
-          throw new Error(
-            "Sync2 conflict deferral requested but no ConflictStore is wired",
-          );
-        }
-        // Identify who authored the GitHub-side change so the
-        // sibling filename (`<base>.conflict-from-<author>-<ts>.<ext>`)
-        // points at the FOREIGN device, not the user's local one. We
-        // pull the trailing " (label)" off the head commit's message;
-        // hand-edited commits on the GitHub web UI parse to "unknown".
-        // Falling back gracefully on a fetch failure — the sibling
-        // still lands, just labelled "unknown".
-        let theirsAuthor = "unknown";
-        try {
-          const headCommit = await this.client.getCommit({
-            sha: headRef,
-            retry: true,
-          });
-          theirsAuthor = parseDeviceSuffix(headCommit.message);
-        } catch {
-          // network / 404 — keep "unknown"
-        }
-        await this.conflictStore.create({
-          vaultPath: path,
-          baseContent,
-          theirsContent: remoteContent,
-          baseCommitSha: baseRef,
-          theirsBlobSha: blob.sha,
-          theirsAuthor,
-        });
-        // Sibling file landed in the vault — counts as a local-side
-        // change for the "Sync done (updated N files)" summary.
-        this.pulledFilesThisSync++;
-        await this.logger.info("Sync2 conflict deferred via sibling file", {
-          path,
-        });
-        return;
-      }
-      // "resolved" or "merged-into-one": treat identically — write the
-      // returned content, push it. The kind tag is for telemetry /
-      // logging clarity, not control flow.
-      resolved = decision.content;
-    }
-
-    // Write canonical. recordSync only when canonical equals what's on
-    // GitHub; otherwise leave snapshot stale so findChanges picks the
-    // gap up on the next sync click.
-    const { canonicalSha } = await this.writeRemoteText(path, resolved);
-    if (canonicalSha === blob.sha) {
-      await this.detector.recordSync(path, canonicalSha);
-    }
-  }
-
-  // Timestamp-based atomic resolution for a remote-modified binary
-  // file the user has also edited locally. Compares local mtime to
-  // the head commit's committer date; the newer side wins. Tie goes
-  // to local. The blob argument is the already-fetched remote
-  // {content, sha} from applyRemoteAddOrModify so we don't refetch.
-  private async resolveBinaryConflict(
-    path: string,
-    headRef: string,
-    blob: { content: string; sha: string },
-  ): Promise<void> {
-    const stat = await this.vault.adapter.stat(path);
-    if (!stat) {
-      // Local missing despite findChangeForPath flagging dirty — race
-      // with a concurrent delete. Pull the remote version in.
-      await this.writeBinaryRemote(path, blob.content);
-      await this.detector.recordSync(path, blob.sha);
-      return;
-    }
-    const headCommit = await this.client.getCommit({
-      sha: headRef,
-      retry: true,
-    });
-    const remoteMs = Date.parse(headCommit.committer.date);
-    if (Number.isNaN(remoteMs) || stat.mtime >= remoteMs) {
-      // Local is newer (or remote date unparseable) — keep ours. The
-      // file is left as-is locally and will be pushed on the next
-      // commit since the snapshot still points at the pre-change SHA.
-      await this.logger.info("Sync2 binary conflict: local newer, keep ours", {
-        path,
-      });
-      return;
-    }
-    // Remote wins — overwrite local with the fetched bytes.
-    await this.writeBinaryRemote(path, blob.content);
-    await this.detector.recordSync(path, blob.sha);
-    await this.logger.info(
-      "Sync2 binary conflict: remote newer, overwrote local",
-      { path },
-    );
-  }
-
-  // Plugin-js conflict: atomic resolution via the plugin's manifest
-  // semver, falling back to mtime when versions tie or can't be
-  // parsed. Called only for paths matching isAtomicPluginFile() — bare .js
-  // files outside the plugin tree go through the standard text
-  // 3-way merge.
-  //
-  // The plugin's version lives in `<pluginRoot>/manifest.json` on
-  // each side. We read local from disk and remote via
-  // safeFetchContents at headRef; either may be missing or
-  // malformed (returns null from readPluginVersion), which routes
-  // us into the mtime fallback the same way an equal-semver tie
-  // would. This is deliberate: a missing/broken manifest doesn't
-  // crash sync, it just degrades to the next-best heuristic.
-  private async resolvePluginJsConflict(
-    path: string,
-    headRef: string,
-    blob: { content: string; sha: string },
-  ): Promise<void> {
-    const root = pluginRootOf(path, this.configDir);
-    if (root === null) {
-      // Defensive: isAtomicPluginFile(path) ⇒ pluginRootOf(path) !== null.
-      // Fall back to mtime if somehow violated.
-      await this.resolveBinaryConflict(path, headRef, blob);
-      return;
-    }
-    const manifestPath = `${root}/manifest.json`;
-
-    let localSemver: string | null = null;
-    if (await this.vault.adapter.exists(manifestPath)) {
-      const text = await this.vault.adapter.read(manifestPath);
-      localSemver = readPluginVersion(text);
-    }
-    const remoteManifestBlob = await this.safeFetchContents(
-      manifestPath,
-      headRef,
-    );
-    const remoteSemver = remoteManifestBlob
-      ? readPluginVersion(decodeBase64String(remoteManifestBlob.content))
+    const baseFetched = await this.safeFetchContents(path, baseRef);
+    const baseBytes = baseFetched
+      ? (base64ToArrayBuffer(baseFetched.content) as ArrayBuffer)
       : null;
 
-    if (localSemver !== null && remoteSemver !== null) {
-      const cmp = compareSemver(localSemver, remoteSemver);
-      if (cmp > 0) {
-        // Local plugin newer. Keep local; the next push will lift
-        // it to remote.
-        await this.logger.info(
-          "Sync2 plugin-js conflict: local semver newer, keep ours",
-          { path, localSemver, remoteSemver },
-        );
-        return;
+    let pluginJs: PluginJsContext | undefined;
+    if (isAtomicPluginFile(path, this.configDir)) {
+      pluginJs = await this.readPluginJsContext(path, headRef);
+    }
+
+    const auto = attemptAutoMerge({
+      path,
+      ours: oursBytes,
+      theirs: theirsBytes,
+      base: baseBytes,
+      configDir: this.configDir,
+      pluginJs,
+    });
+
+    if (auto.type === "clean") {
+      // Text 3-way merged cleanly. Write canonical; recordSync only
+      // when canonical bytes match the remote SHA (otherwise the
+      // canonicalization gap surfaces on the next findChanges).
+      const text = new TextDecoder().decode(auto.content);
+      const { canonicalSha } = await this.writeRemoteText(path, text);
+      if (canonicalSha === blob.sha) {
+        await this.detector.recordSync(path, canonicalSha);
       }
-      if (cmp < 0) {
-        // Remote plugin newer. Overwrite local in place.
+      return;
+    }
+
+    if (auto.type === "atomic") {
+      if (auto.side === "ours") {
+        // Keep local; snapshot stays at the old SHA so the next push
+        // surfaces ours to remote.
+        await this.logger.info(
+          "Sync2 atomic auto-merge: kept ours",
+          { path },
+        );
+      } else {
+        // Remote wins — overwrite local in place.
         await this.writeBinaryRemote(path, blob.content);
         await this.detector.recordSync(path, blob.sha);
         await this.logger.info(
-          "Sync2 plugin-js conflict: remote semver newer, overwrote local",
-          { path, localSemver, remoteSemver },
+          "Sync2 atomic auto-merge: overwrote with theirs",
+          { path },
         );
-        return;
       }
-      // Equal semver — fall through to mtime resolution below.
+      return;
     }
 
-    // Either semver missing on at least one side, or equal versions
-    // — resolveBinaryConflict's mtime comparator handles both cases
-    // identically.
-    await this.logger.info(
-      "Sync2 plugin-js conflict: semver tie or missing, falling back to mtime",
-      { path, localSemver, remoteSemver },
-    );
-    await this.resolveBinaryConflict(path, headRef, blob);
+    // auto.type === "register-conflict"
+    await this.registerConflictAndDropPath({
+      vaultPath: path,
+      kind: "modify-vs-modify",
+      theirsContent: theirsBytes,
+      theirsBlobSha: blob.sha,
+      oursBlobSha: await calculateGitBlobSHA(oursBytes),
+      remoteDevice: await this.fetchRemoteDevice(headRef),
+      fromBatchId: null,
+    });
   }
 
   private async writeBinaryRemote(
@@ -1305,7 +1130,8 @@ export class Sync2Manager {
 
   private async applyRemoteDeletion(
     path: string,
-    baseRef: string,
+    _baseRef: string,
+    currentHead: string,
   ): Promise<void> {
     const exists = await this.vault.adapter.exists(path);
     if (!exists) {
@@ -1321,8 +1147,174 @@ export class Sync2Manager {
       return;
     }
 
-    // Local has its own changes. Modify-vs-delete: keep local, don't
-    // record-sync — next push will resurrect it on the remote.
+    // Local has its own changes. Pseudo-merge: modify-vs-delete →
+    // register a conflict with a 0-byte `.deleted` sibling so the user
+    // can decide between "confirm remote delete" (delete base) and
+    // "keep my version" (delete the .deleted sibling).
+    const oursBytes = await this.vault.adapter.readBinary(path);
+    await this.registerConflictAndDropPath({
+      vaultPath: path,
+      kind: "modify-vs-delete",
+      theirsContent: new ArrayBuffer(0),
+      theirsBlobSha: null,
+      oursBlobSha: await calculateGitBlobSHA(oursBytes),
+      remoteDevice: await this.fetchRemoteDevice(currentHead),
+      fromBatchId: null,
+    });
+  }
+
+  // ── pseudo-merge detection helpers (stage 5c) ──────────────────────
+
+  // Snapshot live base file stats + SHA at conflict-registration time.
+  // ConflictRecord caches these so the classifier can detect "user
+  // copied sibling onto base" (case 6) without re-reading the vault on
+  // every sweep. Returns nulls for kind=delete-vs-modify (the base
+  // file doesn't exist by definition).
+  private async snapshotBaseCache(
+    path: string,
+    kind: ConflictKind,
+  ): Promise<{
+    baseMtime: number | null;
+    baseSize: number | null;
+    baseSha: string | null;
+  }> {
+    if (kind === "delete-vs-modify") {
+      return { baseMtime: null, baseSize: null, baseSha: null };
+    }
+    const stat = await this.vault.adapter.stat(path);
+    if (!stat || stat.type !== "file") {
+      return { baseMtime: null, baseSize: null, baseSha: null };
+    }
+    const bytes = await this.vault.adapter.readBinary(path);
+    return {
+      baseMtime: stat.mtime,
+      baseSize: stat.size,
+      baseSha: await calculateGitBlobSHA(bytes),
+    };
+  }
+
+  // Read the remote commit's device suffix off the trailing
+  // " (label)" of its message. Failures (network, GC'd ref) degrade
+  // gracefully to "unknown" — the sibling filename still lands, just
+  // labelled as such.
+  private async fetchRemoteDevice(ref: string): Promise<string> {
+    try {
+      const headCommit = await this.client.getCommit({
+        sha: ref,
+        retry: true,
+      });
+      return parseDeviceSuffix(headCommit.message);
+    } catch {
+      return "unknown";
+    }
+  }
+
+  // Read both sides' manifest.json for a plugin-js path and return
+  // the (version, mtime) pair attemptAutoMerge needs. Either side may
+  // be null when the manifest is missing or unparseable — the
+  // detection helper falls back to mtime.
+  private async readPluginJsContext(
+    path: string,
+    headRef: string,
+  ): Promise<PluginJsContext | undefined> {
+    const root = pluginRootOf(path, this.configDir);
+    if (root === null) return undefined;
+    const manifestPath = `${root}/manifest.json`;
+
+    let oursVersion: string | null = null;
+    let oursMtime = 0;
+    if (await this.vault.adapter.exists(manifestPath)) {
+      const text = await this.vault.adapter.read(manifestPath);
+      oursVersion = readPluginVersion(text);
+    }
+    const oursStat = await this.vault.adapter.stat(path);
+    if (oursStat) oursMtime = oursStat.mtime;
+
+    let theirsVersion: string | null = null;
+    const remoteManifest = await this.safeFetchContents(manifestPath, headRef);
+    if (remoteManifest) {
+      theirsVersion = readPluginVersion(
+        decodeBase64String(remoteManifest.content),
+      );
+    }
+    let theirsMtime = 0;
+    try {
+      const headCommit = await this.client.getCommit({
+        sha: headRef,
+        retry: true,
+      });
+      const parsed = Date.parse(headCommit.committer.date);
+      if (!Number.isNaN(parsed)) theirsMtime = parsed;
+    } catch {
+      // best-effort — leave at 0
+    }
+    return { oursVersion, theirsVersion, oursMtime, theirsMtime };
+  }
+
+  // Register a conflict in the new ConflictStore and remove the path
+  // from any queued batches. Pull-side callers pass fromBatchId=null
+  // (no batch yet for this path); push-side reconcile callers pass
+  // the batch id so the path drops out of the current batch + every
+  // later batch — same cascade behavior the legacy
+  // `cascadeDeferRemoval` provided, inlined here so removing the old
+  // helper doesn't take this with it.
+  private async registerConflictAndDropPath(args: {
+    vaultPath: string;
+    kind: ConflictKind;
+    theirsContent: ArrayBuffer;
+    theirsBlobSha: string | null;
+    oursBlobSha: string | null;
+    remoteDevice: string;
+    fromBatchId: string | null;
+  }): Promise<void> {
+    if (!this.conflictStore) {
+      throw new Error(
+        "Sync2 conflict registration requested but no ConflictStore is wired",
+      );
+    }
+    const baseCache = await this.snapshotBaseCache(args.vaultPath, args.kind);
+    await this.conflictStore.create({
+      vaultPath: args.vaultPath,
+      kind: args.kind,
+      theirsContent: args.theirsContent,
+      theirsBlobSha: args.theirsBlobSha,
+      oursBlobSha: args.oursBlobSha,
+      baseMtime: baseCache.baseMtime,
+      baseSize: baseCache.baseSize,
+      baseSha: baseCache.baseSha,
+      remoteDevice: args.remoteDevice,
+    });
+    this.pulledFilesThisSync++;
+    await this.logger.info("Sync2 conflict registered", {
+      path: args.vaultPath,
+      kind: args.kind,
+    });
+    if (args.fromBatchId === null) return;
+
+    // Push-side cascade: drop the path from the current batch + every
+    // later batch. Mirrors the legacy cascadeDeferRemoval contract.
+    const ids = await this.queue.list();
+    const startIdx = ids.indexOf(args.fromBatchId);
+    if (startIdx < 0) return;
+    for (const id of ids.slice(startIdx)) {
+      const batch = await this.queue.read(id);
+      if (
+        !batch.files.includes(args.vaultPath) &&
+        !batch.deletions.includes(args.vaultPath)
+      ) {
+        continue;
+      }
+      if (id !== args.fromBatchId && batch.inProgress) continue;
+      await this.queue.removeFile(id, args.vaultPath);
+      if (id === args.fromBatchId) continue;
+      const refreshed = await this.queue.read(id);
+      if (
+        refreshed.files.length === 0 &&
+        refreshed.deletions.length === 0
+      ) {
+        await this.queue.delete(id);
+      }
+    }
   }
 
   // Write text content to disk in canonical form (LF, no BOM,
@@ -1834,28 +1826,20 @@ export class Sync2Manager {
     });
     const batch = await this.queue.read(batchId);
     // Collect per-path resolved versions so we can cascade-rebase
-    // later batches in a single pass instead of N×M loops.
+    // later batches in a single pass instead of N×M loops. Records
+    // ours-bytes (pre) and theirs-bytes (post) for each clean
+    // auto-merge.
     const resolvedPerPath = new Map<
       string,
-      { oldOurs: string; newOurs: string }
+      { oldOurs: ArrayBuffer; newOurs: ArrayBuffer }
     >();
-    // Cached head commit (date used by binary/plugin-js mtime fallback)
-    // — fetched lazily because most reconcile invocations only see text
-    // files.
-    let cachedHeadCommit: { committer: { date: string } } | null = null;
-    const getHeadCommit = async (): Promise<{ committer: { date: string } }> => {
-      if (cachedHeadCommit) return cachedHeadCommit;
-      cachedHeadCommit = await this.client.getCommit({
-        sha: currentHead,
-        retry: true,
-      });
-      return cachedHeadCommit;
-    };
+
     for (const path of batch.files) {
       const baseFetched = await this.safeFetchContents(path, expectedHead);
       const theirsFetched = await this.safeFetchContents(path, currentHead);
 
-      // No remote-side change for this file? Skip.
+      // No remote-side change OR remote no longer has the path → no
+      // overlap to resolve; batch pushes through unchanged.
       if (
         baseFetched !== null &&
         theirsFetched !== null &&
@@ -1863,206 +1847,91 @@ export class Sync2Manager {
       ) {
         continue;
       }
+      if (theirsFetched === null) continue;
 
-      // Remote no longer has this path at currentHead (deleted by
-      // another device, or never existed) → no overlap to resolve.
-      // The batch's version of the file pushes through normally on
-      // the next step (resurrection on the remote).
-      if (theirsFetched === null) {
+      const oursBytes = await this.queue.readFile(batchId, path);
+      const theirsBytes = base64ToArrayBuffer(
+        theirsFetched.content,
+      ) as ArrayBuffer;
+      const baseBytes = baseFetched
+        ? (base64ToArrayBuffer(baseFetched.content) as ArrayBuffer)
+        : null;
+
+      let pluginJs: PluginJsContext | undefined;
+      if (isAtomicPluginFile(path, this.configDir)) {
+        pluginJs = await this.readReconcilePluginJsContext(
+          batchId,
+          batch.files,
+          path,
+          expectedHead,
+          currentHead,
+          batch.fileMtimes?.[path] ?? 0,
+        );
+      }
+
+      const auto = attemptAutoMerge({
+        path,
+        ours: oursBytes,
+        theirs: theirsBytes,
+        base: baseBytes,
+        configDir: this.configDir,
+        pluginJs,
+      });
+
+      if (auto.type === "clean") {
+        // Write merged bytes to BOTH the batch snapshot (what gets
+        // pushed) and the live vault (what the user sees).
+        const text = new TextDecoder().decode(auto.content);
+        await this.queue.overwriteFile(batchId, path, auto.content);
+        await this.writeRemoteText(path, text);
+        resolvedPerPath.set(path, {
+          oldOurs: oursBytes,
+          newOurs: auto.content,
+        });
         continue;
       }
 
-      if (!hasTextExtension(path)) {
-        // Binary overlap: atomic mtime. Same shape as pull-side
-        // resolveBinaryConflict, but the loser ALSO drops out of this
-        // batch's push (we don't want to upload a stale binary).
-        if (theirsFetched === null) {
-          // Remote deleted the file. Batch wins: push will resurrect
-          // it. Nothing to do here.
-          continue;
-        }
-        const headCommit = await getHeadCommit();
-        const remoteMs = Date.parse(headCommit.committer.date);
-        // Use the mtime captured at enqueue time, not the live vault
-        // mtime — enqueue's canonical-write-back can bump live mtime
-        // even when the user's edit is older, which would flip mtime
-        // resolution the wrong way.
-        const localMs = batch.fileMtimes?.[path] ?? 0;
-        if (!Number.isNaN(remoteMs) && remoteMs > localMs) {
-          // Remote newer → apply remote bytes to live vault, drop path
-          // from batch.
+      if (auto.type === "atomic") {
+        if (auto.side === "theirs") {
+          // Remote wins → apply remote bytes to live vault, drop the
+          // path from this batch so push doesn't upload stale "ours".
           await this.writeBinaryRemote(path, theirsFetched.content);
           await this.detector.recordSync(path, theirsFetched.sha);
           await this.queue.removeFile(batchId, path);
           await this.logger.info(
-            "Sync2 reconcile binary: remote newer, dropped from batch",
+            "Sync2 reconcile atomic: theirs wins, dropped from batch",
             { path },
           );
         }
-        // else: local newer (or remote date unparseable) — batch wins,
+        // side === "ours": local wins → leave batch entry intact;
         // push will overwrite remote.
         continue;
       }
 
-      if (isAtomicPluginFile(path, this.configDir)) {
-        // Plugin-js overlap: semver from manifest.json, fall through
-        // to mtime on tie. theirsFetched is the bytes; we need remote
-        // manifest to read its semver.
-        if (theirsFetched === null) continue;
-        const root = pluginRootOf(path, this.configDir);
-        let localSemver: string | null = null;
-        let remoteSemver: string | null = null;
-        if (root !== null) {
-          const manifestPath = `${root}/manifest.json`;
-          // Read the local-side manifest as it WAS at click time, not
-          // what's currently in the live vault — pull may have just
-          // overwritten the live manifest with the remote version,
-          // which would make localSemver == remoteSemver and silently
-          // flip resolution. Two cases:
-          //   - User bumped the manifest themselves (it's in this
-          //     batch): use the batch's snapshot.
-          //   - Otherwise: fetch from baseRef (lastSync) — the
-          //     version the user was effectively on.
-          if (batch.files.includes(manifestPath)) {
-            const buf = await this.queue.readFile(batchId, manifestPath);
-            localSemver = readPluginVersion(
-              new TextDecoder().decode(buf),
-            );
-          } else {
-            const baseManifestBlob = await this.safeFetchContents(
-              manifestPath,
-              expectedHead,
-            );
-            if (baseManifestBlob) {
-              localSemver = readPluginVersion(
-                decodeBase64String(baseManifestBlob.content),
-              );
-            }
-          }
-          const remoteManifestBlob = await this.safeFetchContents(
-            manifestPath,
-            currentHead,
-          );
-          if (remoteManifestBlob) {
-            remoteSemver = readPluginVersion(
-              decodeBase64String(remoteManifestBlob.content),
-            );
-          }
-        }
-        let remoteWins: boolean | null = null;
-        if (localSemver !== null && remoteSemver !== null) {
-          const cmp = compareSemver(localSemver, remoteSemver);
-          if (cmp > 0) remoteWins = false;
-          else if (cmp < 0) remoteWins = true;
-          // cmp === 0 → fall through to mtime
-        }
-        if (remoteWins === null) {
-          const headCommit = await getHeadCommit();
-          const remoteMs = Date.parse(headCommit.committer.date);
-          const localMs = batch.fileMtimes?.[path] ?? 0;
-          remoteWins =
-            !Number.isNaN(remoteMs) && remoteMs > localMs;
-        }
-        if (remoteWins) {
-          await this.writeBinaryRemote(path, theirsFetched.content);
-          await this.detector.recordSync(path, theirsFetched.sha);
-          await this.queue.removeFile(batchId, path);
-          await this.logger.info(
-            "Sync2 reconcile plugin-js: remote newer, dropped from batch",
-            { path, localSemver, remoteSemver },
-          );
-        }
-        continue;
-      }
-
-      const oursBytes = await this.queue.readFile(batchId, path);
-      const oursContent = new TextDecoder().decode(oursBytes);
-      const baseContent = baseFetched
-        ? decodeBase64String(baseFetched.content)
-        : "";
-      const theirsContent = theirsFetched
-        ? decodeBase64String(theirsFetched.content)
-        : "";
-
-      const merge = mergeText(oursContent, baseContent, theirsContent);
-      let resolved: string;
-      if (merge.kind === "clean") {
-        resolved = merge.content;
-      } else {
-        const decision = await this.onConflict({
-          path,
-          ours: oursContent,
-          base: baseContent,
-          theirs: theirsContent,
-          conflictMarkedContent: merge.conflictMarkedContent,
-        });
-        if (decision.kind === "deferred") {
-          // User picked "Later" on an overlap path: stash base+theirs
-          // via ConflictStore (sibling file appears in vault), drop the
-          // path from this batch AND every subsequent batch in the
-          // queue. The path's local vault copy stays as-is; user
-          // resolves by editing local + deleting the sibling. Any
-          // queued batch that becomes empty after the removal is
-          // deleted from disk so drain doesn't try to push nothing.
-          if (!this.conflictStore) {
-            throw new Error(
-              "Sync2 conflict deferral requested but no ConflictStore is wired",
-            );
-          }
-          let theirsAuthor = "unknown";
-          try {
-            const headCommit = await this.client.getCommit({
-              sha: currentHead,
-              retry: true,
-            });
-            theirsAuthor = parseDeviceSuffix(headCommit.message);
-          } catch {
-            // network / 404 — keep "unknown"
-          }
-          await this.conflictStore.create({
-            vaultPath: path,
-            baseContent,
-            theirsContent,
-            baseCommitSha: expectedHead,
-            theirsBlobSha: theirsFetched?.sha ?? "",
-            theirsAuthor,
-          });
-          this.pulledFilesThisSync++;
-          await this.cascadeDeferRemoval(batchId, path);
-          await this.logger.info(
-            "Sync2 reconcile deferred via sibling file",
-            { path },
-          );
-          continue;
-        }
-        resolved = decision.content;
-      }
-
-      // Write resolved to BOTH the batch snapshot (what gets pushed)
-      // and the live vault (what the user sees). After push the
-      // snapshot will recordSync against the resolved SHA, so live ==
-      // snapshot == batch == future remote.
-      const buf = new TextEncoder().encode(resolved).buffer as ArrayBuffer;
-      await this.queue.overwriteFile(batchId, path, buf);
-      await this.writeRemoteText(path, resolved);
-      resolvedPerPath.set(path, { oldOurs: oursContent, newOurs: resolved });
+      // auto.type === "register-conflict"
+      await this.registerConflictAndDropPath({
+        vaultPath: path,
+        kind: "modify-vs-modify",
+        theirsContent: theirsBytes,
+        theirsBlobSha: theirsFetched.sha,
+        oursBlobSha: await calculateGitBlobSHA(oursBytes),
+        remoteDevice: await this.fetchRemoteDevice(currentHead),
+        fromBatchId: batchId,
+      });
     }
 
     if (resolvedPerPath.size > 0) {
-      await this.cascadeRebase(batchId, resolvedPerPath);
+      await this.cascadeRebase(batchId, resolvedPerPath, currentHead);
     }
 
-    // Reconcile batch.deletions against the current remote head:
-    //   - Remote already deleted (theirs === null at currentHead):
-    //     drop the redundant deletion (createTree would 422 on a
-    //     deletion not in base_tree).
-    //   - Remote unchanged since baseRef (same SHA): deletion stands,
-    //     nothing to resolve — push will land it.
-    //   - Remote MODIFIED since baseRef: surface as a conflict. The
-    //     user picks what wins: keep delete, keep remote, free-form
-    //     merge, or defer (sibling file). Binary deletions stay
-    //     delete-wins for now — a 3-way merge against empty ours has
-    //     no useful UI for binary.
+    // Reconcile batch.deletions against the current remote head.
+    //   - Remote already deleted: drop the redundant deletion (createTree
+    //     would 422 on a deletion not in base_tree).
+    //   - Remote unchanged: deletion stands.
+    //   - Remote modified: delete-vs-modify conflict — register and
+    //     drop from queue. User resolves via sibling file (delete the
+    //     .deleted placeholder → keep delete; delete the base → accept
+    //     remote modification).
     for (const path of batch.deletions) {
       const theirs = await this.safeFetchContents(path, currentHead);
       if (theirs === null) {
@@ -2071,75 +1940,21 @@ export class Sync2Manager {
       }
       const base = await this.safeFetchContents(path, expectedHead);
       if (base !== null && base.sha === theirs.sha) {
-        // Remote unchanged → deletion proceeds untouched.
         continue;
       }
-      if (!hasTextExtension(path)) {
-        // Binary delete-vs-modify: no meaningful merge. Keep
-        // delete-wins for now.
-        continue;
-      }
-      const baseContent = base ? decodeBase64String(base.content) : "";
-      const theirsContent = decodeBase64String(theirs.content);
-      const merge = mergeText("", baseContent, theirsContent);
-      let resolved: string;
-      if (merge.kind === "clean") {
-        resolved = merge.content;
-      } else {
-        const decision = await this.onConflict({
-          path,
-          ours: "",
-          base: baseContent,
-          theirs: theirsContent,
-          conflictMarkedContent: merge.conflictMarkedContent,
-        });
-        if (decision.kind === "deferred") {
-          if (!this.conflictStore) {
-            throw new Error(
-              "Sync2 conflict deferral requested but no ConflictStore is wired",
-            );
-          }
-          let theirsAuthor = "unknown";
-          try {
-            const headCommit = await this.client.getCommit({
-              sha: currentHead,
-              retry: true,
-            });
-            theirsAuthor = parseDeviceSuffix(headCommit.message);
-          } catch {
-            // network / 404 — keep "unknown"
-          }
-          await this.conflictStore.create({
-            vaultPath: path,
-            baseContent,
-            theirsContent,
-            baseCommitSha: expectedHead,
-            theirsBlobSha: theirs.sha,
-            theirsAuthor,
-          });
-          this.pulledFilesThisSync++;
-          await this.queue.removeDeletion(batchId, path);
-          await this.cascadeDeferRemoval(batchId, path);
-          await this.logger.info(
-            "Sync2 reconcile delete-vs-modify deferred via sibling file",
-            { path },
-          );
-          continue;
-        }
-        resolved = decision.content;
-      }
-      if (resolved === "") {
-        // User confirmed the deletion — keep batch.deletions as is.
-        continue;
-      }
-      // User chose to restore the file with `resolved` content. Drop
-      // the deletion from this batch, snapshot the resolved bytes
-      // into the batch's file set, and reflect them in the live
-      // vault.
+      // Remote modified since base → register delete-vs-modify.
+      // ours = "deleted", theirs = remote bytes.
+      const theirsBytes = base64ToArrayBuffer(theirs.content) as ArrayBuffer;
       await this.queue.removeDeletion(batchId, path);
-      const buf = new TextEncoder().encode(resolved).buffer as ArrayBuffer;
-      await this.queue.overwriteFile(batchId, path, buf);
-      await this.writeRemoteText(path, resolved);
+      await this.registerConflictAndDropPath({
+        vaultPath: path,
+        kind: "delete-vs-modify",
+        theirsContent: theirsBytes,
+        theirsBlobSha: theirs.sha,
+        oursBlobSha: null,
+        remoteDevice: await this.fetchRemoteDevice(currentHead),
+        fromBatchId: batchId,
+      });
     }
 
     // Re-target the batch onto the current head so the next step in
@@ -2155,61 +1970,91 @@ export class Sync2Manager {
     });
   }
 
-  // Defer cascade: a path the user just deferred via reconcile must
-  // also drop out of every subsequent queued batch. From this batch
-  // onwards: remove the path from each batch's snapshot, delete batches
-  // that become empty. User resolves by editing local + deleting the
-  // sibling; the next sync after that picks up the resolved version
-  // through normal findChanges.
-  private async cascadeDeferRemoval(
-    fromBatchId: string,
+  // Push-side plugin-js context. Reads the manifest as it WAS at
+  // click time, not what's currently in the live vault — pull may
+  // have just overwritten the live manifest with the remote version,
+  // which would make oursVersion == theirsVersion and silently flip
+  // resolution. Two cases:
+  //   - User bumped the manifest themselves (it's in this batch): use
+  //     the batch's snapshot.
+  //   - Otherwise: fetch from expectedHead (lastSync) — the version
+  //     the user was effectively on.
+  // For mtime, oursMtime comes from batch.fileMtimes (captured at
+  // enqueue BEFORE canonical-write-back), theirsMtime from current
+  // head's committer date.
+  private async readReconcilePluginJsContext(
+    batchId: string,
+    batchFiles: string[],
     path: string,
-  ): Promise<void> {
-    const ids = await this.queue.list();
-    const startIdx = ids.indexOf(fromBatchId);
-    if (startIdx < 0) return;
-    for (const id of ids.slice(startIdx)) {
-      const batch = await this.queue.read(id);
-      if (!batch.files.includes(path) && !batch.deletions.includes(path)) {
-        continue;
-      }
-      // Don't drop files from an in-progress batch — its push is
-      // already mid-flight or about to start; mutating mid-push risks
-      // a mismatched parentTree. The in-progress batch's reconcile
-      // already removed the path from its OWN snapshot before this
-      // helper was called (we only cascade to AFTER it).
-      if (id !== fromBatchId && batch.inProgress) continue;
-      await this.queue.removeFile(id, path);
-      // For the current batch we let processBatch's empty-batch-skip
-      // handle the delete — reconcile still wants to run updateMeta
-      // and other post-resolve steps against it. Later batches are
-      // safe to delete here so drain doesn't process empty pushes.
-      if (id === fromBatchId) continue;
-      const refreshed = await this.queue.read(id);
-      if (
-        refreshed.files.length === 0 &&
-        refreshed.deletions.length === 0
-      ) {
-        await this.queue.delete(id);
+    expectedHead: string,
+    currentHead: string,
+    oursMtime: number,
+  ): Promise<PluginJsContext | undefined> {
+    const root = pluginRootOf(path, this.configDir);
+    if (root === null) return undefined;
+    const manifestPath = `${root}/manifest.json`;
+
+    let oursVersion: string | null = null;
+    if (batchFiles.includes(manifestPath)) {
+      const buf = await this.queue.readFile(batchId, manifestPath);
+      oursVersion = readPluginVersion(new TextDecoder().decode(buf));
+    } else {
+      const baseManifestBlob = await this.safeFetchContents(
+        manifestPath,
+        expectedHead,
+      );
+      if (baseManifestBlob) {
+        oursVersion = readPluginVersion(
+          decodeBase64String(baseManifestBlob.content),
+        );
       }
     }
+
+    let theirsVersion: string | null = null;
+    const remoteManifestBlob = await this.safeFetchContents(
+      manifestPath,
+      currentHead,
+    );
+    if (remoteManifestBlob) {
+      theirsVersion = readPluginVersion(
+        decodeBase64String(remoteManifestBlob.content),
+      );
+    }
+
+    let theirsMtime = 0;
+    try {
+      const headCommit = await this.client.getCommit({
+        sha: currentHead,
+        retry: true,
+      });
+      const parsed = Date.parse(headCommit.committer.date);
+      if (!Number.isNaN(parsed)) theirsMtime = parsed;
+    } catch {
+      // best-effort
+    }
+
+    return { oursVersion, theirsVersion, oursMtime, theirsMtime };
   }
 
   // Propagate every resolution from a just-reconciled batch into the
   // batches behind it in the queue. Single-pass: list() + read() per
   // later batch happens once each, regardless of how many paths the
   // primary reconcile resolved. For each later batch we then
-  // intersect resolvedPerPath with the batch's file list and 3-way
-  // merge each match.
+  // intersect resolvedPerPath with the batch's file list and run
+  // attemptAutoMerge against (ours_of_later_batch, theirs=newOurs,
+  // base=oldOurs).
   //
-  // The cascade base is `oldOurs` (the pre-resolve snapshot of the
-  // primary batch); `theirs` is the resolved version. A clean
-  // cascade merge silently overwrites the later batch's snapshot;
-  // overlapping conflicts route through the same onConflict callback
-  // the primary reconcile used.
+  // Clean → overwrite the later batch's snapshot silently.
+  // Conflict (markers) → register modify-vs-modify + cascade-drop the
+  // path from this and every later batch (per advisor's "option A"
+  // for stage 5c: no more throw-on-defer).
   private async cascadeRebase(
     fromBatchId: string,
-    resolvedPerPath: Map<string, { oldOurs: string; newOurs: string }>,
+    resolvedPerPath: Map<
+      string,
+      { oldOurs: ArrayBuffer; newOurs: ArrayBuffer }
+    >,
+    currentHead: string,
   ): Promise<void> {
     if (resolvedPerPath.size === 0) return;
     const ids = await this.queue.list();
@@ -2222,45 +2067,31 @@ export class Sync2Manager {
       for (const path of intersection) {
         const { oldOurs, newOurs } = resolvedPerPath.get(path)!;
         const oursBytes = await this.queue.readFile(id, path);
-        const ours = new TextDecoder().decode(oursBytes);
-        const merge = mergeText(ours, oldOurs, newOurs);
-        let resolved: string;
-        if (merge.kind === "clean") {
-          resolved = merge.content;
-        } else {
-          const decision = await this.onConflict({
-            path,
-            ours,
-            base: oldOurs,
-            theirs: newOurs,
-            conflictMarkedContent: merge.conflictMarkedContent,
-          });
-          resolved = this.requireResolvedContent(decision, "cascade rebase");
+        const auto = attemptAutoMerge({
+          path,
+          ours: oursBytes,
+          theirs: newOurs,
+          base: oldOurs,
+          configDir: this.configDir,
+        });
+        if (auto.type === "clean") {
+          await this.queue.overwriteFile(id, path, auto.content);
+          continue;
         }
-        const buf = new TextEncoder().encode(resolved).buffer as ArrayBuffer;
-        await this.queue.overwriteFile(id, path, buf);
+        // atomic or register-conflict during cascade → can't silently
+        // pick a winner; register the conflict and drop the path from
+        // this batch (and any later batches that also carry it).
+        await this.registerConflictAndDropPath({
+          vaultPath: path,
+          kind: "modify-vs-modify",
+          theirsContent: newOurs,
+          theirsBlobSha: await calculateGitBlobSHA(newOurs),
+          oursBlobSha: await calculateGitBlobSHA(oursBytes),
+          remoteDevice: await this.fetchRemoteDevice(currentHead),
+          fromBatchId: id,
+        });
       }
     }
-  }
-
-  // Convert a ConflictResolution to the resolved content, throwing if
-  // the user picked "Later". Defer is only meaningful at pull time
-  // (we still have leeway to skip the path); during cascade rebase or
-  // in-flight batch reconcile the push is already happening, so the
-  // diff modal should not even surface a Defer button. This helper
-  // turns a misuse into a loud failure rather than a silent push of
-  // half-merged content.
-  private requireResolvedContent(
-    decision: ConflictResolution,
-    context: string,
-  ): string {
-    if (decision.kind === "deferred") {
-      throw new Error(
-        `Sync2 ${context}: cannot defer a conflict mid-push. ` +
-          `The diff modal should not offer "Later" in this context.`,
-      );
-    }
-    return decision.content;
   }
 
   private async safeFetchContents(

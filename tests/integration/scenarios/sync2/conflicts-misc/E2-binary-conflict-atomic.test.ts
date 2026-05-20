@@ -14,7 +14,6 @@ import {
   ensureRepoNotBare,
   getDefaultBranchHead,
   integrationEnabled,
-  readRemoteFile,
   uniqueBranchName,
   writeRemoteFile,
 } from "../../../helpers";
@@ -24,14 +23,18 @@ import {
   sync2AllAndAssertNoErrors,
 } from "../helpers";
 
-// E2 — binary conflict atomic resolution. After a prime sync, a
-// binary file is modified on BOTH sides. sync2 has no base for a
-// 3-way merge of binaries (and merging bytes makes no sense for
-// e.g. PNGs), so it falls back to atomic mtime: whichever side was
-// touched more recently wins. Tie → local wins.
+// E2 (pseudo-merge rewrite) — binary conflict: both sides modified
+// the same binary file. Pseudo-merge mode replaces the legacy silent
+// atomic-mtime resolution with explicit register-as-conflict. A
+// sibling file lands in the vault carrying theirs bytes; the local
+// file stays at ours; remote stays at theirs until the user
+// resolves via standard file ops (sibling delete / copy onto base).
+//
+// This collapses E2's two prior sub-tests (local-newer / local-older)
+// into a single "register" assertion — mtime is no longer a tie-break.
 
 describe.skipIf(!integrationEnabled())(
-  "sync2 E2 — binary conflict, atomic mtime resolution",
+  "sync2 E2 — binary conflict registers as modify-vs-modify",
   () => {
     let client: Sync2TestClient | undefined;
     let branch: string;
@@ -41,7 +44,7 @@ describe.skipIf(!integrationEnabled())(
     });
 
     beforeEach(async () => {
-      branch = uniqueBranchName("sync2-e2-binary-atomic");
+      branch = uniqueBranchName("sync2-e2-binary-conflict");
       const head = await getDefaultBranchHead();
       if (!head) throw new Error("default branch missing");
       await createBranchFromHead(branch, head);
@@ -53,12 +56,11 @@ describe.skipIf(!integrationEnabled())(
     });
 
     it(
-      "binary changed on both sides, local mtime is newer → local bytes win, end on remote",
+      "binary differs on both sides → modify-vs-modify registered, no silent overwrite",
       async () => {
         client = await createSync2Client({ branch });
         const initial = Buffer.from([
-          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-          0xaa,
+          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xaa,
         ]);
         await client.vault.adapter.writeBinary(
           "img.png",
@@ -69,10 +71,8 @@ describe.skipIf(!integrationEnabled())(
         );
         await sync2AllAndAssertNoErrors(client);
 
-        // Remote: another device modifies img.png — slightly older commit.
         const remoteBytes = Buffer.from([
-          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-          0xbb,
+          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xbb,
         ]);
         await writeRemoteFile(
           branch,
@@ -81,12 +81,8 @@ describe.skipIf(!integrationEnabled())(
           "[other] modify img.png",
         );
 
-        // Local: user modifies the file and forces its mtime to a
-        // moment in the future so it's unambiguously newer than the
-        // remote HEAD commit's committer date.
         const localBytes = Buffer.from([
-          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-          0xcc,
+          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xcc,
         ]);
         await client.vault.adapter.writeBinary(
           "img.png",
@@ -95,76 +91,32 @@ describe.skipIf(!integrationEnabled())(
             localBytes.byteOffset + localBytes.byteLength,
           ) as ArrayBuffer,
         );
-        const imgPath = path.join(client.vaultPath, "img.png");
-        const futureTs = (Date.now() + 60_000) / 1000;
-        fs.utimesSync(imgPath, futureTs, futureTs);
 
         await sync2AllAndAssertNoErrors(client);
 
-        // Local bytes won → both sides carry the local content.
-        const localAfter = fs.readFileSync(imgPath);
+        // Pseudo-merge contract: conflict registered, no silent
+        // overwrite. Local stays at ours; remote stays at theirs.
+        const records = client.conflictStore.getByPath("img.png");
+        expect(records).toHaveLength(1);
+        expect(records[0].kind).toBe("modify-vs-modify");
+
+        const localAfter = fs.readFileSync(path.join(client.vaultPath, "img.png"));
         expect(localAfter.equals(localBytes)).toBe(true);
-        const remoteContent = await readRemoteFile(branch, "img.png");
-        expect(Buffer.from(remoteContent, "binary").equals(localBytes)).toBe(
-          false,
-        );
-        // readRemoteFile decodes as utf-8 string; we want raw bytes.
+
+        // Sibling file has theirs bytes.
+        const siblingAbs = path.join(client.vaultPath, records[0].siblingPath);
+        expect(fs.existsSync(siblingAbs)).toBe(true);
+        const siblingBytes = fs.readFileSync(siblingAbs);
+        expect(siblingBytes.equals(remoteBytes)).toBe(true);
+
+        // Remote still has theirs (push skipped the path).
         const { files } = await client.client.getRepoContent({ retry: true });
         const blob = await client.client.getBlob({
           sha: files["img.png"].sha,
           retry: true,
         });
         const remoteRaw = Buffer.from(blob.content, "base64");
-        expect(remoteRaw.equals(localBytes)).toBe(true);
-      },
-      240_000,
-    );
-
-    it(
-      "binary changed on both sides, local mtime is older → remote bytes overwrite local",
-      async () => {
-        client = await createSync2Client({ branch });
-        const initial = Buffer.from([
-          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x11,
-        ]);
-        await client.vault.adapter.writeBinary(
-          "img.png",
-          initial.buffer.slice(
-            initial.byteOffset,
-            initial.byteOffset + initial.byteLength,
-          ) as ArrayBuffer,
-        );
-        await sync2AllAndAssertNoErrors(client);
-
-        const remoteBytes = Buffer.from([
-          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x22,
-        ]);
-        await writeRemoteFile(
-          branch,
-          "img.png",
-          remoteBytes,
-          "[other] modify img.png",
-        );
-
-        const localBytes = Buffer.from([
-          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x33,
-        ]);
-        await client.vault.adapter.writeBinary(
-          "img.png",
-          localBytes.buffer.slice(
-            localBytes.byteOffset,
-            localBytes.byteOffset + localBytes.byteLength,
-          ) as ArrayBuffer,
-        );
-        const imgPath = path.join(client.vaultPath, "img.png");
-        const pastTs = (Date.now() - 60_000) / 1000;
-        fs.utimesSync(imgPath, pastTs, pastTs);
-
-        await sync2AllAndAssertNoErrors(client);
-
-        // Remote bytes won → local file overwritten in place.
-        const localAfter = fs.readFileSync(imgPath);
-        expect(localAfter.equals(remoteBytes)).toBe(true);
+        expect(remoteRaw.equals(remoteBytes)).toBe(true);
       },
       240_000,
     );

@@ -21,19 +21,22 @@ import {
   Sync2TestClient,
   sync2AllAndAssertNoErrors,
 } from "../helpers";
+import { evaluateConflictState } from "../../../../../src/sync2/conflict-classifier";
 
-// G4 — atomic mtime resolution on a BINARY file across two real
-// sync2 devices. E2 covers binary atomic against a fake "remote
-// modification" written through the Contents API; this is the same
-// outcome through a full sync2-on-sync2 round trip. Newer mtime
-// wins; both sides end up with that side's bytes.
+// G4 (pseudo-merge rewrite) — binary conflict across two real
+// sync2 devices. Pseudo-merge mode removes silent atomic-mtime
+// resolution for binary: device B's reconcile registers a
+// modify-vs-modify conflict, sibling file (carrying A's bytes)
+// lands in B's vault, B's local stays at B's bytes, remote stays at
+// A's bytes. Resolution happens via standard file ops (here:
+// delete the sibling → keep ours → next sync pushes B's bytes).
 
 function bytesEqual(a: Buffer, b: Buffer): boolean {
   return a.length === b.length && a.equals(b);
 }
 
 describe.skipIf(!integrationEnabled())(
-  "sync2 G4 — binary atomic mtime, two devices",
+  "sync2 G4 — binary conflict across two devices, sibling-based resolution",
   () => {
     let deviceA: Sync2TestClient | undefined;
     let deviceB: Sync2TestClient | undefined;
@@ -44,7 +47,7 @@ describe.skipIf(!integrationEnabled())(
     });
 
     beforeEach(async () => {
-      branch = uniqueBranchName("sync2-g4-binary-atomic");
+      branch = uniqueBranchName("sync2-g4-binary-conflict");
       const head = await getDefaultBranchHead();
       if (!head) throw new Error("default branch missing");
       await createBranchFromHead(branch, head);
@@ -57,9 +60,9 @@ describe.skipIf(!integrationEnabled())(
     });
 
     it(
-      "A and B both modify img.png; B's mtime is newer → B's bytes on both sides",
+      "A and B both modify img.png; B's sync registers conflict + sibling; resolve via sibling delete",
       async () => {
-        // Seed: A creates and pushes img.png.
+        // Seed: A creates + pushes img.png.
         deviceA = await createSync2Client({ branch });
         const seed = Buffer.from([
           0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00,
@@ -73,11 +76,10 @@ describe.skipIf(!integrationEnabled())(
         );
         await sync2AllAndAssertNoErrors(deviceA);
 
-        // B pulls.
         deviceB = await createSync2Client({ branch });
         await sync2AllAndAssertNoErrors(deviceB);
 
-        // Both diverge. A modifies + pushes first (older mtime).
+        // A modifies + pushes first.
         const aBytes = Buffer.from([
           0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xaa,
         ]);
@@ -88,12 +90,9 @@ describe.skipIf(!integrationEnabled())(
             aBytes.byteOffset + aBytes.byteLength,
           ) as ArrayBuffer,
         );
-        const aImgPath = path.join(deviceA.vaultPath, "img.png");
-        const aTs = (Date.now() - 60_000) / 1000;
-        fs.utimesSync(aImgPath, aTs, aTs);
         await sync2AllAndAssertNoErrors(deviceA);
 
-        // B modifies locally (newer mtime) — has NOT pulled A's edit.
+        // B modifies locally without pulling A's commit.
         const bBytes = Buffer.from([
           0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xbb,
         ]);
@@ -104,31 +103,59 @@ describe.skipIf(!integrationEnabled())(
             bBytes.byteOffset + bBytes.byteLength,
           ) as ArrayBuffer,
         );
-        const bImgPath = path.join(deviceB.vaultPath, "img.png");
-        const bTs = (Date.now() + 60_000) / 1000;
-        fs.utimesSync(bImgPath, bTs, bTs);
 
-        // B's sync sees A's remote commit + own local mod → atomic
-        // mtime resolution. B is newer → B wins on both sides.
+        // B's sync sees A's remote modification + own local mod →
+        // binary path: pseudo-merge registers modify-vs-modify.
         await sync2AllAndAssertNoErrors(deviceB);
 
-        const bLocalAfter = fs.readFileSync(bImgPath);
-        expect(bytesEqual(bLocalAfter, bBytes)).toBe(true);
+        const records = deviceB.conflictStore.getByPath("img.png");
+        expect(records).toHaveLength(1);
+        expect(records[0].kind).toBe("modify-vs-modify");
+        const siblingPath = records[0].siblingPath;
+        const siblingAbs = path.join(deviceB.vaultPath, siblingPath);
+        expect(fs.existsSync(siblingAbs)).toBe(true);
+        expect(bytesEqual(fs.readFileSync(siblingAbs), aBytes)).toBe(true);
 
-        const { files } = await deviceB.client.getRepoContent({
+        // B's local stays at B's bytes.
+        const bImgPath = path.join(deviceB.vaultPath, "img.png");
+        expect(bytesEqual(fs.readFileSync(bImgPath), bBytes)).toBe(true);
+
+        // Remote still has A's bytes (B's push skipped the path).
+        const { files: filesAfterRegister } =
+          await deviceB.client.getRepoContent({ retry: true });
+        const blobAfter = await deviceB.client.getBlob({
+          sha: filesAfterRegister["img.png"].sha,
           retry: true,
         });
-        const blob = await deviceB.client.getBlob({
-          sha: files["img.png"].sha,
+        expect(
+          bytesEqual(Buffer.from(blobAfter.content, "base64"), aBytes),
+        ).toBe(true);
+
+        // User on B picks "ours" by deleting the sibling. Classifier
+        // case 1 → drop record. Next sync pushes B's bytes.
+        fs.rmSync(siblingAbs);
+        await evaluateConflictState(
+          deviceB.conflictStore,
+          deviceB.vault as unknown as import("obsidian").Vault,
+        );
+        expect(deviceB.conflictStore.hasPending("img.png")).toBe(false);
+
+        await sync2AllAndAssertNoErrors(deviceB);
+
+        const { files: filesAfterResolve } =
+          await deviceB.client.getRepoContent({ retry: true });
+        const blobResolved = await deviceB.client.getBlob({
+          sha: filesAfterResolve["img.png"].sha,
           retry: true,
         });
-        const remoteRaw = Buffer.from(blob.content, "base64");
-        expect(bytesEqual(remoteRaw, bBytes)).toBe(true);
+        expect(
+          bytesEqual(Buffer.from(blobResolved.content, "base64"), bBytes),
+        ).toBe(true);
 
-        // A pulls — gets B's bytes.
+        // A pulls + converges.
         await sync2AllAndAssertNoErrors(deviceA);
-        const aLocalAfter = fs.readFileSync(aImgPath);
-        expect(bytesEqual(aLocalAfter, bBytes)).toBe(true);
+        const aImgPath = path.join(deviceA.vaultPath, "img.png");
+        expect(bytesEqual(fs.readFileSync(aImgPath), bBytes)).toBe(true);
       },
       360_000,
     );

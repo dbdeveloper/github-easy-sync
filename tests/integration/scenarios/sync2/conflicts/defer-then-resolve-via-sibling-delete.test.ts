@@ -24,16 +24,24 @@ import {
   Sync2TestClient,
   sync2AllAndAssertNoErrors,
 } from "../helpers";
+import { evaluateConflictState } from "../../../../../src/sync2/conflict-classifier";
 
-// Stage 6.5 — defer + resolve via sibling-delete, end to end against
-// real GitHub. The user picks "Later" on a conflict modal: a sibling
-// file lands in the vault, the path is excluded from push, and on
-// the NEXT sync nothing about it changes on remote. Then the user
-// deletes the sibling — that's the "ours wins" signal — and the
-// next sync pushes ours to GitHub, replacing theirs.
+// Pseudo-merge stage 5c: register-conflict + classifier resolution
+// via sibling-delete, end to end against real GitHub.
+//
+// Detection registers the conflict as `modify-vs-modify`. A sibling
+// file lands in the vault, the path is excluded from push, and the
+// next sync leaves remote untouched. The user deletes the sibling —
+// classifier's case 1 (!siblingExists) fires → accept-ours → record
+// dropped. Next sync pushes ours to GitHub, replacing theirs.
+//
+// Stage 5c is detection cutover only; ConflictWatcher (stage 4
+// scaffolding) is not wired into main.ts yet, so the classifier is
+// invoked manually via evaluateConflictState() to model the eventual
+// real-time flow.
 
 describe.skipIf(!integrationEnabled())(
-  "sync2 conflict — defer then resolve via sibling delete",
+  "sync2 conflict — register + resolve via sibling delete",
   () => {
     let client: Sync2TestClient | undefined;
     let branch: string;
@@ -55,22 +63,16 @@ describe.skipIf(!integrationEnabled())(
     });
 
     it(
-      "Later → sibling created → delete sibling → next sync pushes ours",
+      "overlap → sibling registered → delete sibling → next sync pushes ours",
       async () => {
-        // Set up a shared baseline both sides start from.
         await writeRemoteFile(
           branch,
           "note.md",
           "shared baseline\n",
           "[seed] baseline",
         );
-        client = await createSync2Client({
-          // Programmatic onConflict — picks "Later" (deferred).
-          onConflict: async () => ({ kind: "deferred" }),
-          branch,
-        });
+        client = await createSync2Client({ branch });
         await sync2AllAndAssertNoErrors(client);
-        // Local now has the shared baseline.
         expect(
           fs.readFileSync(
             path.join(client.vaultPath, "note.md"),
@@ -78,8 +80,8 @@ describe.skipIf(!integrationEnabled())(
           ),
         ).toBe("shared baseline\n");
 
-        // Diverge: ours edits line 1 locally, theirs edits the same
-        // line on remote. Overlap → 3-way merge fails → onConflict.
+        // Diverge: same-line overlap → 3-way merge fails → register
+        // modify-vs-modify.
         fs.writeFileSync(
           path.join(client.vaultPath, "note.md"),
           "ours version\n",
@@ -94,10 +96,11 @@ describe.skipIf(!integrationEnabled())(
 
         await sync2AllAndAssertNoErrors(client);
 
-        // After deferral: a sibling file appears in the vault (one
-        // record only — first conflict on this path).
-        const records = client.conflictStore.forPath("note.md");
+        // Conflict registered. Sibling file in the vault carrying
+        // theirs content; ours stays in the base file.
+        const records = client.conflictStore.getByPath("note.md");
         expect(records).toHaveLength(1);
+        expect(records[0].kind).toBe("modify-vs-modify");
         const siblingPath = records[0].siblingPath;
         const siblingAbs = path.join(client.vaultPath, siblingPath);
         expect(fs.existsSync(siblingAbs)).toBe(true);
@@ -105,7 +108,7 @@ describe.skipIf(!integrationEnabled())(
           "theirs version\n",
         );
 
-        // Local file unchanged (ours stays).
+        // Local file unchanged.
         expect(
           fs.readFileSync(
             path.join(client.vaultPath, "note.md"),
@@ -113,20 +116,22 @@ describe.skipIf(!integrationEnabled())(
           ),
         ).toBe("ours version\n");
 
-        // Remote unchanged too (theirs stays — push skipped this path).
+        // Remote unchanged (push skipped the path).
         expect(await readRemoteFile(branch, "note.md")).toBe(
           "theirs version\n",
         );
 
-        // Sibling is in the vault but excluded from sync.
         const remoteFiles = await listRemoteFiles(branch);
         expect(remoteFiles).not.toContain(siblingPath);
 
-        // User deletes the sibling — close-conflict signal. The
-        // listener that wires this in main.ts isn't running here,
-        // so call notifySiblingDeleted directly. Then re-sync.
+        // User deletes the sibling — case 1 trigger. ConflictWatcher
+        // would auto-fire here; pre-wire, we drive the classifier
+        // manually.
         fs.rmSync(siblingAbs);
-        await client.conflictStore.notifySiblingDeleted(siblingPath);
+        await evaluateConflictState(
+          client.conflictStore,
+          client.vault as unknown as import("obsidian").Vault,
+        );
         expect(client.conflictStore.hasPending("note.md")).toBe(false);
 
         await sync2AllAndAssertNoErrors(client);

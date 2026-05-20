@@ -24,21 +24,22 @@ import {
   Sync2TestClient,
   sync2AllAndAssertNoErrors,
 } from "../helpers";
+import { evaluateConflictState } from "../../../../../src/sync2/conflict-classifier";
 
 // D6 — same file: local-delete vs remote-modify.
 //
-// New contract (replaces the legacy "silent delete-wins"): when a path
-// in the batch's deletions list also got modified on the remote since
-// the last sync, reconcile fires the onConflict callback with ours=""
-// (the deletion) vs theirs=remote-modified-bytes. The user picks the
-// outcome:
-//   - resolved with empty content ⇒ keep the delete (delete wins)
-//   - resolved with non-empty content ⇒ restore the file with that
-//     content (deletion canceled, restored bytes push to remote)
-//   - deferred ⇒ sibling file in vault, deletion dropped from batch,
-//     ConflictStore tracks until user clears the sibling
+// Pseudo-merge contract: reconcile registers a `delete-vs-modify`
+// record (sibling carries theirs bytes; base is absent because ours
+// was "delete"). The deletion is dropped from the batch. Resolution
+// happens via file operations:
+//   - delete the sibling → classifier case 1 (accept ours, i.e.
+//     confirm the delete) → next sync pushes the delete to remote
+//   - rename sibling onto base path (or copy content there) →
+//     classifier case 6 (baseSha == siblingSha) → accept-theirs →
+//     next sync no-op (remote already had theirs)
 //
-// All three branches are exercised below.
+// Pre-ConflictWatcher: the classifier is invoked manually after
+// each filesystem op.
 
 describe.skipIf(!integrationEnabled())(
   "sync2 D6 — same file: local delete + remote modify → conflict",
@@ -62,23 +63,62 @@ describe.skipIf(!integrationEnabled())(
       await deleteBranchIfExists(branch);
     });
 
-    it(
-      "user keeps the delete (resolved empty) → x gone on both sides",
-      async () => {
-        client = await createSync2Client({
-          branch,
-          onConflict: async () => ({ kind: "resolved", content: "" }),
-        });
-        await client.vault.adapter.write("x.md", "x v1\n");
-        await sync2AllAndAssertNoErrors(client);
+    async function setupConflict(): Promise<Sync2TestClient> {
+      const c = await createSync2Client({ branch });
+      await c.vault.adapter.write("x.md", "x v1\n");
+      await sync2AllAndAssertNoErrors(c);
+      await c.vault.adapter.remove("x.md");
+      await writeRemoteFile(
+        branch,
+        "x.md",
+        "x v2 from other device\n",
+        "[other] modify x.md",
+      );
+      await sync2AllAndAssertNoErrors(c);
+      return c;
+    }
 
-        await client.vault.adapter.remove("x.md");
-        await writeRemoteFile(
-          branch,
-          "x.md",
+    it(
+      "registers delete-vs-modify on detection",
+      async () => {
+        client = await setupConflict();
+        expect(client.conflictStore.hasPending("x.md")).toBe(true);
+        const records = client.conflictStore.getByPath("x.md");
+        expect(records).toHaveLength(1);
+        expect(records[0].kind).toBe("delete-vs-modify");
+
+        // Sibling file in vault with theirs content.
+        const siblingPath = records[0].siblingPath;
+        expect(fs.existsSync(path.join(client.vaultPath, siblingPath))).toBe(true);
+        expect(
+          fs.readFileSync(path.join(client.vaultPath, siblingPath), "utf8"),
+        ).toBe("x v2 from other device\n");
+
+        // Base file (x.md) does not exist — we deleted it.
+        expect(fs.existsSync(path.join(client.vaultPath, "x.md"))).toBe(false);
+
+        // Remote untouched: deletion dropped from batch.
+        expect(await readRemoteFile(branch, "x.md")).toBe(
           "x v2 from other device\n",
-          "[other] modify x.md",
         );
+      },
+      240_000,
+    );
+
+    it(
+      "user deletes the sibling → classifier accept-ours → next sync removes x on remote",
+      async () => {
+        client = await setupConflict();
+        const records = client.conflictStore.getByPath("x.md");
+        const siblingAbs = path.join(client.vaultPath, records[0].siblingPath);
+
+        fs.rmSync(siblingAbs);
+        await evaluateConflictState(
+          client.conflictStore,
+          client.vault as unknown as import("obsidian").Vault,
+        );
+
+        expect(client.conflictStore.hasPending("x.md")).toBe(false);
 
         await sync2AllAndAssertNoErrors(client);
 
@@ -90,105 +130,26 @@ describe.skipIf(!integrationEnabled())(
     );
 
     it(
-      "user keeps remote (resolved with theirs content) → x restored locally and remote unchanged",
+      "user copies sibling onto base path → case 6 → x restored locally, remote unchanged",
       async () => {
-        client = await createSync2Client({
-          branch,
-          onConflict: async (args) => ({
-            kind: "resolved",
-            content: args.theirs,
-          }),
-        });
-        await client.vault.adapter.write("x.md", "x v1\n");
-        await sync2AllAndAssertNoErrors(client);
-
-        await client.vault.adapter.remove("x.md");
-        await writeRemoteFile(
-          branch,
-          "x.md",
-          "x v2 from other device\n",
-          "[other] modify x.md",
-        );
-
-        await sync2AllAndAssertNoErrors(client);
-
-        // File restored locally with remote's content.
-        expect(
-          fs.readFileSync(path.join(client.vaultPath, "x.md"), "utf8"),
-        ).toBe("x v2 from other device\n");
-        // Remote also has the same content (we either pushed it or
-        // left it as-is).
-        expect(await readRemoteFile(branch, "x.md")).toBe(
-          "x v2 from other device\n",
-        );
-      },
-      240_000,
-    );
-
-    it(
-      "user picks merged content (resolved non-empty) → x restored + pushed",
-      async () => {
-        const merged = "x merged: local-deleted + remote-modified\n";
-        client = await createSync2Client({
-          branch,
-          onConflict: async () => ({ kind: "resolved", content: merged }),
-        });
-        await client.vault.adapter.write("x.md", "x v1\n");
-        await sync2AllAndAssertNoErrors(client);
-
-        await client.vault.adapter.remove("x.md");
-        await writeRemoteFile(
-          branch,
-          "x.md",
-          "x v2 from other device\n",
-          "[other] modify x.md",
-        );
-
-        await sync2AllAndAssertNoErrors(client);
-
-        expect(
-          fs.readFileSync(path.join(client.vaultPath, "x.md"), "utf8"),
-        ).toBe(merged);
-        expect(await readRemoteFile(branch, "x.md")).toBe(merged);
-      },
-      240_000,
-    );
-
-    it(
-      "user defers → sibling file appears, deletion dropped, remote untouched",
-      async () => {
-        client = await createSync2Client({
-          branch,
-          onConflict: async () => ({ kind: "deferred" }),
-        });
-        await client.vault.adapter.write("x.md", "x v1\n");
-        await sync2AllAndAssertNoErrors(client);
-
-        await client.vault.adapter.remove("x.md");
-        await writeRemoteFile(
-          branch,
-          "x.md",
-          "x v2 from other device\n",
-          "[other] modify x.md",
-        );
-
-        await sync2AllAndAssertNoErrors(client);
-
-        // ConflictStore has a pending record for x.md.
-        expect(client.conflictStore.hasPending("x.md")).toBe(true);
-        const records = client.conflictStore.forPath("x.md");
-        expect(records).toHaveLength(1);
-
-        // Sibling file with theirs content sits in the vault.
+        client = await setupConflict();
+        const records = client.conflictStore.getByPath("x.md");
         const siblingPath = records[0].siblingPath;
-        expect(fs.existsSync(path.join(client.vaultPath, siblingPath))).toBe(
-          true,
-        );
-        expect(
-          fs.readFileSync(path.join(client.vaultPath, siblingPath), "utf8"),
-        ).toBe("x v2 from other device\n");
 
-        // Remote x.md untouched (we didn't push the deletion).
+        // User accepts theirs by copying sibling content over to
+        // base. baseSha now equals siblingSha → classifier fires
+        // case 6 (accept-theirs) → record + sibling dropped.
+        const theirsBytes = await client.vault.adapter.readBinary(siblingPath);
+        await client.vault.adapter.writeBinary("x.md", theirsBytes);
+        await evaluateConflictState(
+          client.conflictStore,
+          client.vault as unknown as import("obsidian").Vault,
+        );
+
+        expect(client.conflictStore.hasPending("x.md")).toBe(false);
+        expect(
+          fs.readFileSync(path.join(client.vaultPath, "x.md"), "utf8"),
+        ).toBe("x v2 from other device\n");
         expect(await readRemoteFile(branch, "x.md")).toBe(
           "x v2 from other device\n",
         );

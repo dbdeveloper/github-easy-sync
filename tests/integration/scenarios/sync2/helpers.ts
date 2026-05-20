@@ -26,7 +26,7 @@ import ChangeDetector from "../../../../src/sync2/change-detector";
 import GitignoreInvariants from "../../../../src/sync2/gitignore-invariants";
 import PushQueue from "../../../../src/sync2/push-queue";
 import TreeBuilder from "../../../../src/sync2/tree-builder";
-import ConflictStore from "../../../../src/sync2/conflict-store-old";
+import ConflictStore from "../../../../src/sync2/conflict-store";
 import {
   GitHubSyncSettings,
   DEFAULT_SETTINGS,
@@ -47,17 +47,6 @@ export interface Sync2ClientOpts {
   // from one client instance to its successor without losing the
   // rm-rf on cleanup. Defaults to `vaultPath === undefined`.
   ownsVaultPath?: boolean;
-  onConflict?: (a: {
-    path: string;
-    ours: string;
-    base: string;
-    theirs: string;
-    conflictMarkedContent: string;
-  }) => Promise<
-    | { kind: "resolved"; content: string }
-    | { kind: "deferred" }
-    | { kind: "merged-into-one"; content: string }
-  >;
   accumulateOfflineSyncs?: boolean;
   enableLogging?: boolean;
   // Per-device configDir gate. Defaults to true (matches the
@@ -162,14 +151,6 @@ export async function createSync2Client(
   });
   await conflictStore.load();
 
-  const onConflict =
-    opts.onConflict ??
-    (async (a): Promise<never> => {
-      throw new Error(
-        `Test 3-way merge conflict on ${a.path} but no resolver provided`,
-      );
-    });
-
   const manager = new Sync2Manager({
     vault,
     store,
@@ -193,7 +174,6 @@ export async function createSync2Client(
       branch: settings.githubBranch,
     }),
     conflictStore,
-    onConflict,
     accumulateOfflineSyncs: opts.accumulateOfflineSyncs ?? false,
     autoCanonicalize: () => opts.autoCanonicalize ?? true,
   });

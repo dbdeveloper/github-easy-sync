@@ -21,8 +21,7 @@ import TreeBuilder from "./sync2/tree-builder";
 import GitignoreInvariants from "./sync2/gitignore-invariants";
 import { Sync2Manager } from "./sync2/sync2-manager";
 import { IntervalScheduler } from "./sync2/interval-scheduler";
-import { ConflictResolution as Sync2ConflictResolution } from "./sync2/types";
-import ConflictStore from "./sync2/conflict-store-old";
+import ConflictStore from "./sync2/conflict-store";
 import manifest from "../manifest.json";
 
 // How long the brief local-phase notices stay visible. 700ms is the
@@ -280,11 +279,6 @@ export default class GitHubSyncPlugin extends Plugin {
         branch: this.settings.githubBranch,
       }),
       conflictStore,
-      // Stage 5a: handleSync2Conflict reduced to a stub that always
-      // defers — the modal UI is gone, every conflict becomes a
-      // silent sibling. Stage 5c will remove the onConflict deps
-      // entirely as part of the detection cutover.
-      onConflict: async () => ({ kind: "deferred" } as Sync2ConflictResolution),
       accumulateOfflineSyncs: this.settings.accumulateOfflineSyncs ?? false,
       autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? false,
       onProgress: (initial: string) => {
@@ -336,19 +330,11 @@ export default class GitHubSyncPlugin extends Plugin {
       onSyncCompleted: () => {},
     });
 
-    // Vault listeners: a sibling file deleted or renamed in the file
-    // tree is treated as "user closed this conflict, ours wins on
-    // next push". Same handler for both events — `oldPath` after a
-    // rename is the path the conflict-store knows about.
-    this.vaultDeleteListener = this.app.vault.on("delete", async (file) => {
-      await this.conflictStore.notifySiblingDeleted(file.path);
-    });
-    this.vaultRenameListener = this.app.vault.on(
-      "rename",
-      async (_file, oldPath) => {
-        await this.conflictStore.notifySiblingDeleted(oldPath);
-      },
-    );
+    // Stage 5c: vault listeners that closed conflicts on sibling
+    // delete are gone — the new ConflictStore's classifier runs
+    // through ConflictWatcher (stage 4, wired in a later stage).
+    // The old in-line notifySiblingDeleted path doesn't exist on
+    // the new store.
 
     // Deliberately NO drain on enable. Users running with "Sync
     // strategy: manual" + "Sync on startup: false" expect to be in

@@ -23,6 +23,7 @@ import {
   Sync2TestClient,
   sync2AllAndAssertNoErrors,
 } from "../helpers";
+import { evaluateConflictState } from "../../../../../src/sync2/conflict-classifier";
 
 // Stage 6.5 — `enqueueOrMerge` filters out file changes whose path
 // has an active conflict record. This test pre-creates a conflict,
@@ -70,10 +71,7 @@ describe.skipIf(!integrationEnabled())(
           "shared baseline clean\n",
           "[seed] clean",
         );
-        client = await createSync2Client({
-          onConflict: async () => ({ kind: "deferred" }),
-          branch,
-        });
+        client = await createSync2Client({ branch });
         await sync2AllAndAssertNoErrors(client);
 
         // Trigger the conflict on blocked.md.
@@ -115,13 +113,16 @@ describe.skipIf(!integrationEnabled())(
           "theirs-blocked\n",
         );
 
-        // Resolve via sibling delete, then sync. blocked.md should
-        // now propagate ours-blocked-v2.
-        const records = client.conflictStore.forPath("blocked.md");
+        // Resolve via sibling delete + classifier sweep, then sync.
+        // blocked.md should now propagate ours-blocked-v2.
+        const records = client.conflictStore.getByPath("blocked.md");
         expect(records).toHaveLength(1);
         const siblingPath = records[0].siblingPath;
         fs.rmSync(path.join(client.vaultPath, siblingPath));
-        await client.conflictStore.notifySiblingDeleted(siblingPath);
+        await evaluateConflictState(
+          client.conflictStore,
+          client.vault as unknown as import("obsidian").Vault,
+        );
 
         await sync2AllAndAssertNoErrors(client);
 

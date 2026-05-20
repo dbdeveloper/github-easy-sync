@@ -18,6 +18,7 @@ import ChangeDetector from "../../src/sync2/change-detector";
 import PushQueue from "../../src/sync2/push-queue";
 import SnapshotStore from "../../src/sync2/snapshot-store";
 import TreeBuilder from "../../src/sync2/tree-builder";
+import ConflictStoreNew from "../../src/sync2/conflict-store";
 import GI from "../../src/gi";
 import { Vault } from "../../mock-obsidian";
 import { calculateGitBlobSHA } from "../../src/utils";
@@ -295,7 +296,7 @@ function fixture(opts?: {
     | { kind: "deferred" }
     | { kind: "merged-into-one"; content: string }
   >;
-  conflictStore?: import("../../src/sync2/conflict-store-old").default;
+  conflictStore?: import("../../src/sync2/conflict-store").default;
   accumulateOfflineSyncs?: boolean;
   onProgress?: (msg: string) => {
     update: (m: string) => void;
@@ -380,21 +381,16 @@ function fixture(opts?: {
     base: string;
     theirs: string;
   }[] = [];
-  const onConflictDefault = async (a: {
-    path: string;
-    ours: string;
-    base: string;
-    theirs: string;
-    conflictMarkedContent: string;
-  }): Promise<{ kind: "resolved"; content: string }> => {
-    conflictCalls.push({
-      path: a.path,
-      ours: a.ours,
-      base: a.base,
-      theirs: a.theirs,
+  // Default ConflictStore so detection paths that would auto-register
+  // a conflict don't throw "no store wired". Tests can override via
+  // opts.conflictStore.
+  const defaultConflictStore =
+    opts?.conflictStore ??
+    new ConflictStoreNew({
+      vault: vault as unknown as import("obsidian").Vault,
+      configDir: CONFIG_DIR,
+      selfPluginId: SELF_PLUGIN_ID,
     });
-    return { kind: "resolved", content: a.conflictMarkedContent };
-  };
   const manager = new Sync2Manager({
     vault: vault as unknown as import("obsidian").Vault,
     store,
@@ -408,8 +404,7 @@ function fixture(opts?: {
     commitMessageAll: "Sync at {date} {time}",
     commitMessageFile: "Update {filename} at {date} {time}",
     deviceLabel: "test-device",
-    conflictStore: opts?.conflictStore,
-    onConflict: opts?.onConflict ?? onConflictDefault,
+    conflictStore: defaultConflictStore,
     accumulateOfflineSyncs: opts?.accumulateOfflineSyncs ?? false,
     onProgress: opts?.onProgress,
     onLocalCommitted: opts?.onLocalCommitted,
@@ -839,87 +834,6 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
       expect(xEntry.content).toContain("middle");
     });
 
-    it("conflict modal fires for overlapping edits; resolved content lands in tree", async () => {
-      const f2 = fixture({
-        onConflict: async () => ({
-          kind: "resolved",
-          content: "user-picked-ours",
-        }),
-      });
-      await f2.store.load();
-      writeVaultFile(f2.root, "x.md", "ours-version");
-      const sShared = await shaOf("shared");
-      const stat = fs.statSync(path.join(f2.root, "x.md"));
-      f2.store.set("x.md", {
-        path: "x.md",
-        remoteSha: sShared,
-        mtime: 0,
-        size: stat.size,
-      });
-      f2.store.setLastSync("BASE_HEAD", "BASE_TREE");
-      f2.client.setBranchHead("REMOTE_HEAD");
-      f2.client.setTreeShaForCommit("REMOTE_HEAD", "REMOTE_TREE");
-      f2.client.setContentAtRef("BASE_HEAD", "x.md", "shared");
-      f2.client.setContentAtRef("REMOTE_HEAD", "x.md", "theirs-version");
-      f2.client.setCompareResult("BASE_HEAD", "REMOTE_HEAD", {
-        status: "ahead",
-        files: [{ filename: "x.md", status: "modified", sha: "blob-of-theirs" }],
-      });
-
-      await f2.manager.syncAll();
-
-      const tree = f2.client.state.lastTree!;
-      const xEntry = tree.find((e) => e.path === "x.md")!;
-      // Resolver returns "user-picked-ours" without a trailing NL; the
-      // text-canonicalisation pipeline (Stage 6.6) adds one before the
-      // content lands in the snapshot/tree.
-      expect(xEntry.content).toBe("user-picked-ours\n");
-
-      fs.rmSync(f2.root, { recursive: true, force: true });
-    });
-
-    it("force-push fallback: missing base treats it as empty content during pull merge", async () => {
-      const f3 = fixture({
-        onConflict: async () => ({
-          kind: "resolved",
-          content: "manual-resolution",
-        }),
-      });
-      await f3.store.load();
-      writeVaultFile(f3.root, "x.md", "local-only-content");
-      const stat = fs.statSync(path.join(f3.root, "x.md"));
-      // Pretend we synced at OLD_HEAD_GONE with x.md SHA = "STALE" —
-      // the snapshot is stale because that commit no longer exists.
-      f3.store.set("x.md", {
-        path: "x.md",
-        remoteSha: "STALE_SHA",
-        mtime: 0,
-        size: stat.size,
-      });
-      f3.store.setLastSync("OLD_HEAD_GONE", "OLD_TREE_GONE");
-      f3.client.setBranchHead("NEW_HEAD");
-      f3.client.setTreeShaForCommit("NEW_HEAD", "NEW_TREE");
-      // Deliberately do NOT set contents at OLD_HEAD_GONE — base
-      // fetch returns null. theirs at NEW_HEAD differs.
-      f3.client.setContentAtRef("NEW_HEAD", "x.md", "remote-content");
-      f3.client.setCompareResult("OLD_HEAD_GONE", "NEW_HEAD", {
-        status: "ahead",
-        files: [{ filename: "x.md", status: "modified", sha: "blob-of-theirs" }],
-      });
-
-      await f3.manager.syncAll();
-
-      // Pull's 3-way merge with base="" treats both sides as additions
-      // → conflict → resolver wins → resolved lands in vault and gets
-      // pushed. Stage 6.6 normalizes the resolver output before storage,
-      // so the trailing-NL invariant adds the missing \n.
-      const tree = f3.client.state.lastTree!;
-      const xEntry = tree.find((e) => e.path === "x.md")!;
-      expect(xEntry.content).toBe("manual-resolution\n");
-
-      fs.rmSync(f3.root, { recursive: true, force: true });
-    });
-
     it("binary files skip auto-merge: batch ours wins on push", async () => {
       const bytes = Buffer.from([1, 2, 3, 4]);
       writeVaultFile(f.root, "img.png", bytes);
@@ -1280,36 +1194,6 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
       expect(data[1]).toBe(0x99);
     });
 
-    it("binary remote-modify, remote newer: overwrites local with remote", async () => {
-      writeVaultFile(f.root, "img.png", Buffer.from([0x11, 0x22]));
-      const localStat = fs.statSync(path.join(f.root, "img.png"));
-      f.store.set("img.png", {
-        path: "img.png",
-        remoteSha: "OLDSHA",
-        mtime: 0,
-        size: localStat.size,
-      });
-      f.store.setLastSync("BASE_HEAD", "BASE_TREE");
-      f.client.setBranchHead("NEW_HEAD");
-      f.client.setTreeShaForCommit("NEW_HEAD", "NEW_TREE");
-      f.client.setCommitDate(
-        "NEW_HEAD",
-        new Date(localStat.mtimeMs + 60_000).toISOString(),
-      );
-      f.client.setContentAtRef("NEW_HEAD", "img.png", "remote-fresh");
-      f.client.setCompareResult("BASE_HEAD", "NEW_HEAD", {
-        status: "ahead",
-        files: [
-          { filename: "img.png", status: "modified", sha: "blob-of-remote" },
-        ],
-      });
-
-      await f.manager.syncAll();
-
-      const data = fs.readFileSync(path.join(f.root, "img.png"), "utf8");
-      expect(data).toBe("remote-fresh");
-    });
-
     it("compare 404 (force-push or GC'd commit) is graceful", async () => {
       writeVaultFile(f.root, "x.md", "v");
       f.store.setLastSync("LOST_BASE", "LOST_TREE");
@@ -1464,52 +1348,6 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
       expect(tree.find((e) => e.path === "doc.md")?.content).toBe("alpha\n");
     });
 
-    it("merge-resolved content also gets canonicalized + republished if needed", async () => {
-      // Local has its own edit; remote has a different one (overlap →
-      // conflict). Conflict resolver returns "manual-resolution"
-      // (no trailing NL). Stage 6.6 normalizes that to
-      // "manual-resolution\n" before storing/pushing.
-      const f2 = fixture({
-        onConflict: async () => ({
-          kind: "resolved",
-          content: "manual-resolution",
-        }),
-      });
-      await f2.store.load();
-      writeVaultFile(f2.root, "x.md", "ours\n");
-      const sShared = await shaOf("shared\n");
-      const stat = fs.statSync(path.join(f2.root, "x.md"));
-      f2.store.set("x.md", {
-        path: "x.md",
-        remoteSha: sShared,
-        mtime: 0,
-        size: stat.size,
-      });
-      f2.store.setLastSync("BASE_HEAD", "BASE_TREE");
-      f2.client.setBranchHead("REMOTE_HEAD");
-      f2.client.setTreeShaForCommit("REMOTE_HEAD", "REMOTE_TREE");
-      f2.client.setContentAtRef("BASE_HEAD", "x.md", "shared\n");
-      f2.client.setContentAtRef("REMOTE_HEAD", "x.md", "theirs\n");
-      f2.client.setCompareResult("BASE_HEAD", "REMOTE_HEAD", {
-        status: "ahead",
-        files: [
-          { filename: "x.md", status: "modified", sha: "blob-of-theirs" },
-        ],
-      });
-
-      await f2.manager.syncAll();
-
-      const tree = f2.client.state.lastTree!;
-      expect(tree.find((e) => e.path === "x.md")?.content).toBe(
-        "manual-resolution\n",
-      );
-      expect(
-        fs.readFileSync(path.join(f2.root, "x.md"), "utf8"),
-      ).toBe("manual-resolution\n");
-
-      fs.rmSync(f2.root, { recursive: true, force: true });
-    });
-
     it("syncFile: target normalized during pull → next syncFile pushes canonical", async () => {
       f.store.setLastSync("BASE_HEAD", "BASE_TREE");
       f.client.setBranchHead("NEW_HEAD");
@@ -1569,426 +1407,6 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
     });
   });
 
-  // ── Stage 6.5 — conflict resolver contract -------------------------
-  // Sync2Manager's onConflict callback now returns a discriminated
-  // union (resolved / deferred / merged-into-one). These tests pin
-  // each branch through the manager flow without going through the
-  // real diff modal — the modal is a UI layer that just produces
-  // these decision shapes.
-  describe("OnConflict contract (Stage 6.5)", () => {
-    it("kind=resolved: content is written to disk, recorded, and pushed", async () => {
-      const f2 = fixture({
-        onConflict: async () => ({
-          kind: "resolved",
-          content: "user-merged-via-diff",
-        }),
-      });
-      await f2.store.load();
-      writeVaultFile(f2.root, "x.md", "ours-version\n");
-      const sShared = await shaOf("shared\n");
-      const stat = fs.statSync(path.join(f2.root, "x.md"));
-      f2.store.set("x.md", {
-        path: "x.md",
-        remoteSha: sShared,
-        mtime: 0,
-        size: stat.size,
-      });
-      f2.store.setLastSync("BASE_HEAD", "BASE_TREE");
-      f2.client.setBranchHead("REMOTE_HEAD");
-      f2.client.setTreeShaForCommit("REMOTE_HEAD", "REMOTE_TREE");
-      f2.client.setContentAtRef("BASE_HEAD", "x.md", "shared\n");
-      f2.client.setContentAtRef("REMOTE_HEAD", "x.md", "theirs-version\n");
-      f2.client.setCompareResult("BASE_HEAD", "REMOTE_HEAD", {
-        status: "ahead",
-        files: [{ filename: "x.md", status: "modified", sha: "blob-of-theirs" }],
-      });
-
-      await f2.manager.syncAll();
-
-      const tree = f2.client.state.lastTree!;
-      expect(tree.find((e) => e.path === "x.md")?.content).toBe(
-        "user-merged-via-diff\n",
-      );
-
-      fs.rmSync(f2.root, { recursive: true, force: true });
-    });
-
-    it("kind=merged-into-one: content overwrites local + pushes (treated like resolved)", async () => {
-      // The Stage 6.5 markdown auto-merge feeds its result through the
-      // same kind=merged-into-one return; manager treats it
-      // identically to resolved. The kind tag is only for telemetry.
-      const merged =
-        "# Notes\n\noriginal\n\n> [!info] Changing 1 — from Phone\n> theirs version\n";
-      const f2 = fixture({
-        onConflict: async () => ({
-          kind: "merged-into-one",
-          content: merged,
-        }),
-      });
-      await f2.store.load();
-      writeVaultFile(f2.root, "x.md", "ours\n");
-      const sShared = await shaOf("shared\n");
-      const stat = fs.statSync(path.join(f2.root, "x.md"));
-      f2.store.set("x.md", {
-        path: "x.md",
-        remoteSha: sShared,
-        mtime: 0,
-        size: stat.size,
-      });
-      f2.store.setLastSync("BASE_HEAD", "BASE_TREE");
-      f2.client.setBranchHead("REMOTE_HEAD");
-      f2.client.setTreeShaForCommit("REMOTE_HEAD", "REMOTE_TREE");
-      f2.client.setContentAtRef("BASE_HEAD", "x.md", "shared\n");
-      f2.client.setContentAtRef("REMOTE_HEAD", "x.md", "theirs\n");
-      f2.client.setCompareResult("BASE_HEAD", "REMOTE_HEAD", {
-        status: "ahead",
-        files: [{ filename: "x.md", status: "modified", sha: "blob-of-theirs" }],
-      });
-
-      await f2.manager.syncAll();
-
-      const tree = f2.client.state.lastTree!;
-      expect(tree.find((e) => e.path === "x.md")?.content).toBe(merged);
-
-      fs.rmSync(f2.root, { recursive: true, force: true });
-    });
-
-    it("kind=deferred: ConflictStore.create called, path NOT in this push, local file unchanged", async () => {
-      const ConflictStore = (
-        await import("../../src/sync2/conflict-store-old")
-      ).default;
-      const f2 = fixture({}); // we'll wire the conflict store separately
-      const conflictStore = new ConflictStore({
-        vault: f2.vault as unknown as import("obsidian").Vault,
-        configDir: CONFIG_DIR,
-        selfPluginId: SELF_PLUGIN_ID,
-      });
-      await conflictStore.load();
-
-      // Re-build the manager with the conflict store wired and a
-      // deferring onConflict callback.
-      const manager = new Sync2Manager({
-        vault: f2.vault as unknown as import("obsidian").Vault,
-        store: f2.store,
-        detector: f2.detector,
-        queue: f2.queue,
-        builder: f2.builder,
-        client: f2.client,
-        logger: silentLogger(),
-        configDir: CONFIG_DIR,
-        selfPluginId: SELF_PLUGIN_ID,
-        commitMessageAll: "Sync at {date} {time}",
-        commitMessageFile: "Update {filename} at {date} {time}",
-        deviceLabel: "test-device",
-        conflictStore,
-        onConflict: async () => ({ kind: "deferred" }),
-        now: () => f2.clock.nowMs(),
-      });
-
-      await f2.store.load();
-      writeVaultFile(f2.root, "x.md", "local-edits\n");
-      const sShared = await shaOf("shared\n");
-      const stat = fs.statSync(path.join(f2.root, "x.md"));
-      f2.store.set("x.md", {
-        path: "x.md",
-        remoteSha: sShared,
-        mtime: 0,
-        size: stat.size,
-      });
-      f2.store.setLastSync("BASE_HEAD", "BASE_TREE");
-      f2.client.setBranchHead("REMOTE_HEAD");
-      f2.client.setTreeShaForCommit("REMOTE_HEAD", "REMOTE_TREE");
-      // Commit message ends with " (test-device)" so parseDeviceSuffix
-      // recovers that label and tags the sibling file with the FOREIGN
-      // author rather than the local device — same convention sync2's
-      // own appendDeviceSuffix uses on push.
-      f2.client.setCommitMessage(
-        "REMOTE_HEAD",
-        "Sync at 2026-05-09 12:00:00.000 (test-device)",
-      );
-      f2.client.setContentAtRef("BASE_HEAD", "x.md", "shared\n");
-      f2.client.setContentAtRef("REMOTE_HEAD", "x.md", "theirs-edits\n");
-      f2.client.setCompareResult("BASE_HEAD", "REMOTE_HEAD", {
-        status: "ahead",
-        files: [
-          { filename: "x.md", status: "modified", sha: "blob-of-theirs" },
-        ],
-      });
-
-      await manager.syncAll();
-
-      // ConflictStore now has a record + sibling file in the vault.
-      expect(conflictStore.hasPending("x.md")).toBe(true);
-      const records = conflictStore.forPath("x.md");
-      expect(records).toHaveLength(1);
-      // theirsBlobSha is whatever the fake client returned for the
-      // remote content — fixture computes it from the content bytes.
-      expect(records[0].theirsBlobSha).toMatch(/^blob-of-[0-9a-f]{8}$/);
-      expect(records[0].deviceLabel).toBe("test-device");
-
-      // Sibling file is in the vault with the theirs content.
-      const siblingPath = records[0].siblingPath;
-      expect(fs.existsSync(path.join(f2.root, siblingPath))).toBe(true);
-      expect(
-        fs.readFileSync(path.join(f2.root, siblingPath), "utf8"),
-      ).toBe("theirs-edits\n");
-
-      // Local file UNCHANGED — ours stays put. The push pipeline
-      // didn't get the path because it's pending-conflict-filtered.
-      expect(
-        fs.readFileSync(path.join(f2.root, "x.md"), "utf8"),
-      ).toBe("local-edits\n");
-
-      // No commit happened (push was empty after filter).
-      const commits = f2.client.calls.filter(
-        (c) => c.op === "createCommit",
-      );
-      expect(commits).toEqual([]);
-
-      fs.rmSync(f2.root, { recursive: true, force: true });
-    });
-
-    it("kind=deferred without conflictStore wired throws a clear error", async () => {
-      const f2 = fixture({
-        onConflict: async () => ({ kind: "deferred" }),
-        // conflictStore intentionally omitted
-      });
-      await f2.store.load();
-      writeVaultFile(f2.root, "x.md", "ours\n");
-      const sShared = await shaOf("shared\n");
-      f2.store.set("x.md", {
-        path: "x.md",
-        remoteSha: sShared,
-        mtime: 0,
-        size: 4,
-      });
-      f2.store.setLastSync("BASE_HEAD", "BASE_TREE");
-      f2.client.setBranchHead("REMOTE_HEAD");
-      f2.client.setTreeShaForCommit("REMOTE_HEAD", "REMOTE_TREE");
-      f2.client.setContentAtRef("BASE_HEAD", "x.md", "shared\n");
-      f2.client.setContentAtRef("REMOTE_HEAD", "x.md", "theirs\n");
-      f2.client.setCompareResult("BASE_HEAD", "REMOTE_HEAD", {
-        status: "ahead",
-        files: [
-          { filename: "x.md", status: "modified", sha: "blob-of-theirs" },
-        ],
-      });
-
-      await expect(f2.manager.syncAll()).rejects.toThrow(
-        /no ConflictStore is wired/,
-      );
-
-      fs.rmSync(f2.root, { recursive: true, force: true });
-    });
-
-    it("hand-edited GitHub commit (no ' (label)' suffix) → sibling labelled 'unknown'", async () => {
-      // Same setup as the kind=deferred test above, but the HEAD
-      // commit message is what a user typed in GitHub's web UI —
-      // no trailing " (deviceLabel)" tag. parseDeviceSuffix
-      // returns the UNKNOWN_DEVICE_LABEL sentinel; the sibling
-      // file should reflect that, NOT the local device's label.
-      const ConflictStore = (
-        await import("../../src/sync2/conflict-store-old")
-      ).default;
-      const f2 = fixture({});
-      const conflictStore = new ConflictStore({
-        vault: f2.vault as unknown as import("obsidian").Vault,
-        configDir: CONFIG_DIR,
-        selfPluginId: SELF_PLUGIN_ID,
-      });
-      await conflictStore.load();
-
-      const manager = new Sync2Manager({
-        vault: f2.vault as unknown as import("obsidian").Vault,
-        store: f2.store,
-        detector: f2.detector,
-        queue: f2.queue,
-        builder: f2.builder,
-        client: f2.client,
-        logger: silentLogger(),
-        configDir: CONFIG_DIR,
-        selfPluginId: SELF_PLUGIN_ID,
-        commitMessageAll: "Sync at {date} {time}",
-        commitMessageFile: "Update {filename} at {date} {time}",
-        deviceLabel: "test-device",
-        conflictStore,
-        onConflict: async () => ({ kind: "deferred" }),
-        now: () => f2.clock.nowMs(),
-      });
-
-      await f2.store.load();
-      writeVaultFile(f2.root, "x.md", "local-edits\n");
-      const sShared = await shaOf("shared\n");
-      const stat = fs.statSync(path.join(f2.root, "x.md"));
-      f2.store.set("x.md", {
-        path: "x.md",
-        remoteSha: sShared,
-        mtime: 0,
-        size: stat.size,
-      });
-      f2.store.setLastSync("BASE_HEAD", "BASE_TREE");
-      f2.client.setBranchHead("REMOTE_HEAD");
-      f2.client.setTreeShaForCommit("REMOTE_HEAD", "REMOTE_TREE");
-      // NO trailing " (label)" — what a hand-edited or non-sync2
-      // commit looks like. parseDeviceSuffix → "unknown".
-      f2.client.setCommitMessage(
-        "REMOTE_HEAD",
-        "Quick fix from the GitHub web editor",
-      );
-      f2.client.setContentAtRef("BASE_HEAD", "x.md", "shared\n");
-      f2.client.setContentAtRef("REMOTE_HEAD", "x.md", "theirs-edits\n");
-      f2.client.setCompareResult("BASE_HEAD", "REMOTE_HEAD", {
-        status: "ahead",
-        files: [
-          { filename: "x.md", status: "modified", sha: "blob-of-theirs" },
-        ],
-      });
-
-      await manager.syncAll();
-
-      const records = conflictStore.forPath("x.md");
-      expect(records).toHaveLength(1);
-      expect(records[0].deviceLabel).toBe("unknown");
-      expect(records[0].siblingPath).toContain("conflict-from-unknown-");
-
-      fs.rmSync(f2.root, { recursive: true, force: true });
-    });
-
-    it("pending-conflict path is dropped from enqueue; push only carries clean paths", async () => {
-      const ConflictStore = (
-        await import("../../src/sync2/conflict-store-old")
-      ).default;
-      const f2 = fixture({});
-      const conflictStore = new ConflictStore({
-        vault: f2.vault as unknown as import("obsidian").Vault,
-        configDir: CONFIG_DIR,
-        selfPluginId: SELF_PLUGIN_ID,
-      });
-      await conflictStore.load();
-
-      // Pre-create a conflict record for x.md (simulating a previous
-      // sync where the user picked Defer).
-      writeVaultFile(f2.root, "x.md", "ours\n");
-      await conflictStore.create({
-        vaultPath: "x.md",
-        baseContent: "shared\n",
-        theirsContent: "theirs\n",
-        baseCommitSha: "OLD_HEAD",
-        theirsBlobSha: "old-theirs-sha",
-        theirsAuthor: "test-device",
-      });
-
-      // Build manager pointing at the conflict store.
-      const manager = new Sync2Manager({
-        vault: f2.vault as unknown as import("obsidian").Vault,
-        store: f2.store,
-        detector: f2.detector,
-        queue: f2.queue,
-        builder: f2.builder,
-        client: f2.client,
-        logger: silentLogger(),
-        configDir: CONFIG_DIR,
-        selfPluginId: SELF_PLUGIN_ID,
-        commitMessageAll: "Sync at {date} {time}",
-        commitMessageFile: "Update {filename} at {date} {time}",
-        deviceLabel: "test-device",
-        conflictStore,
-        onConflict: async () => {
-          throw new Error("onConflict should not fire — no remote drift");
-        },
-        now: () => f2.clock.nowMs(),
-      });
-
-      await f2.store.load();
-      // User keeps editing x.md while the conflict is deferred — the
-      // edit must NOT propagate yet.
-      writeVaultFile(f2.root, "x.md", "more-local-edits\n");
-      // And there's a clean file too — that one DOES propagate.
-      writeVaultFile(f2.root, "y.md", "clean-other-file\n");
-
-      f2.store.setLastSync("BASE_HEAD", "BASE_TREE");
-      f2.client.setBranchHead("BASE_HEAD"); // no remote drift → no compare
-
-      await manager.syncAll();
-
-      const tree = f2.client.state.lastTree!;
-      const paths = tree.map((e) => e.path);
-      expect(paths).toContain("y.md");
-      expect(paths).not.toContain("x.md");
-
-      // x.md still has the user's local edits — push didn't touch it.
-      expect(
-        fs.readFileSync(path.join(f2.root, "x.md"), "utf8"),
-      ).toBe("more-local-edits\n");
-
-      fs.rmSync(f2.root, { recursive: true, force: true });
-    });
-
-    it("resolving the conflict (delete sibling) unblocks the path on the next sync", async () => {
-      const ConflictStore = (
-        await import("../../src/sync2/conflict-store-old")
-      ).default;
-      const f2 = fixture({});
-      const conflictStore = new ConflictStore({
-        vault: f2.vault as unknown as import("obsidian").Vault,
-        configDir: CONFIG_DIR,
-        selfPluginId: SELF_PLUGIN_ID,
-      });
-      await conflictStore.load();
-
-      writeVaultFile(f2.root, "x.md", "ours\n");
-      const r = await conflictStore.create({
-        vaultPath: "x.md",
-        baseContent: "shared\n",
-        theirsContent: "theirs\n",
-        baseCommitSha: "OLD_HEAD",
-        theirsBlobSha: "old-theirs-sha",
-        theirsAuthor: "test-device",
-      });
-
-      const manager = new Sync2Manager({
-        vault: f2.vault as unknown as import("obsidian").Vault,
-        store: f2.store,
-        detector: f2.detector,
-        queue: f2.queue,
-        builder: f2.builder,
-        client: f2.client,
-        logger: silentLogger(),
-        configDir: CONFIG_DIR,
-        selfPluginId: SELF_PLUGIN_ID,
-        commitMessageAll: "Sync at {date} {time}",
-        commitMessageFile: "Update {filename} at {date} {time}",
-        deviceLabel: "test-device",
-        conflictStore,
-        onConflict: async () => {
-          throw new Error("no callback expected in this scenario");
-        },
-        now: () => f2.clock.nowMs(),
-      });
-
-      await f2.store.load();
-      writeVaultFile(f2.root, "x.md", "post-resolve-content\n");
-      f2.store.setLastSync("BASE_HEAD", "BASE_TREE");
-      f2.client.setBranchHead("BASE_HEAD");
-
-      // First sync while conflict is pending → x.md skipped.
-      await manager.syncAll();
-      const treeBefore = f2.client.state.lastTree;
-      expect(treeBefore?.find((e) => e.path === "x.md")).toBeUndefined();
-
-      // User deletes the sibling, signalling resolution.
-      await conflictStore.notifySiblingDeleted(r.siblingPath);
-      expect(conflictStore.hasPending("x.md")).toBe(false);
-
-      // Second sync now picks up x.md.
-      await manager.syncAll();
-      const treeAfter = f2.client.state.lastTree!;
-      const xEntry = treeAfter.find((e) => e.path === "x.md");
-      expect(xEntry?.content).toBe("post-resolve-content\n");
-
-      fs.rmSync(f2.root, { recursive: true, force: true });
-    });
-  });
 
   // ── local-phase UI feedback hooks --------------------------------
   // onLocalCommitted fires once per syncAll/syncFile after the batch
@@ -2029,7 +1447,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
       // c.md still go through. Expect count = 2 (filtered length),
       // not 3 (raw findChanges length).
       const ConflictStore = (
-        await import("../../src/sync2/conflict-store-old")
+        await import("../../src/sync2/conflict-store")
       ).default;
       const calls: number[] = [];
       const f2 = fixture({});
@@ -2042,11 +1460,14 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
       writeVaultFile(f2.root, "a.md", "v1\n");
       await conflictStore.create({
         vaultPath: "a.md",
-        baseContent: "shared\n",
-        theirsContent: "theirs\n",
-        baseCommitSha: "OLD_HEAD",
+        kind: "modify-vs-modify",
+        theirsContent: new TextEncoder().encode("theirs\n").buffer as ArrayBuffer,
         theirsBlobSha: "old-theirs-sha",
-        theirsAuthor: "test-device",
+        oursBlobSha: "ours-sha",
+        baseMtime: null,
+        baseSize: null,
+        baseSha: null,
+        remoteDevice: "test-device",
       });
 
       const manager = new Sync2Manager({
@@ -2063,9 +1484,6 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
         commitMessageFile: "Update {filename} at {date} {time}",
         deviceLabel: "test-device",
         conflictStore,
-        onConflict: async () => {
-          throw new Error("no callback expected");
-        },
         onLocalCommitted: (n) => calls.push(n),
         now: () => f2.clock.nowMs(),
       });

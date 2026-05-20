@@ -22,15 +22,17 @@ import {
   Sync2TestClient,
   sync2AllAndAssertNoErrors,
 } from "../helpers";
+import { evaluateConflictState } from "../../../../../src/sync2/conflict-classifier";
 
 // G3 — two devices edit the SAME line of the same file. 3-way merge
-// cannot resolve, so the device that syncs second hits onConflict.
-// Tests the conflict path composes properly across real multi-device
-// round-trips (not just remote-write + local-edit faked via Contents
-// API like the conflicts-misc/* suite uses).
+// cannot resolve, so the device that syncs second registers a
+// `modify-vs-modify` conflict (sibling file appears in B's vault).
+// Resolution happens via standard Obsidian file ops — here we model
+// "user picks ours" by deleting the sibling. The next sync pushes
+// ours to remote.
 
 describe.skipIf(!integrationEnabled())(
-  "sync2 G3 — same-line conflict across two devices, resolved",
+  "sync2 G3 — same-line conflict across two devices, resolved via sibling delete",
   () => {
     let deviceA: Sync2TestClient | undefined;
     let deviceB: Sync2TestClient | undefined;
@@ -54,7 +56,7 @@ describe.skipIf(!integrationEnabled())(
     });
 
     it(
-      "both devices edit line 1 → onConflict on the second pusher; resolved → both sides converge",
+      "both devices edit line 1 → second pusher registers conflict; resolve via sibling delete",
       async () => {
         // Shared baseline pushed by A.
         deviceA = await createSync2Client({ branch });
@@ -64,18 +66,8 @@ describe.skipIf(!integrationEnabled())(
         );
         await sync2AllAndAssertNoErrors(deviceA);
 
-        // B pulls baseline. onConflict picks ours (B's) wholesale —
-        // simplest deterministic resolver. The point of this test is
-        // that the path is *reached* end-to-end through two real
-        // sync2 devices, not the merge content itself.
-        let conflictFired = 0;
-        deviceB = await createSync2Client({
-          branch,
-          onConflict: async (a) => {
-            conflictFired += 1;
-            return { kind: "resolved", content: a.ours };
-          },
-        });
+        // B pulls baseline.
+        deviceB = await createSync2Client({ branch });
         await sync2AllAndAssertNoErrors(deviceB);
         expect(
           fs.readFileSync(path.join(deviceB.vaultPath, "note.md"), "utf8"),
@@ -92,25 +84,48 @@ describe.skipIf(!integrationEnabled())(
           "note.md",
           "line by B\nline 2\n",
         );
-        // B's syncAll now sees A's commit on remote and hits the
-        // conflict path; onConflict above resolves.
+        // B's syncAll now sees A's commit on remote → 3-way merge
+        // fails on the overlap → modify-vs-modify registered.
         await sync2AllAndAssertNoErrors(deviceB);
 
-        const merged = "line by B\nline 2\n";
-        expect(conflictFired).toBeGreaterThan(0);
-
-        // Local on B carries the resolved content.
+        // Conflict surfaced on B: sibling with A's version sits next
+        // to note.md.
+        const records = deviceB.conflictStore.getByPath("note.md");
+        expect(records).toHaveLength(1);
+        expect(records[0].kind).toBe("modify-vs-modify");
+        const siblingPath = records[0].siblingPath;
+        expect(
+          fs.readFileSync(path.join(deviceB.vaultPath, siblingPath), "utf8"),
+        ).toBe("line by A\nline 2\n");
+        // Local on B still carries ours.
         expect(
           fs.readFileSync(path.join(deviceB.vaultPath, "note.md"), "utf8"),
-        ).toBe(merged);
-        // Remote also got the resolved content via B's follow-up push.
-        expect(await readRemoteFile(branch, "note.md")).toBe(merged);
+        ).toBe("line by B\nline 2\n");
+        // Remote still has A's version (B's push skipped the path).
+        expect(await readRemoteFile(branch, "note.md")).toBe(
+          "line by A\nline 2\n",
+        );
 
-        // A pulls and converges too.
+        // User on B picks "ours" by deleting the sibling. Classifier
+        // case 1 → drop record. Next sync pushes ours to remote.
+        fs.rmSync(path.join(deviceB.vaultPath, siblingPath));
+        await evaluateConflictState(
+          deviceB.conflictStore,
+          deviceB.vault as unknown as import("obsidian").Vault,
+        );
+        expect(deviceB.conflictStore.hasPending("note.md")).toBe(false);
+
+        await sync2AllAndAssertNoErrors(deviceB);
+
+        expect(await readRemoteFile(branch, "note.md")).toBe(
+          "line by B\nline 2\n",
+        );
+
+        // A pulls and converges to B's resolution.
         await sync2AllAndAssertNoErrors(deviceA);
         expect(
           fs.readFileSync(path.join(deviceA.vaultPath, "note.md"), "utf8"),
-        ).toBe(merged);
+        ).toBe("line by B\nline 2\n");
       },
       360_000,
     );
