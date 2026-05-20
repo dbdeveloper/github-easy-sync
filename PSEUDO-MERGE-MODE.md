@@ -22,8 +22,8 @@
 > **manual commit messages**. Команди `Sync with GitHub (custom
 > message)…` і `Sync current file with GitHub (custom message)…` —
 > зникають. Лишаються 2 з 4 команд: `Sync with GitHub` і
-> `Sync current file with GitHub`. Усі коміти — тільки автоматичні
-> (за template).
+> `Sync current file with GitHub`. Усі коміти — мають тільки автоматичні
+> назви (commit messages), які генеруються за template з settings.
 >
 > **Решта нової pseudo-merge функціональності — "під капотом":**
 > conflict-branch на GitHub, event listener для resolution, нові
@@ -57,7 +57,7 @@ unit-spec файлами + 65 інтеграційними тестами A1–L
 
 - API: `syncAll(customMessage?)` → `syncAll()`; `syncFile(path, customMessage?)` → `syncFile(path)`
 - 2 з 4 Obsidian команд (`(custom message)` варіанти)
-- `EnqueueMeta.isolated` — повністю видаляється (verified: ставиться
+- `EnqueueMeta.isolated` — повністю видаляється (verified: в версії 2.0.0-beta .isolated ставиться
   ВИКЛЮЧНО з `customMessage !== undefined` у sync2-manager.ts:419/494;
   без customMessage truly dead code; no backwards compat → можемо
   безпечно прибрати з типу, серіалізації, всіх читачів)
@@ -75,7 +75,7 @@ unit-spec файлами + 65 інтеграційними тестами A1–L
 - `cascadeDeferRemoval`
 - `ConflictModal` (модальне вікно per-file під час sync) — прибирається
 - `ConflictStore` — суттєво розширюється
-- `ConflictView` (sync2-conflict-view) — лишається на Diff2 (окремий шар)
+- `ConflictView` (sync2-conflict-view) — повністю видаляється. Новий diff-edit UI буде створено на стадії 2 (Diff2) (окремий шар)
 
 Нова реалізація — згідно з цим документом, з нуля, з фокусом на
 **продуктивність, ясність, передбачуваність і тестованість**.
@@ -107,23 +107,64 @@ events" — те правило стосувалось sync engine 2.0.0-beta. C
 
 ## Архітектура push: split-push у processBatch (β)
 
-Один [Sync] click → один batch → `processBatch` обробляє його так:
+**Drain pauses ConflictWatcher event processing** під час batch
+pipeline, щоб mid-drain vault events (від наших sibling write'ів) не
+перетворювали uniform processing в interleaved auto-resolve cycles.
+
+**Важливо:** pause не означає "queue events" — Obsidian events не
+буферизуються; якщо обробник пасивний, події фактично втрачаються.
+Натомість на drain-end робимо **comprehensive sweep** — re-evaluation
+ConflictStore vs actual vault file system state. Це механізм
+ідентичний onload sweep і drain-start sweep. Він catches **усе** що
+відбулося під час drain (і наші sibling writes, і user mid-drain
+actions), бо читає фінальний file system state, а не послідовність
+подій.
 
 ```
-0. drain-start ConflictStore sweep (ПЕРЕД pull):
-   re-evaluate inConflictFiles на основі поточного vault state
-   (catches missed events + race conditions). Якщо path виходить з
-   inConflictFiles → synthesize a side-batch для resolved path; він
-   обробиться у тому ж drain циклі. Це гарантує що partition (крок 2)
-   читає актуальний state.
-1. pull main (як зараз — у drain top через pullIfNeeded)
+drain():
+  pause ConflictWatcher event processing                   ← НОВЕ
+  
+  0. drain-start sweep (ПЕРЕД pull):
+     re-evaluate ConflictStore vs vault file system state.
+     Catches changes since previous drain end (включно з onload window).
+     Якщо path виходить з inConflictFiles → synthesize side-batch;
+     він обробиться у цьому ж drain циклі.
+  1. pull main (як зараз — у drain top через pullIfNeeded)
+  
+  for each batch in queue:
+    processBatch(batch)  ← деталі нижче
+  
+  N. drain-end sweep                                       ← НОВЕ
+     re-evaluate ConflictStore vs vault file system state (той самий
+     механізм як drain-start sweep). Catches:
+       - наші drain-triggered sibling writes
+       - user's mid-drain actions (delete sibling, edit base, rename)
+     Якщо resolution → cleanup state + synthesize side-batches.
+  
+  process side-batches (loop until none new)
+  
+  if branch exists AND inConflictFiles is empty:
+    push vault.live[path] as marker commit на branch (preserves A(local))
+    finalize merge (createCommit з parents=[main.head, branch.head])
+    deleteRef branch
+  
+  resume ConflictWatcher event processing                  ← НОВЕ
+```
+
+Один [Sync] click → один drain → uniform processing.
+
+### processBatch (виконується для кожного batch у drain)
+
+```
 2. partition batch.files за поточним станом inConflictFiles:
    conflictPaths = batch.files ∩ inConflictFiles
    plainPaths    = batch.files − inConflictFiles
 3. push plainPaths → main (існуючий push flow без змін)
-4. ЯКЩО pull виявив новий конфлікт на якомусь шляху:
+   - reconcile case 4 (push-side detected конфлікт): A_i ≠ remote
+     → перевести path у новий conflict flow (step 4)
+4. ЯКЩО виявлено новий конфлікт (pull-side АБО push-side):
    - якщо conflict-branch не існує: createReference на current main HEAD
-     (eager — створюється навіть якщо batch.files не містить цього path)
+     (eager — створюється навіть якщо batch.files не містить цього path, а конфлікт є з local Vault path)
    - визначити local-content тих conflict paths (читання з vault, не з batch):
      - якщо path ∈ batch.files → version з batch.vault/
      - інакше → version з live vault (це pull-side detected конфлікт на
@@ -139,6 +180,7 @@ events" — те правило стосувалось sync engine 2.0.0-beta. C
    - updateRef branch
    - ConflictStore.create(path, theirsBlobSha) → register sibling
    - write sibling-файл у vault: <path>.conflict-from-<remote-device>-<ts>.<ext>
+     ← vault.on('create') fires, але ConflictWatcher paused → event queued
 5. ЯКЩО conflictPaths не порожні (user editing in-conflict files):
    - createTree(base = current main.tree, override conflictPaths з batch)
    - createCommit на branch.head (або base, якщо branch свіже-створений)
@@ -249,8 +291,23 @@ baseExists, є sibling із SHA(sibling) == SHA(base)
 
 **Resolution фіксується в conflict-store одразу** (real-time, в event
 handler). Перейменування / видалення / редагування → store оновлюється.
-**Але push до main відбувається лише на наступному [Sync] click**
-(option A) — це узгоджено з polling-моделлю sync engine'у.
+**Push до main відбувається на наступному [Sync] click** (option A) —
+узгоджено з polling-моделлю sync engine'у.
+
+**ВИНЯТОК — drain pause/resume:** під час drain ConflictWatcher
+**paused** (events ігноруються, не queue'яться — це Obsidian behavior).
+На drain-end робиться **comprehensive sweep** замість "process queued
+events": re-evaluate ConflictStore vs actual vault file system state
+(той самий механізм як drain-start sweep і onload sweep). Sweep
+catches **усе** що сталось під час drain (наші sibling writes, user's
+mid-drain actions, race conditions) — бо читає фінальний file system
+state, не послідовність подій.
+
+Resolutions fire **у тому ж drain**. Synthesized side-batches
+обробляються у тому ж drain. Finalize теж у тому ж drain якщо
+conditions met. Коли user уже сконвергував vault до remote ДО [Sync]
+click — finalize відбувається у поточному drain, **без чекання
+наступного [Sync]**.
 
 ### Дії при кожному кейсі (виконуються в event handler real-time)
 
@@ -339,6 +396,85 @@ struggle moments" preserved. Виглядає як справжній merge у N
 **Чому manual createCommit замість `POST /merges`:** server-side merge
 endpoint повертає 409 у race з іншим device. Manual підхід — ми самі
 будуємо merge-commit з відомим tree і двома parents. Завжди працює.
+
+---
+
+## Edge case: live vault сконвергував до remote — uniform handling
+
+**Сценарій:** queue має batches з версіями A1 → A2 → A3 файлу `a.md`,
+remote надсилає R1 → R2. Користувач у певний момент часу "приводить"
+vault до R2 (через manual edit, copy-paste, інший плагін, тощо).
+
+**Дизайн принцип:** жодних спеціальних шляхів. Drain обробляє всі
+batches **uniformly** (з ConflictWatcher на паузі). Resolution
+відбувається коли vault == sibling (case 4) — однаково незалежно від
+того **коли** користувач сконвергував.
+
+### Case A: vault converged ДО [Sync] click (vault == R2 від старту drain)
+
+1. Pull: SHA(vault=R2) == SHA(main=R2) → no pull-side конфлікт
+2. **batch1**: reconcile case 4 → A1 ≠ R2 → push-side detected
+   конфлікт. Push A1 на branch (X1). Write sibling=R2. ConflictStore.create.
+   inConflictFiles=["a.md"]. **vault.on('create') queued.**
+3. **batch2**: a.md ∈ inConflictFiles → step 5 (edit-while-in-conflict).
+   Push A2 на branch (X2). Без нового sibling/record.
+4. **batch3**: те саме. Push A3 (X3).
+5. **Drain-end resume ConflictWatcher**: queued event processed.
+   evaluateResolutionFor: SHA(vault=R2) == SHA(sibling=R2) → **case 4
+   fires** → cleanup: sibling deleted, record removed, path leaves
+   inConflictFiles.
+6. **Check finalize**: branch exists + inConflictFiles=[] →
+   - push vault.live(=R2) на branch як marker commit (X4)
+   - createCommit(parents=[main.head, branch.head], tree=main.tree)
+   - deleteRef branch
+
+**Branch lineage:** X1(A1) → X2(A2) → X3(A3) → X4(R2)
+**Main:** ... → merge-commit (з двома parents)
+**Result:** усі 4 версії reachable. main content unchanged (R2). **Усе
+у поточному drain — без чекання наступного [Sync].**
+
+### Case B: vault converged ПІСЛЯ [Sync] click (vault=A3 при старті drain)
+
+Це типовий випадок — користувач натиснув [Sync], vault ще не
+сконвергований.
+
+1. Pull: SHA(vault=A3) ≠ SHA(main=R2) → pull-side конфлікт. Step 4 у processBatch fires (eager branch creation).
+2. **batch1**: a.md ∈ inConflictFiles → step 5. Push A1 на branch (X1).
+3. **batch2, batch3**: те саме. Branch: X1, X2, X3.
+4. **Drain-end resume ConflictWatcher**: vault.a.md=A3, sibling=R2 →
+   SHA mismatch → **case 4 НЕ fires**. Конфлікт persists.
+5. **Стан після drain**: vault=A3, sibling=R2 у vault, branch=X1+X2+X3,
+   inConflictFiles=["a.md"], ConflictStore record active.
+6. **Користувач пізніше** редагує vault.a.md → R2 (або копіює sibling →
+   base, або видаляє sibling). vault.on(...) fires real-time (поза
+   drain → ConflictWatcher active) → case 4/1 fires → cleanup state.
+7. **Наступний [Sync]**: drain-start sweep знаходить inConflictFiles=[]
+   + branch exists → finalize triggered (marker commit + merge + deleteRef).
+
+**Кінцевий стан identical до Case A.** Лише timing finalize різний.
+
+### Чому це працює уніформно
+
+- Drain обробляє batches однаково в обох випадках (push до branch).
+- ConflictWatcher paused → жодних mid-drain auto-resolves що могли б
+  розщепити pipeline.
+- Resolution fires коли vault == sibling — це fundamental SHA-match
+  condition, що не залежить від часу.
+- Finalize triggers коли inConflictFiles=[] + branch exists —
+  однаково в обох випадках.
+
+### Що це дає для `accumulateOfflineSyncs` контракту
+
+- **OFF** (default): user explicitly opt-in в preserve-all-iterations.
+  Усі batches → окремі commits на branch (A1, A2, A3) + marker
+  (A(local=R2)) + merge-commit. Повна історія "user's thought
+  iterations" зберігається на GitHub.
+- **ON**: queue має лише latest batch (A3 only — інші absorbed).
+  Branch отримує тільки A3 + marker. Меньша історія — за explicit user
+  choice "I accept losing intermediates".
+
+**Жодних дополнительних optimizations** — поведінка природньо лягає
+на existing toggle. Stage 1 не додає special-case shortcuts.
 
 ---
 
@@ -542,6 +678,80 @@ Unit tests — point-coverage для:
 - `gitBlobSha` cache invalidation
 - split-push partition logic
 - per-half marker handling
+
+---
+
+## Future enhancements (out of scope for stage 1)
+
+Ідеї що з'явились під час обговорення pseudo-merge mode, **але не
+включені у stage 1**. Зафіксовані тут щоб не загубились. Можна
+імплементувати окремими PR'ами після того як pseudo-merge приземлиться.
+
+### Throttled push mode ("псевдо-offline")
+
+**Сценарій:** користувач з активним vault'ом не хоче спамити GitHub
+десятками commits на годину. Хоче "throttle" — push раз на N хвилин.
+
+**Запропоноване рішення:** перевизначити семантику комбінації toggles
+що уже існують у 2.0.0-beta:
+
+- `syncStrategy = "interval"` + `Sync interval = N min`
+- `autoCommitOnSync = true`
+- `accumulateOfflineSyncs = true`
+
+Тоді:
+- Manual [Sync] click → **тільки commit** (findChanges + enqueueOrMerge),
+  push не відбувається
+- Interval tick кожні N хв → push накопичений batch
+- 10 manual clicks за 5 хв → 1 batch на диску (через accumulate) → 1 push
+
+**Trade-offs:**
+- ✅ Радикально менше GitHub API hits
+- ✅ Чистіша commit history (1 commit per N min замість 1 per click)
+- ✅ Природна синергія existing toggles
+- ⚠ UX delay: "Sync done" не з'явиться до наступного тіка
+- ⚠ Семантичний shift: зараз `autoCommitOnSync` явно "governs only
+  automatic surfaces"; перевизначення впливатиме на manual click теж
+- ⚠ L1-L4 інтеграційні тести потребують перегляду (вони assume
+  "manual = immediate push")
+
+### Окрема Drain action — самостійна цінність
+
+**Основний сценарій (mobile-first):** користувач на мобільному
+телефоні редагує vault через cellular зв'язок. Хоче **зберігати
+проміжні версії** (preserve-all-commits принцип) — натискає Commit
+часто. Але **не хоче пушити через мобільний інтернет** (data
+charges + battery + поганий зв'язок). Натискає Drain руками тоді,
+коли з'явиться WiFi або повернеться додому.
+
+**Менш критичні сценарії:**
+- Throttled push mode override ("now I've batched enough, push it now")
+- Дебаг: користувач хоче зрозуміти що саме push'неться перед фактичним
+  push'ем (можна додати "preview" опцію в Drain action)
+- Manual control при flaky connection — не хочеться що автоматичний
+  drain timer пробував push в момент коли merega нестабільна
+
+**Запропоноване рішення:** розщепити поточну `Sync with GitHub`
+команду на дві:
+
+- `Commit changes` — тільки enqueue (findChanges + батч на диск, без
+  network operations)
+- `Drain (push + pull)` — тільки мережеві операції (existing drain без
+  попереднього findChanges)
+
+Stage 1 keeps the unified `Sync with GitHub` (legacy compatibility з
+існуючими L-тестами); нові команди — additive, не replace.
+
+**Mobile UX value:**
+
+Цей feature **не потребує** throttled push mode як передумови — він
+має самостійну цінність на mobile. Поведінка:
+- Manual Commit: миттєвий, без network → no data charge → no battery hit
+- Manual Drain: коли user сам обере (WiFi, домашня мережа, тощо)
+- Preserve-all-commits принцип зберігається бо кожен Commit click = окремий batch
+
+Combined з throttled push (якщо колись landed) — повний "псевдо-offline"
+workflow. Але самостійно теж дає mobile users важливий control.
 
 ---
 
