@@ -22,18 +22,7 @@ import GitignoreInvariants from "./sync2/gitignore-invariants";
 import { Sync2Manager } from "./sync2/sync2-manager";
 import { IntervalScheduler } from "./sync2/interval-scheduler";
 import { ConflictResolution as Sync2ConflictResolution } from "./sync2/types";
-import {
-  ConflictModal,
-  ConflictPromptArgs,
-} from "./sync2/views/conflict-modal";
-import {
-  ConflictView,
-  VIEW_TYPE_SYNC2_CONFLICT,
-} from "./sync2/views/conflict-view";
-import { DiffPane } from "./sync2/views/diff-pane";
-import { ConflictStatusBar } from "./sync2/views/conflict-status-bar";
 import ConflictStore from "./sync2/conflict-store-old";
-import { mergeIntoOne } from "./sync2/conflict-merge-all";
 import manifest from "../manifest.json";
 
 // How long the brief local-phase notices stay visible. 700ms is the
@@ -67,21 +56,11 @@ export default class GitHubSyncPlugin extends Plugin {
   // UI elements that come and go with toggle settings.
   statusBarItem: HTMLElement | null = null;
   syncRibbonIcon: HTMLElement | null = null;
-  conflictStatusBar: ConflictStatusBar | null = null;
 
   // Vault listeners — sibling-file delete/rename closes the matching
   // conflict record. Refs kept so we can offref them on unload.
   vaultDeleteListener: EventRef | null = null;
   vaultRenameListener: EventRef | null = null;
-
-  // Per-sync conflict-modal state. Reset before every top-level
-  // sync(); set by the modal flow.
-  private suppressConflictModals = false;
-  private openConflictViewAfterSync = false;
-  // Vault path of the file the user picked "Resolve now" on, so the
-  // post-sync openConflictView call lands the user directly on that
-  // file's diff instead of just the list.
-  private resolveNowPath: string | null = null;
 
   // Auto-sync timer id (Window.setInterval handle). Retained for the
   // registerInterval() bookkeeping Obsidian wants on unload; the
@@ -130,68 +109,6 @@ export default class GitHubSyncPlugin extends Plugin {
       icon: "file-up",
       callback: this.syncCurrentFile.bind(this),
     });
-    this.addCommand({
-      id: "open-conflict-view",
-      name: "Open sync conflicts",
-      icon: "merge",
-      callback: () => void this.openConflictView(),
-    });
-
-    // Conflict-view chunk commands. Same operations the in-editor
-    // Alt-N / Alt-1/2/3 keymap performs — exposed here as Obsidian
-    // commands so they can be reassigned from the hotkey panel and
-    // mapped through vim-mode / Commander / other binding plugins.
-    // checkCallback returns false when the active leaf isn't a
-    // ConflictView, which removes the entry from the command palette
-    // in the wrong context (no false promises).
-    this.registerConflictChunkCommand(
-      "conflict-next-chunk",
-      "Conflict view: next chunk",
-      (diff) => diff.nextChunk(),
-    );
-    this.registerConflictChunkCommand(
-      "conflict-prev-chunk",
-      "Conflict view: previous chunk",
-      (diff) => diff.previousChunk(),
-    );
-    this.registerConflictChunkCommand(
-      "conflict-take-theirs",
-      "Conflict view: take chunk from GitHub (theirs)",
-      (diff) => diff.applyAtCursor("theirs"),
-    );
-    this.registerConflictChunkCommand(
-      "conflict-take-both",
-      "Conflict view: take chunk as both (markdown blockquote)",
-      (diff) => diff.applyAtCursor("both"),
-    );
-    this.registerConflictChunkCommand(
-      "conflict-take-ours",
-      "Conflict view: take chunk from this device (ours)",
-      (diff) => diff.applyAtCursor("ours"),
-    );
-  }
-
-  // Helper: register an Obsidian command that targets the active
-  // ConflictView's currently-open DiffPane. Uses checkCallback so the
-  // command is hidden from the palette unless the precondition holds
-  // (active leaf IS a ConflictView with a DiffPane open).
-  private registerConflictChunkCommand(
-    id: string,
-    name: string,
-    run: (diff: DiffPane) => boolean,
-  ): void {
-    this.addCommand({
-      id,
-      name,
-      checkCallback: (checking: boolean): boolean => {
-        const view = this.app.workspace.getActiveViewOfType(ConflictView);
-        const diff = view?.getCurrentDiff();
-        if (!diff) return false;
-        if (checking) return true;
-        run(diff);
-        return true;
-      },
-    });
   }
 
   async onunload(): Promise<void> {
@@ -204,8 +121,6 @@ export default class GitHubSyncPlugin extends Plugin {
       this.app.vault.offref(this.vaultRenameListener);
       this.vaultRenameListener = null;
     }
-    this.conflictStatusBar?.destroy();
-    this.conflictStatusBar = null;
   }
 
   // ── settings ────────────────────────────────────────────────────────
@@ -278,7 +193,6 @@ export default class GitHubSyncPlugin extends Plugin {
     }
     this.settings = Object.assign({}, DEFAULT_SETTINGS);
     await this.saveSettings();
-    this.refreshConflictStatusBar();
   }
 
   // ── engine init ─────────────────────────────────────────────────────
@@ -366,7 +280,11 @@ export default class GitHubSyncPlugin extends Plugin {
         branch: this.settings.githubBranch,
       }),
       conflictStore,
-      onConflict: (args) => this.handleSync2Conflict(args),
+      // Stage 5a: handleSync2Conflict reduced to a stub that always
+      // defers — the modal UI is gone, every conflict becomes a
+      // silent sibling. Stage 5c will remove the onConflict deps
+      // entirely as part of the detection cutover.
+      onConflict: async () => ({ kind: "deferred" } as Sync2ConflictResolution),
       accumulateOfflineSyncs: this.settings.accumulateOfflineSyncs ?? false,
       autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? false,
       onProgress: (initial: string) => {
@@ -418,37 +336,17 @@ export default class GitHubSyncPlugin extends Plugin {
       onSyncCompleted: () => {},
     });
 
-    // Conflict view leaf — registered once per plugin load. setDeps
-    // wires in the live conflictStore so the view can render current
-    // pending conflicts (and refresh on auto-finalize).
-    this.registerView(VIEW_TYPE_SYNC2_CONFLICT, (leaf) => {
-      const view = new ConflictView(leaf);
-      view.setDeps({
-        conflictStore,
-        readOurs: (path) => this.app.vault.adapter.read(path),
-        writeResolved: (path, content) =>
-          this.app.vault.adapter.write(path, content),
-        onConflictResolved: () => this.refreshConflictStatusBar(),
-        oursLabel: deviceLabel,
-      });
-      return view;
-    });
-
     // Vault listeners: a sibling file deleted or renamed in the file
     // tree is treated as "user closed this conflict, ours wins on
     // next push". Same handler for both events — `oldPath` after a
     // rename is the path the conflict-store knows about.
     this.vaultDeleteListener = this.app.vault.on("delete", async (file) => {
-      if (await this.conflictStore.notifySiblingDeleted(file.path)) {
-        this.refreshConflictStatusBar();
-      }
+      await this.conflictStore.notifySiblingDeleted(file.path);
     });
     this.vaultRenameListener = this.app.vault.on(
       "rename",
       async (_file, oldPath) => {
-        if (await this.conflictStore.notifySiblingDeleted(oldPath)) {
-          this.refreshConflictStatusBar();
-        }
+        await this.conflictStore.notifySiblingDeleted(oldPath);
       },
     );
 
@@ -463,7 +361,9 @@ export default class GitHubSyncPlugin extends Plugin {
     //   • Watchdog tick (5 min, fires only when queue is non-empty)
     //     → backgroundDrain → drain picks them up.
     // Neither path startles the user on enable.
-    this.refreshConflictStatusBar();
+    // (Pre-stage-5 deviceLabel was used here; preserved for symmetry
+    // with the later stage-9 widget pass.)
+    void deviceLabel;
   }
 
   // ── sync triggers ───────────────────────────────────────────────────
@@ -473,33 +373,24 @@ export default class GitHubSyncPlugin extends Plugin {
       new Notice("Sync plugin not configured");
       return;
     }
-    this.resetSyncState();
     try {
       await this.sync2Manager.syncAll();
     } catch (err) {
       new Notice(`Error syncing. ${err}`);
     }
-    this.afterSync();
   }
 
   // Background drain — entry point for the interval timer when
-  // autoCommitOnSync is off. Conflicts that fire during pull are
-  // auto-deferred (suppressConflictModals stays true for the whole
-  // call) so the timer never blocks waiting for a modal. Errors are
-  // swallowed + logged because network blips during a background
-  // tick are common and shouldn't surface a toast.
+  // autoCommitOnSync is off. Errors are swallowed + logged because
+  // network blips during a background tick are common and shouldn't
+  // surface a toast.
   async backgroundDrain(): Promise<void> {
     if (!this.isConfigured()) return;
-    this.suppressConflictModals = true;
-    this.openConflictViewAfterSync = false;
     try {
       await this.sync2Manager.resumeQueue();
     } catch (err) {
       void this.logger.error("Interval drain failed", `${err}`);
-    } finally {
-      this.suppressConflictModals = false;
     }
-    this.refreshConflictStatusBar();
   }
 
   async syncCurrentFile(): Promise<void> {
@@ -512,111 +403,11 @@ export default class GitHubSyncPlugin extends Plugin {
       new Notice("Sync plugin not configured");
       return;
     }
-    this.resetSyncState();
     try {
       await this.sync2Manager.syncFile(path);
     } catch (err) {
       new Notice(`Error syncing. ${err}`);
     }
-    this.afterSync();
-  }
-
-  private resetSyncState(): void {
-    // Per-sync state — each sync is its own conversation; the user's
-    // previous "Defer all" choice doesn't carry over.
-    this.suppressConflictModals = false;
-    this.openConflictViewAfterSync = false;
-    this.resolveNowPath = null;
-  }
-
-  private afterSync(): void {
-    this.refreshConflictStatusBar();
-    if (this.openConflictViewAfterSync) {
-      this.openConflictViewAfterSync = false;
-      const focus = this.resolveNowPath;
-      this.resolveNowPath = null;
-      void this.openConflictView(focus ?? undefined);
-    }
-  }
-
-  // ── conflict modal hook ─────────────────────────────────────────────
-
-  private async handleSync2Conflict(args: {
-    path: string;
-    ours: string;
-    base: string;
-    theirs: string;
-    conflictMarkedContent: string;
-  }): Promise<Sync2ConflictResolution> {
-    if (this.suppressConflictModals) {
-      return { kind: "deferred" };
-    }
-    const promptArgs: ConflictPromptArgs = {
-      path: args.path,
-      // Sync2Manager doesn't surface batch index/total to the
-      // callback; we offer Defer-all unconditionally so the user can
-      // bail mid-batch. The header just shows the file path.
-      index: 1,
-      total: 2,
-      isMarkdown: args.path.endsWith(".md"),
-    };
-    const choice = await new ConflictModal(this.app, promptArgs).prompt();
-    if (choice === "defer-all") {
-      this.suppressConflictModals = true;
-      return { kind: "deferred" };
-    }
-    if (choice === "later") {
-      return { kind: "deferred" };
-    }
-    if (choice === "resolve-now") {
-      // Defer + open the conflict view tab so the user lands on the
-      // diff editor as soon as sync finishes its housekeeping.
-      // resolveNowPath tells the post-sync openConflictView to
-      // auto-select THIS file's diff in the view (otherwise the
-      // user lands on an empty list-view and has to click).
-      this.openConflictViewAfterSync = true;
-      this.resolveNowPath = args.path;
-      return { kind: "deferred" };
-    }
-    // merge-into-one — markdown only. The modal hides the button
-    // otherwise; defend against bad input regardless.
-    if (!args.path.endsWith(".md")) {
-      return { kind: "deferred" };
-    }
-    const merged = mergeIntoOne(args.ours, [
-      {
-        content: args.theirs,
-        deviceLabel: "GitHub",
-        ts: Date.now(),
-      },
-    ]);
-    return { kind: "merged-into-one", content: merged };
-  }
-
-  // ── conflict view ───────────────────────────────────────────────────
-
-  // Open / focus the Conflict View leaf. `focusPath` (when given)
-  // tells the view to auto-open the diff for that file rather than
-  // landing the user on an empty right pane — used after the user
-  // picks "Resolve now" on the conflict modal so they go straight
-  // to merging.
-  async openConflictView(focusPath?: string): Promise<void> {
-    const leaves = this.app.workspace.getLeavesOfType(
-      VIEW_TYPE_SYNC2_CONFLICT,
-    );
-    let leaf: WorkspaceLeaf;
-    if (leaves.length > 0) {
-      leaf = leaves[0];
-    } else {
-      leaf = this.app.workspace.getLeaf(true);
-      await leaf.setViewState({
-        type: VIEW_TYPE_SYNC2_CONFLICT,
-        active: true,
-      });
-    }
-    this.app.workspace.revealLeaf(leaf);
-    const view = leaf.view;
-    if (view instanceof ConflictView) view.refreshList(focusPath);
   }
 
   // ── status bar ──────────────────────────────────────────────────────
@@ -625,20 +416,11 @@ export default class GitHubSyncPlugin extends Plugin {
     if (this.statusBarItem) return;
     this.statusBarItem = this.addStatusBarItem();
     this.updateStatusBarItem();
-    if (!this.conflictStatusBar) {
-      const conflictEl = this.addStatusBarItem();
-      this.conflictStatusBar = new ConflictStatusBar(conflictEl, () => {
-        void this.openConflictView();
-      });
-      this.refreshConflictStatusBar();
-    }
   }
 
   hideStatusBarItem(): void {
     this.statusBarItem?.remove();
     this.statusBarItem = null;
-    this.conflictStatusBar?.destroy();
-    this.conflictStatusBar = null;
   }
 
   updateStatusBarItem(): void {
@@ -646,11 +428,6 @@ export default class GitHubSyncPlugin extends Plugin {
     // sync2Manager pending-batch count via PushQueue.list().length so
     // the user sees `GitHub: N pending` when offline-accumulate fires.
     if (this.statusBarItem) this.statusBarItem.setText("GitHub");
-  }
-
-  refreshConflictStatusBar(): void {
-    if (!this.conflictStatusBar) return;
-    this.conflictStatusBar.refresh(this.conflictStore.list().length);
   }
 
   // ── sync ribbon ─────────────────────────────────────────────────────
@@ -711,10 +488,6 @@ export default class GitHubSyncPlugin extends Plugin {
   // last time is the obvious right thing.
   private async runStartupSync(): Promise<void> {
     await this.intervalScheduler.runStartup();
-    // Pull may have created sibling files via ConflictStore; refresh
-    // the status-bar widget so the 🔀 indicator reflects the new
-    // pending count. The scheduler doesn't know about UI bits.
-    this.refreshConflictStatusBar();
   }
 
   stopSyncInterval(): void {
