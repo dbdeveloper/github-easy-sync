@@ -176,6 +176,17 @@ export class Vault {
         }
       },
 
+      // Mirrors Obsidian's adapter.rename(oldPath, newPath). On
+      // POSIX, fs.rename is atomic when both paths live on the same
+      // filesystem — which they do here (both under rootPath) — so
+      // the 3-step ConflictStore protocol gets a real OS-level
+      // atomic transition between `meta.json.tmp` and `meta.json`.
+      rename: async (oldPath: string, newPath: string) => {
+        const fromAbs = path.join(this.rootPath, oldPath);
+        const toAbs = path.join(this.rootPath, newPath);
+        await fs.rename(fromAbs, toAbs);
+      },
+
       // Mirrors Obsidian's adapter.rmdir(path, recursive). Recursive
       // mode (the only mode sync2 uses) removes the directory and
       // everything beneath it.
