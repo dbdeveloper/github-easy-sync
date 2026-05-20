@@ -415,20 +415,38 @@ interface ConflictRecord {
   id: string;                    // unique record id
   vaultPath: string;             // "Folder/note.md"
   kind: "modify-vs-modify" | "delete-vs-modify" | "modify-vs-delete";
-  oursBlobSha: string | null;    // null if ours was "delete" (kind=delete-vs-modify)
-  theirsBlobSha: string | null;  // null if theirs was "delete" (kind=modify-vs-delete)
+
+  // --- Immutable identity (set at create, never updated) ---
+  oursBlobSha: string | null;    // null for kind=delete-vs-modify (ours was "delete")
+  theirsBlobSha: string | null;  // null for kind=modify-vs-delete (theirs was "delete")
   remoteDevice: string;          // "Phone", "Laptop", ...
+  createdAt: number;
+
+  // --- Sibling location + content cache ---
   siblingPath: string;
   // modify-vs-modify / delete-vs-modify → "Folder/note.conflict-from-Phone-<ts>.md"
-  // modify-vs-delete                     → "Folder/note.conflict-from-Phone-<ts>.md.deleted" (0 bytes)
-  siblingMtime: number;          // cached for evaluation fast-path
-  siblingSize: number;           // 0 for modify-vs-delete placeholder
-  baseMtime: number | null;      // null when kind=delete-vs-modify (base absent)
+  // modify-vs-delete                    → "Folder/note.conflict-from-Phone-<ts>.md.deleted" (0 bytes)
+  siblingMtime: number;          // cached at last evaluation (or create)
+  siblingSize: number;           // cached at last evaluation (or create)
+  siblingSha: string;            // CURRENT sibling content SHA (cached)
+  // — Updates коли stat reveals mtime/size change → re-read content
+  // — At create == theirsBlobSha (sibling written from theirs content)
+  // — After user edits sibling: diverges from theirsBlobSha
+
+  // --- Base location + content cache ---
+  // baseMtime/baseSize/baseSha = null коли base не існує
+  // (kind=delete-vs-modify initial; OR після user-delete у будь-якому kind)
+  baseMtime: number | null;
   baseSize: number | null;
-  createdAt: number;             // when conflict was detected
-  lastEvaluated: number;         // when evaluateConflictState last touched
+  baseSha: string | null;        // CURRENT base content SHA (cached, null якщо !baseExists)
+
+  lastEvaluated: number;         // last evaluateConflictState touch
 }
 ```
+
+**Identity vs cache distinction:**
+- `theirsBlobSha` — immutable identity для **dedup**: `ConflictStore.create(vaultPath, theirsBlobSha)` skips якщо вже є record з цим ключем. Це гарантує що однакова remote-версія не створює дубль siblings.
+- `siblingSha` — current cached SHA. Класифікатор завжди використовує **siblingSha** (current), не theirsBlobSha (historical). Це дозволяє user-edited sibling правильно flow через case 4 (accept that variant).
 
 **Поля що відображають kind:**
 
@@ -495,7 +513,10 @@ baseSha = baseExists ? hashFile(record.vaultPath) : null  ← mtime cache hit �
 siblingSha = siblingExists ? hashFile(record.siblingPath) : null
 ```
 
-**Резолюції (uniform за kinds):**
+**Резолюції (uniform за kinds).** Класифікатор використовує **current
+cached** SHA: `siblingSha` (= `record.siblingSha`), `baseSha`
+(= `record.baseSha`). НЕ використовує immutable `record.theirsBlobSha`
+(що зберігається тільки для dedup).
 
 | Стан | Семантика | Resolution action |
 |---|---|---|
@@ -504,12 +525,19 @@ siblingSha = siblingExists ? hashFile(record.siblingPath) : null
 | siblingExists, !baseExists, kind=`modify-vs-modify` | user видалив base — delete-wins | Прибрати всі records для path. Видалити всі siblings локально. Propagate delete до main + remove from branch |
 | siblingExists, !baseExists, kind=`modify-vs-delete` | user видалив base — accept theirs (confirm remote deletion) | Прибрати record + .deleted sibling. Якщо для path більше records немає → propagate delete до main |
 | siblingExists, !baseExists, kind=`delete-vs-modify` | початковий стан, user ще не вирішив | No-op |
-| siblingExists, baseExists, SHA(base) == record.theirsBlobSha, kind=`modify-vs-modify`/`delete-vs-modify` | user copy-паст / rename sibling-content в base — accept theirs (цей варіант) | Видалити sibling + record. Якщо останній — propagate base content до main |
-| siblingExists, baseExists, SHA(base) ≠ record.theirsBlobSha, kind=`delete-vs-modify` | user створив base manually (custom resolution) | Видалити sibling + record. Якщо останній — propagate base content до main |
-| siblingExists, baseExists, SHA(base) ≠ record.theirsBlobSha, SHA(base) ≠ ours, kind=`modify-vs-modify` | user редагує base, ще не настиг ні з ким збігтись | No-op |
-| siblingExists, baseExists, SHA(base) == record.oursBlobSha | base незмінений, sibling ще там — initial state | No-op |
-| siblingExists (= `.deleted` placeholder), baseExists, SHA(base) == record.oursBlobSha, kind=`modify-vs-delete` | initial state | No-op |
-| siblingExists (= `.deleted` placeholder), baseExists, SHA(base) ≠ record.oursBlobSha, kind=`modify-vs-delete` | user edits base (still rejecting remote delete) — no-op until further action | No-op |
+| siblingExists, baseExists, `baseSha == siblingSha`, kind=`modify-vs-modify` чи `delete-vs-modify` | user скопіював sibling content до base (copy-паст чи rename) — accept that variant | Видалити sibling + record. Якщо останній — propagate baseSha content до main |
+| siblingExists, baseExists, `baseSha ≠ siblingSha`, kind=`delete-vs-modify` | user створив base manually (custom resolution) | No-op поки siblings не зникнуть (user сигналізує completion через delete-sibling) |
+| siblingExists, baseExists, `baseSha ≠ siblingSha`, `baseSha ≠ record.oursBlobSha`, kind=`modify-vs-modify` | user редагує base (ще не збігся ні з ours ні з sibling) | No-op |
+| siblingExists, baseExists, `baseSha == record.oursBlobSha`, kind=`modify-vs-modify` | base незмінений (= ours), sibling ще там — initial state | No-op |
+| siblingExists (= `.deleted` placeholder), baseExists, `baseSha == record.oursBlobSha`, kind=`modify-vs-delete` | initial state | No-op |
+| siblingExists (= `.deleted` placeholder), baseExists, `baseSha ≠ record.oursBlobSha`, kind=`modify-vs-delete` | user edits base (still rejecting remote delete) | No-op |
+
+**Чому `baseSha == siblingSha` замість `baseSha == record.theirsBlobSha`:**
+дозволяє user-edited sibling правильно тригерити case 4. Сценарій:
+sibling був R2, user його відредагував до X, скопіював X у base. Тепер
+`baseSha == siblingSha == X` → case 4 fires, accept X. Якщо порівнювали б
+з immutable theirsBlobSha = R2, цей варіант би НЕ спрацював і конфлікт
+застряг би.
 
 ### Trigger points
 
@@ -533,28 +561,31 @@ siblingSha = siblingExists ? hashFile(record.siblingPath) : null
 stat = vault.adapter.stat(record.siblingPath)  ← cheap syscall
 if !stat:
   siblingExists = false
+  # record.siblingSha stays as last-known (or no longer relevant —
+  # record прибирається класифікатором)
 elif stat.mtime == record.siblingMtime AND stat.size == record.siblingSize:
   # Cache hit — no read/hash needed
   siblingExists = true
-  siblingSha = <cached, last known sibling SHA>  ← stored or recomputed-once-cached
+  siblingSha = record.siblingSha  ← directly from persisted cache
 else:
-  # mtime/size touched → must read
+  # mtime/size touched → must read content
   siblingExists = true
   content = read(record.siblingPath)
   siblingSha = computeSha(content)
   
-  # Refresh mtime/size cache regardless of SHA outcome —
-  # file was touched, future evals shouldn't re-read.
+  # Refresh ALL three cached fields together (mtime, size, sha)
   record.siblingMtime = stat.mtime
   record.siblingSize = stat.size
+  record.siblingSha  = siblingSha  ← keep current SHA in record
   persist record  ← atomic write (per ConflictStore persistence contract)
 ```
 
-Same pattern apply до `baseMtime + baseSize`. Якщо SHA після перерахунку
-збігається з old cached value — значить файл був "touched" (наприклад,
-mtime бамп через ОС-події), без content change → cache update + no
-resolution action. Якщо SHA differs — user реально щось редагував →
-class fyer вирішує наступну дію.
+Same pattern для `baseMtime` + `baseSize` + `baseSha`. Якщо після
+read+SHA нова `siblingSha == record.siblingSha` (попередня cached) —
+значить файл був "touched" без content change (e.g., OS bumped mtime).
+mtime/size cache оновлюється, sha unchanged in record, no resolution
+trigger. Якщо `siblingSha ≠ record.siblingSha` — user реально щось
+відредагував → класифікатор вирішує наступну дію через current SHA.
 
 ### Immutable identity vs current content
 
