@@ -159,10 +159,14 @@ drain():
 2. partition batch.files за поточним станом inConflictFiles:
    conflictPaths = batch.files ∩ inConflictFiles
    plainPaths    = batch.files − inConflictFiles
-3. push plainPaths → main (існуючий push flow без змін)
-   - reconcile case 4 (push-side detected конфлікт): A_i ≠ remote
-     → перевести path у новий conflict flow (step 4)
-4. ЯКЩО виявлено новий конфлікт (pull-side АБО push-side):
+3. push plainPaths → main (існуючий push flow з 2.0.0-beta):
+   - reconcile case 4 (push-side виявив SHA divergence vs main HEAD):
+     спершу ATTEMPT AUTO-MERGE (див. секцію нижче). Якщо auto-merge
+     успішний → use merged content, push до main як звичайний plainPath
+     (path НЕ потрапляє у conflict-branch). Якщо auto-merge невдалий
+     → перевести path у новий conflict flow (step 4).
+4. ЯКЩО виявлено новий конфлікт (pull-side АБО push-side) і
+   auto-merge не зміг його розв'язати:
    - якщо conflict-branch не існує: createReference на current main HEAD
      (eager — створюється навіть якщо batch.files не містить цього path, а конфлікт є з local Vault path)
    - визначити local-content тих conflict paths (читання з vault, не з batch):
@@ -203,21 +207,77 @@ branch упав — на retry треба пропустити main push. Мар
 
 ---
 
+## Auto-merge attempt — preserved from 2.0.0-beta
+
+**SHA mismatch ≠ автоматично conflict.** Перед реєстрацією як
+conflict (push до conflict-branch + sibling + ConflictStore), engine
+пробує auto-merge. Якщо успіх — path не потрапляє у conflict-branch
+взагалі, йде як plainPath до main. Це стандартна git-shape behavior
+(аналог `git pull --no-rebase` що робить 3-way merge перед conflict
+markers).
+
+### Стратегії auto-merge по типу файлу
+
+| Тип файлу | Класифікатор | Auto-merge стратегія | Успіх | Невдача → step 4 |
+|---|---|---|---|---|
+| Текст | `hasTextExtension(path)` (з utils.ts 2.0.0-beta) | **3-way merge** `mergeText(base, ours, theirs)` (з `three-way-merge.ts`) | Clean merge без markers — use merged content as "ours" | Conflict markers → register conflict |
+| Plugin-js | `isAtomicPluginFile(path, configDir)` (з plugin-js.ts) — `main.js` або `manifest.json` під plugin folder | **Atomic semver** — read `manifest.json` обох сторін, higher version wins. Mtime tie-break | Resolution clear → apply winner | Same version + mtime tie → register conflict |
+| Binary | усе інше (`hasTextExtension` returns false) | **Atomic mtime** | local.mtime ≠ remote.mtime → newer wins; apply | Mtime tie → register conflict |
+
+Класифікатори і реалізації — **успадковані з 2.0.0-beta** (через існуючі
+unit-тести E2/E3/E4 для plugin-js, G4 для binary). Pseudo-merge mode
+переписує "що робити при невдачі" — push до conflict-branch замість
+`ConflictModal` / `applyRemoteAddOrModify` direct sibling write.
+
+### Two entry points, both run auto-merge first
+
+| Entry point | Коли | Як обчислюється base |
+|---|---|---|
+| **Pull-side** (step 1 pullIfNeeded) | pull виявив що remote має нову версію файла який локально модифікований | base = lastSync snapshot's tree content for this path |
+| **Push-side** (step 3 reconcile case 4) | main HEAD просунувся між batch enqueue і processBatch | base = batch.expectedHead's tree content for this path |
+
+Auto-merge attempt **uniform** для обох entry points — same `mergeText`,
+same atomic resolution functions.
+
+### Що НЕ змінилось vs 2.0.0-beta
+
+- 3-way merge alg → той самий `mergeText` з `three-way-merge.ts`
+- Plugin-js semver classifier → той самий `isAtomicPluginFile` + `compareSemver`
+- Binary mtime classifier → той самий через `hasTextExtension` negation
+- Auto-merge success path → той самий (push merged content до main)
+
+### Що змінилось
+
+- Auto-merge **failure path** — замість direct sibling write +
+  ConflictModal, тепер step 4 (push до conflict-branch + sibling +
+  ConflictStore.create — все uniformly через новий conflict layer).
+- Test series E1-E4 переписуються (та сама перевірка успіху, але
+  failure path тепер дивиться на conflict-branch state замість ConflictModal).
+
+---
+
 ## Conflict detection — два entry points → один state
 
+**Обидва entry points спершу пробують auto-merge** (див. секцію
+"Auto-merge attempt" вище). Реєстрація як conflict (запис у
+`inConflictFiles` + ConflictStore + sibling-файл) відбувається тільки
+коли auto-merge не зміг розв'язати.
+
 **Pull-side (drain step 1, pullIfNeeded):**
-- pull виявляє remote зміни на файлі який локально модифікований І ще
-  не в `inConflictFiles`
-- додає path у `inConflictFiles`
-- зберігає theirsBlobSha у ConflictStore
-- sibling-файл write'иться у vault (на наступному push step branch
-  створюється)
+- pull виявляє SHA divergence на файлі який локально модифікований
+- attempt auto-merge (3-way text / atomic binary / atomic plugin-js)
+- ЯКЩО auto-merge успіх → apply merged content, recordSync, NOT registered as conflict
+- ЯКЩО auto-merge невдалий:
+  - додає path у `inConflictFiles`
+  - зберігає theirsBlobSha у ConflictStore
+  - sibling-файл write'иться у vault
+  - на наступному push step branch створюється (якщо ще нема)
 
 **Push-side (drain step 3-4, processBatch):**
-- після pull, перед push, дивимось хто з batch.files має SHA-divergence
-  vs expectedHead
-- для таких — той самий flow: додати в `inConflictFiles`, ConflictStore,
-  sibling-файл, push до branch
+- reconcile case 4 виявляє SHA-divergence vs main HEAD
+- attempt auto-merge (those самі стратегії)
+- ЯКЩО auto-merge успіх → use merged content, push як plainPath до main
+- ЯКЩО auto-merge невдалий → step 4 flow (push до branch, sibling, register)
 
 Обидва entry points наповнюють **один і той самий state** —
 `inConflictFiles` + ConflictStore + sibling-файли у vault. ConflictWatcher
