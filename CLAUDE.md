@@ -14,17 +14,21 @@ An Obsidian plugin that syncs a local vault with a GitHub repository using **onl
 
 The conflict-view UX is the one area still openly known to be primitive; everything else is intentional. All behaviour described below is locked in by the integration tests (`pnpm test:integration`). Test series A–L each correspond to a different concern — bootstrap, adoption, normalization, incremental, atomic conflicts, special chars, multi-device stress, out-of-band drift, settings lifecycle, auth/API failures, manifest corruption, accumulate semantics.
 
-> **⚠️ Planned rework — Diff-Edit widget (`diff2` sub-project).** The conflict-view UX is being reworked per [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md). That sub-project lives under `src/diff2/` (named by analogy with `src/sync2/`) and:
-> - Replaces the `ConflictModal` per-file dialog with a summary modal at end of sync.
-> - Redesigns `ConflictView` as a single-pane unified Diff-Edit widget with four modes (Conflicts / Compare / File history / Recently deleted).
-> - Adds a local trash (`.trash/<id>/`) with bundled-restore for files-with-conflicts (T3 bundle).
-> - Makes auto-resolve reactive on SHA-convergence with `gitBlobSha` caching by `(path, mtime, size)`.
-> - Adds **persistent autosave** for in-flight conflict resolutions (`.diff2-autosave/<conflictId>/`) with throttled writes + atomic-rename + recovery dialog `[Continue editing] / [Start over]` when an interrupted session is reopened.
-> - Introduces an optional desktop external diff tool integration via `spawn` without shell.
-> - Enforces **NO LEGACY**: when a new component lands, the old one is deleted in the same PR (no alias-redirect, no feature-flag fallback).
-> - Enforces **Crash resilience**: every multi-step disk op (TrashStore create, transactional rename, T3 bundle, autosave) has a documented recovery sweep that runs in `onload` and a kill-mid-op test (see plan §R8).
+> **⚠️ Planned rework — Pseudo-merge mode (foundation).** The entire conflict-resolution layer is being rebuilt per [`PSEUDO-MERGE-MODE.md`](./PSEUDO-MERGE-MODE.md). High-level summary:
+> - **User-visible removal:** manual commit messages disappear — 2 of 4 Obsidian commands (`(custom message)` variants) gone. Everything else stays as in 2.0.0-beta from the user's POV.
+> - **Under the hood:**
+>   - Conflict files live on a per-device GitHub branch (`easy-sync-conflicts-<deviceLabel>-<ts>`) — not just local siblings.
+>   - Resolution detection is **event-driven** via `vault.on('delete' | 'modify' | 'rename')` — explicit exception to the engine's polling rule (see "Polling model" below); conflict resolution is a separate layer from sync engine.
+>   - `processBatch` does **split-push**: non-conflict files → main, conflict files → conflict-branch (variant β).
+>   - All resolution actions available through standard Obsidian file operations (delete sibling, rename over base, edit to SHA-identity, delete base) — no plugin UI required for the mechanism.
+>   - The 2.0.0-beta conflict-resolution code (`applyRemoteAddOrModify`, `reconcileBatchAgainstHead` Case 4, `ConflictModal`, `cascadeDeferRemoval`) is **replaced from scratch**, not extended.
+>   - `EnqueueMeta.isolated` field is **removed** (verified dead code after manual commit messages go away).
 >
-> **The text below describes the currently-in-force behaviour until the corresponding phases of that plan land.** Each phase brings its own CLAUDE.md edits in the same PR — do not edit conflict-resolution sections here without coordinating with the plan's phase tracker. See `IMPLEMENTATION_PLAN.md` → "Принципи реалізації" (now 9 principles, including NO LEGACY and Crash resilience) for implementation discipline.
+> **⚠️ Planned rework — Diff-Edit widget (`diff2` sub-project).** The conflict-view UI/UX is being reworked per [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md). After pseudo-merge mode lands, **Diff2 becomes a pure UX layer** on top of it — diff side-by-side, multi-sibling navigation, bulk-resolve buttons. Nothing in Diff2 is critical for the resolution mechanism. `IMPLEMENTATION_PLAN.md` is partially outdated; **`PSEUDO-MERGE-MODE.md` has priority** wherever the two conflict.
+>
+> **Sequencing:** PSEUDO-MERGE-MODE.md is **stage 1** (a complete release on its own); IMPLEMENTATION_PLAN.md cleanup + Diff2 is **stage 2**.
+>
+> **The text below describes the currently-in-force behaviour until pseudo-merge mode lands.** When working on conflict resolution, read PSEUDO-MERGE-MODE.md first.
 
 ## Headline design intent
 
@@ -104,6 +108,8 @@ The engine does **not** register Obsidian vault events. `findChanges` (`change-d
 
 Implication: vault edits made while the plugin was disabled get picked up on the next sync click without any "missed events" failure mode (covered by E1 test).
 
+> **Planned exception (PSEUDO-MERGE-MODE.md).** The new conflict-resolution layer is a separate subsystem and IS event-driven (`vault.on('delete' | 'modify' | 'rename')`). The polling rule above is preserved for **sync engine**; conflict resolution becomes its own real-time layer because the UX requires immediate state updates when the user deletes/renames/edits conflict-files. Sync engine still doesn't subscribe to events.
+
 ### PushQueue: persisted commit intent
 
 Located at `<configDir>/plugins/github-easy-sync/.push-queue/`. Each pending sync is a directory:
@@ -178,6 +184,8 @@ If you extend retry for a specific method, prefer using/extending `isWriteRetria
 4. **findChanges-vs-queue bridge** (`change-detector.ts:findChanges`): before emitting "added"/"modified", consults `queue.peekPathSha(path)`. If a pending batch already holds this path with the local-computed SHA, **skip emit**. This stops "second sync after a crash" from creating a duplicate batch — regardless of the `accumulateOfflineSyncs` setting.
 
 ### Conflict resolution
+
+> **⚠️ This entire section describes 2.0.0-beta behaviour that PSEUDO-MERGE-MODE.md replaces from scratch.** The new model uses a per-device GitHub conflict-branch, event-driven detection, split-push at processBatch, and 3-case resolution (cases 1/3/4). `applyRemoteAddOrModify`, `reconcileBatchAgainstHead` Case 4, `ConflictModal`, and `cascadeDeferRemoval` are all being removed. See PSEUDO-MERGE-MODE.md for the new design. Text below is **current-shipping** behaviour, accurate until pseudo-merge lands.
 
 Conflict resolution fires from two contexts that share the same per-type dispatch logic:
 
@@ -275,6 +283,8 @@ When canonicalization is on AND a write changed bytes, `recordSync` is INTENTION
 Toggle threaded via live getters into both `PushQueue` and `Sync2Manager` so flipping it in the settings tab takes effect on the very next sync.
 
 ### Custom-message commits & accumulate semantics
+
+> **⚠️ Custom-message commits are being removed** per PSEUDO-MERGE-MODE.md — this is the **only user-visible removal** from 2.0.0-beta. `syncAll(customMessage?)` / `syncFile(path, customMessage?)` lose the `customMessage` parameter; 2 of 4 Obsidian commands (`(custom message)` variants) disappear; `EnqueueMeta.isolated` is removed (verified dead code after this change). Accumulate semantics for non-custom batches stay exactly as below.
 
 - Every command that takes a custom message routes through `enqueueOrMerge({…, isolated: true})`. Isolated batches **never** absorb other changes and **never** themselves fold into a prior batch. User's typed message survives intact.
 - For standard (non-isolated) syncs with `accumulateOfflineSyncs: true`: `mergeIntoLatestPending` finds the youngest pending+non-in-progress+non-attempted+non-isolated batch and folds new changes into it. After the merge, `enqueueOrMerge` calls `updateCommitMessage` so the batch's commit message reflects the **latest** click's template render — not the first.
