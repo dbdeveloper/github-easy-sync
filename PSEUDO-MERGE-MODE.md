@@ -124,20 +124,25 @@ actions), бо читає фінальний file system state, а не посл
 drain():
   pause ConflictWatcher event processing                   ← НОВЕ
   
-  0. drain-start sweep (ПЕРЕД pull):
-     re-evaluate ConflictStore vs vault file system state.
-     Catches changes since previous drain end (включно з onload window).
-     Якщо path виходить з inConflictFiles → synthesize side-batch;
-     він обробиться у цьому ж drain циклі.
+  0. drain-start sweep:                                    ← НОВЕ
+     evaluateConflictState() — full scan.
+     Catches drift that ConflictWatcher missed:
+       - external mods (iCloud/Dropbox/file manager) where vault.on
+         may not fire reliably (особливо на mobile background)
+       - plugin toggled off→on mid-session (events not registered window)
+       - OS-level file-watcher edge cases на mobile suspension
+     ConflictStore — authoritative source; sweep verifies state
+     proти actual vault file system. Якщо resolution → cleanup state
+     + synthesize side-batches; вони обробляться у цьому ж drain.
   1. pull main (як зараз — у drain top через pullIfNeeded)
   
   for each batch in queue:
     processBatch(batch)  ← деталі нижче
   
   N. drain-end sweep                                       ← НОВЕ
-     re-evaluate ConflictStore vs vault file system state (той самий
-     механізм як drain-start sweep). Catches:
-       - наші drain-triggered sibling writes
+     evaluateConflictState() — full scan.
+     Catches:
+       - наші drain-triggered sibling writes (events ignored mid-drain)
        - user's mid-drain actions (delete sibling, edit base, rename)
      Якщо resolution → cleanup state + synthesize side-batches.
   
@@ -150,6 +155,15 @@ drain():
   
   resume ConflictWatcher event processing                  ← НОВЕ
 ```
+
+**Чому є і drain-start, і drain-end sweep:** ConflictWatcher real-time
+покриває **outside drain** vault events, але має blind spots
+(external mods, mobile suspension, plugin toggle off→on). Drain-start
+sweep — safety net що catches цей drift перед operations що залежать
+від accurate state. Drain-end sweep — для drain-internal pause window.
+Onload sweep не потрібен окремо: перший drain (sync on startup,
+manual click) АБО перший UI op якщо callsite викликає
+`evaluateConflictState()` — закриває onload window.
 
 Один [Sync] click → один drain → uniform processing.
 
@@ -320,89 +334,168 @@ Path може мати **N siblings** з різних пристроїв. Кор
 
 ---
 
-## Resolution detection — event-driven
+## ConflictStore — schema і persistence
 
-ConflictWatcher слухає vault events:
+**ConflictStore — single source of truth** для всіх конфліктів. Всі
+рішення про state (in-conflict, resolved, kind, etc.) робляться через
+читання цього store. Файли поза store (orphan `*.conflict-from-*`
+створені externally) — ignored by design.
+
+### Crash-resistant persistent storage
+
+Як і `.push-queue/`, `metadata.json`, `.gitignore` invariants — ConflictStore
+**персистентний на диску** з захистом від збоїв при модифікації.
+
+Це конкретизація **existing principle #9 "Crash resilience"** з
+`IMPLEMENTATION_PLAN.md` ("Принципи реалізації"): "every multi-step
+disk op has a documented recovery sweep that runs in `onload` and a
+kill-mid-op test". ConflictStore create/update/delete — це multi-step
+disk ops, тому всі вони мусять відповідати principle #9. Цей розділ
+просто конкретизує контракт для pseudo-merge context.
+
+- **Location:** `<configDir>/plugins/github-easy-sync/.conflicts/<recordId>/meta.json`
+- **Atomic write protocol:** для кожної модифікації — write to `.tmp/<recordId>/meta.json`,
+  fsync, atomic rename до final location. Crash mid-write → temp file
+  залишається, але final file untouched → on-load sweep ловить orphan
+  `.tmp/` і чистить.
+- **Defensive coercion on load:** як `SnapshotStore.migrate()` —
+  missing fields, unknown values default safely; corrupted records
+  logged + skipped (не ламають plugin load).
+- **Invariant після recovery sweep:** state on disk — або fully
+  completed update, або fully rolled back, ніколи half-applied
+  (principle #9).
+
+### Record schema
+
+Кожен record персистентно зберігає **всю інформацію щоб resume
+resolution flow після crash**:
 
 ```ts
-plugin.registerEvent(vault.on('delete', handleConflictEvent))
-plugin.registerEvent(vault.on('modify', handleConflictEvent))
-plugin.registerEvent(vault.on('rename', handleConflictEvent))
-
-handleConflictEvent(file):
-  affected = inConflictFiles ∩ {file.path, parent(file.path)}
-  + paths whose registered siblings include file.path
-  for path in affected:
-    evaluateResolutionFor(path)
+interface ConflictRecord {
+  id: string;                    // unique record id
+  vaultPath: string;             // "Folder/note.md"
+  kind: "modify-vs-modify" | "delete-vs-modify" | "modify-vs-delete";
+  oursBlobSha: string | null;    // null if ours was "delete"
+  theirsBlobSha: string;
+  remoteDevice: string;          // "Phone", "Laptop", ...
+  siblingPath: string;           // "Folder/note.conflict-from-Phone-<ts>.md"
+  siblingMtime: number;          // cached for evaluation fast-path
+  siblingSize: number;
+  baseMtime: number | null;      // null when kind=delete-vs-modify (base absent)
+  baseSize: number | null;
+  createdAt: number;             // when conflict was detected
+  lastEvaluated: number;         // when evaluateConflictState last touched
+}
 ```
 
-`evaluateResolutionFor(path)` — 3 кейси (rename/copy auto-collapse):
+**Поля що відображають kind:**
+
+| `kind` | `oursBlobSha` | `baseMtime/Size` | Sibling content | Початковий vault state |
+|---|---|---|---|---|
+| `modify-vs-modify` | SHA нашої версії | mtime/size base-файлу при створенні conflict | theirs (remote) content | base exists with ours; sibling exists with theirs |
+| `delete-vs-modify` | `null` (ми видалили) | `null` (base не існує) | theirs (remote) content | base absent; sibling exists with theirs |
+| `modify-vs-delete` | SHA нашої версії | mtime/size base-файлу | placeholder (empty marker file? TBD) | base exists with ours; sibling empty/absent |
+
+`modify-vs-delete` — рідший кейс (remote видалив, local модифікував).
+Sibling representation TBD при реалізації (можливо empty file з
+marker prefix, можливо record-only без vault sibling).
+
+### Dedup
+
+Identical `(vaultPath, theirsBlobSha)` дедуплікується — якщо запис вже
+існує для цього path і remote content, ще один не створюється. Це
+зберігає поведінку 2.0.0-beta.
+
+---
+
+## Unified state evaluation — `evaluateConflictState()`
+
+**Один algorithm, чотири trigger points.** Source of truth — ConflictStore
+records. Algorithm читає файлову систему щоб виявити що змінилось з
+останнього viкоnання.
 
 ```
-baseExists = vault.adapter.exists(basePath)
-siblings   = list існуючих siblings цього path
-
-! baseExists                          → кейс 3 (delete-wins)
-baseExists, всі siblings зникли       → кейс 1 (accept base)
-baseExists, є sibling із SHA(sibling) == SHA(base)
-                                       → кейс 4 (accept that variant)
-жодне з вище                          → no-op
+evaluateConflictState():
+  for each record in ConflictStore (≤ ~30 entries, scale ≤ 10 conflicts):
+    classify record:                       ← per record per evaluation
+      based on kind, baseExists, siblingExists, SHA matches
+    if classification → resolution action:
+      apply state changes (atomically persist)
+      синтезувати side-batch для main push (якщо потрібно)
+    update record.lastEvaluated, persist
 ```
 
-**Resolution фіксується в conflict-store одразу** (real-time, в event
-handler). Перейменування / видалення / редагування → store оновлюється.
-**Push до main відбувається на наступному [Sync] click** (option A) —
-узгоджено з polling-моделлю sync engine'у.
+### Класифікатор (gener'ний — працює для всіх kinds)
 
-**ВИНЯТОК — drain pause/resume:** під час drain ConflictWatcher
-**paused** (events ігноруються, не queue'яться — це Obsidian behavior).
-На drain-end робиться **comprehensive sweep** замість "process queued
-events": re-evaluate ConflictStore vs actual vault file system state
-(той самий механізм як drain-start sweep і onload sweep). Sweep
-catches **усе** що сталось під час drain (наші sibling writes, user's
-mid-drain actions, race conditions) — бо читає фінальний file system
-state, не послідовність подій.
+Дивиться на поточний vault state + ConflictStore record:
+
+```
+baseExists = vault.adapter.exists(record.vaultPath)
+siblingExists = vault.adapter.exists(record.siblingPath)
+baseSha = baseExists ? hashFile(record.vaultPath) : null  ← mtime cache hit → skip
+siblingSha = siblingExists ? hashFile(record.siblingPath) : null
+```
+
+**Резолюції (uniform за kinds):**
+
+| Стан | Семантика | Resolution action |
+|---|---|---|
+| !siblingExists | user видалив sibling — accept ours | Прибрати record. Якщо для path більше records немає → propagate ours (base content АБО deletion) до main + remove from branch |
+| siblingExists, !baseExists, kind=`modify-vs-modify` | user видалив base — delete-wins | Прибрати всі records для path. Видалити всі siblings локально. Propagate delete до main + remove from branch |
+| siblingExists, !baseExists, kind=`delete-vs-modify` | початковий стан, user ще не вирішив | No-op |
+| siblingExists, baseExists, SHA(base) == record.theirsBlobSha | user copy-паст / rename sibling-content в base — accept theirs (цей варіант) | Видалити sibling + record. Якщо останній — propagate base content до main |
+| siblingExists, baseExists, SHA(base) ≠ record.theirsBlobSha, kind=`delete-vs-modify` | user створив base manually (custom resolution) | Видалити sibling + record. Якщо останній — propagate base content до main |
+| siblingExists, baseExists, SHA(base) ≠ record.theirsBlobSha, SHA(base) ≠ ours, kind=`modify-vs-modify` | user редагує base, ще не настиг ні з ким збігтись | No-op |
+| siblingExists, baseExists, SHA(base) == record.oursBlobSha | base незмінений, sibling ще там — initial state | No-op |
+
+### Trigger points
+
+| Trigger | Що викликає | Behavior |
+|---|---|---|
+| **drain-start** | Початок drain (перед pull) | `evaluateConflictState()` full scan |
+| **drain-end** | Після всіх batches, перед resume ConflictWatcher | `evaluateConflictState()` full scan |
+| **UI op** на conflict-related view | diff2 open, status-bar click, settings tab open | `evaluateConflictState()` full scan |
+| **vault.on(modify/delete/rename)** | Real-time outside drain | Fast-path Set check: `path ∈ siblingPaths-Set ∨ path ∈ inConflictFiles-Set`. Hit → `evaluateConflictState()` full scan. Miss → return (99% events) |
+
+**Усе** — той самий sync algorithm. ≤ 30 records при типовому scale → full scan <50ms.
+
+### Mtime cache (optional optimization)
+
+Кожен record несе `siblingMtime + siblingSize` (і `baseMtime + baseSize` де relevant).
+При evaluation:
+- `stat(file)` дешевий — fs syscall
+- Якщо stat == cached → skip read+SHA
+- Якщо ≠ → read content, recompute SHA, оновити cache
+
+При типовому usage (більшість evals хитають кеш) — eval вкладається у
+кілька мс.
+
+### Multi-sibling consequence
+
+Якщо path має N siblings, кожна `siblingExists` check ітерується по
+всіх records цього path. Resolution на одного sibling — це per-record
+operation. Path "закривається" коли ВСІ records для нього прибрані
+(всі siblings зникли чи всі резолвилися).
+
+`modify-vs-modify` кейс "base deleted" — **каскадно** прибирає всі
+records цього path. На відміну від інших кейсів де треба зробити по
+кожному sibling. Це expected ("trust user actions" — delete base = "цей
+файл мені не цікавий").
+
+### Drain pause/resume context
+
+Під час drain ConflictWatcher **paused** (events ігноруються — це
+Obsidian behavior, не queueing). Drain-start і drain-end **обидва**
+викликають evaluateConflictState — це catches **усе** що сталось:
+наші sibling writes, user mid-drain actions, race conditions, external
+mods. Sweep читає **фінальний file system state**, не послідовність
+подій.
 
 Resolutions fire **у тому ж drain**. Synthesized side-batches
 обробляються у тому ж drain. Finalize теж у тому ж drain якщо
 conditions met. Коли user уже сконвергував vault до remote ДО [Sync]
 click — finalize відбувається у поточному drain, **без чекання
 наступного [Sync]**.
-
-### Дії при кожному кейсі (виконуються в event handler real-time)
-
-**Принцип:** resolution живе на двох рівнях — **per-sibling** (book-keeping)
-і **per-path** (push до main). Push відбувається лише коли path
-**повністю виходить з `inConflictFiles`** (усі його siblings резолвлено).
-
-| Кейс | Real-time state update (event handler) | Що піде до main на наступному [Sync] |
-|---|---|---|
-| 1 (sibling deleted) | Видалити ConflictStore record для того sibling. **ЯКЩО це був останній sibling для path** → прибрати path з inConflictFiles | (Тільки якщо path вийшов з inConflictFiles): push base content до main + remove path з branch tree |
-| 3 (base deleted) | Прибрати path з inConflictFiles; видалити всі ConflictStore records для path; видалити всі sibling-файли локально | push delete до main + remove path з branch tree |
-| 4 (SHA match) | Видалити **той** sibling-файл і **той** ConflictStore record що SHA-збігся. **ЯКЩО це був останній sibling для path** → еквівалентно кейсу 1 | Тільки якщо path вийшов з inConflictFiles: те саме що в кейсі 1 |
-
-**Multi-sibling consequence:** якщо path має N siblings, перші N-1
-resolutions (через кейс 1 або 4) — це лише book-keeping, ніяких
-push'ів. Push до main + remove from branch tree триггериться **N-ю
-(останньою)** resolution. Між тим, edits до base-файла продовжують йти
-на branch (як edit-while-in-conflict), бо path ще в inConflictFiles.
-
-Це означає: для multi-sibling path користувач **мусить резолюнути ВСІ
-siblings** перед тим як його варіант з'явиться у main. Кожен sibling —
-окремий "залишковий конфлікт".
-
-**Асиметрія кейсу 3 із multi-sibling:** delete base **каскадно**
-видаляє всі siblings одним рухом (бо user явно сказав "цей файл мені
-не цікавий"). На відміну від кейсу 4 де кожен sibling треба резолюнути
-окремо. Це expected — "trust user actions" принцип; delete base — це
-"ядерна" відмова від усього пов'язаного з цим path-ом.
-
-### gitBlobSha caching
-
-Для performance: `gitBlobSha(path)` кешується за ключем `(path, mtime, size)`.
-При detection-проході — спочатку перевірка `mtime + size`; якщо ключ
-збігся з кешем — SHA не перерахуємо. Інакше — рахуємо і кешуємо. Це
-критично для onload sweep на великому vault'і.
 
 ### Три trigger points (різна push semantics!)
 
