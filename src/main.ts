@@ -22,8 +22,6 @@ import GitignoreInvariants from "./sync2/gitignore-invariants";
 import { Sync2Manager } from "./sync2/sync2-manager";
 import { IntervalScheduler } from "./sync2/interval-scheduler";
 import { ConflictResolution as Sync2ConflictResolution } from "./sync2/types";
-import { applyTemplate } from "./sync2/commit-templates";
-import { CommitMessageModal } from "./sync2/views/commit-message-modal";
 import {
   ConflictModal,
   ConflictPromptArgs,
@@ -131,18 +129,6 @@ export default class GitHubSyncPlugin extends Plugin {
       name: "Sync current file with GitHub",
       icon: "file-up",
       callback: this.syncCurrentFile.bind(this),
-    });
-    this.addCommand({
-      id: "sync-current-file-with-message",
-      name: "Sync current file with GitHub (custom message)…",
-      icon: "file-up",
-      callback: this.syncCurrentFileWithMessage.bind(this),
-    });
-    this.addCommand({
-      id: "sync-files-with-message",
-      name: "Sync with GitHub (custom message)…",
-      icon: "refresh-cw",
-      callback: this.syncWithMessage.bind(this),
     });
     this.addCommand({
       id: "open-conflict-view",
@@ -529,65 +515,6 @@ export default class GitHubSyncPlugin extends Plugin {
     this.resetSyncState();
     try {
       await this.sync2Manager.syncFile(path);
-    } catch (err) {
-      new Notice(`Error syncing. ${err}`);
-    }
-    this.afterSync();
-  }
-
-  // Whole-vault custom-message sync. Same shape as
-  // syncCurrentFileWithMessage but routes through Sync2Manager.syncAll
-  // with the user-typed message; the resulting batch is "isolated"
-  // (won't fold with later std-syncs, message survives intact).
-  async syncWithMessage(): Promise<void> {
-    if (!this.isConfigured()) {
-      new Notice("Sync plugin not configured");
-      return;
-    }
-    const tpl = this.settings.commitMessageAll ?? "Sync at {date} {time}";
-    const defaultMsg = applyTemplate(tpl, { date: new Date() });
-    const msg = await new CommitMessageModal(
-      this.app,
-      defaultMsg,
-      null,
-    ).prompt();
-    if (msg === null) return;
-    this.resetSyncState();
-    try {
-      await this.sync2Manager.syncAll(msg);
-    } catch (err) {
-      new Notice(`Error syncing. ${err}`);
-    }
-    this.afterSync();
-  }
-
-  async syncCurrentFileWithMessage(): Promise<void> {
-    const path = this.activeFilePath();
-    if (!path) {
-      new Notice("No active file to sync");
-      return;
-    }
-    if (!this.isConfigured()) {
-      new Notice("Sync plugin not configured");
-      return;
-    }
-    const tpl =
-      this.settings.commitMessageFile ?? "Update {filename} at {date} {time}";
-    const filename = path.split("/").pop() ?? path;
-    const defaultMsg = applyTemplate(tpl, {
-      date: new Date(),
-      filename,
-      path,
-    });
-    const msg = await new CommitMessageModal(
-      this.app,
-      defaultMsg,
-      path,
-    ).prompt();
-    if (msg === null) return;
-    this.resetSyncState();
-    try {
-      await this.sync2Manager.syncFile(path, msg);
     } catch (err) {
       new Notice(`Error syncing. ${err}`);
     }

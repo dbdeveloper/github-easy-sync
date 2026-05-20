@@ -71,9 +71,8 @@ export function applyTemplate(
 
 // Append a fixed-position " (deviceLabel)" suffix to the message.
 // Called by Sync2Manager at the very end of message construction —
-// after applyTemplate() for templated messages, OR directly on a
-// user-typed customMessage from syncFile's modal — so every sync2
-// commit ends with the device tag, parseable as /\s\(([^)]+)\)$/.
+// after applyTemplate() — so every sync2 commit ends with the device
+// tag, parseable as /\s\(([^)]+)\)$/.
 //
 // The label is escaped: `(` → `[`, `)` → `]`. Round parens inside the
 // label would break the trailing-paren regex (greedy match across

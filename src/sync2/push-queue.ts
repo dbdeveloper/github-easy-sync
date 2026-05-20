@@ -51,12 +51,6 @@ export type EnqueueMeta = {
   commitMessage: string;
   parentCommitSha: string | null;
   parentTreeSha: string | null;
-  // Defaults to false. When true, this batch is "isolated" — it
-  // never folds into another batch and another batch never folds
-  // into it. Used by custom-message syncs so the user's typed
-  // message survives intact and is never replaced by a group
-  // template.
-  isolated?: boolean;
 };
 
 export interface PushQueueDeps {
@@ -122,7 +116,6 @@ export default class PushQueue {
       parentCommitSha: meta.parentCommitSha,
       parentTreeSha: meta.parentTreeSha,
       createdAt: Date.now(),
-      isolated: meta.isolated ?? false,
       fileMtimes,
     });
     if (deletions.length > 0) {
@@ -167,7 +160,6 @@ export default class PushQueue {
       files,
       deletions,
       uploadedBlobs: meta.uploadedBlobs,
-      isolated: meta.isolated,
       fileMtimes: meta.fileMtimes,
     };
   }
@@ -244,7 +236,6 @@ export default class PushQueue {
         parentTreeSha: meta.parentTreeSha,
         createdAt: meta.createdAt,
         uploadedBlobs: updated,
-        isolated: meta.isolated,
         fileMtimes: meta.fileMtimes,
       });
     });
@@ -318,11 +309,6 @@ export default class PushQueue {
         `${batchDir}/${ATTEMPTED_FILE}`,
       );
       if (attempted) continue;
-      // Isolated batches (custom-message commits) keep their message
-      // intact and refuse to fold new changes in. Skip and keep
-      // looking; if none is mergeable, caller falls back to enqueue.
-      const meta = await this.readMeta(batchDir);
-      if (meta.isolated) continue;
       target = ids[i];
       break;
     }
@@ -550,14 +536,12 @@ export default class PushQueue {
       parentTreeSha: string | null;
       createdAt: number;
       uploadedBlobs?: Record<string, string>;
-      isolated?: boolean;
       fileMtimes?: Record<string, number>;
     },
   ): Promise<void> {
     const out = {
       ...meta,
       uploadedBlobs: meta.uploadedBlobs ?? {},
-      isolated: meta.isolated ?? false,
       fileMtimes: meta.fileMtimes ?? {},
     };
     await this.vault.adapter.write(
@@ -572,7 +556,6 @@ export default class PushQueue {
     parentTreeSha: string | null;
     createdAt: number;
     uploadedBlobs: Record<string, string>;
-    isolated: boolean;
     fileMtimes: Record<string, number>;
   }> {
     const text = await this.vault.adapter.read(`${batchDir}/${META_FILE}`);
@@ -603,7 +586,6 @@ export default class PushQueue {
         typeof raw.parentTreeSha === "string" ? raw.parentTreeSha : null,
       createdAt: typeof raw.createdAt === "number" ? raw.createdAt : 0,
       uploadedBlobs,
-      isolated: raw.isolated === true,
       fileMtimes,
     };
   }

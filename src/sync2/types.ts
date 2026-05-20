@@ -69,17 +69,6 @@ export type QueueBatch = {
   // Paths to delete on the remote, listed verbatim from
   // deleted-paths.txt.
   deletions: string[];
-  // Whether this batch was created with a user-supplied commit
-  // message that must not be folded with subsequent syncs. Set true
-  // by the "Sync (custom message)..." commands and false by every
-  // standard-message sync. Isolated batches:
-  //   - never accept merges (mergeIntoLatestPending skips them when
-  //     looking for an accumulate target);
-  //   - never themselves merge into a prior batch (enqueueOrMerge
-  //     creates a fresh batch even if accumulateOfflineSyncs is on).
-  // The effect is "custom-message commit breaks the accumulate group
-  // cleanly", matching the user-facing intent.
-  isolated: boolean;
   // Per-file blob SHAs that `createBlob` already returned for this
   // batch in a prior (possibly crashed) attempt. Resume of an
   // interrupted push consults this map before issuing another

@@ -236,10 +236,9 @@ export async function sync2AllAndAssertNoErrors(
 export async function sync2FileAndAssertNoErrors(
   c: Sync2TestClient,
   vaultPath: string,
-  customMessage?: string,
 ): Promise<void> {
   clearRecordedNotices();
-  await c.manager.syncFile(vaultPath, customMessage);
+  await c.manager.syncFile(vaultPath);
   const errors = recordedNotices
     .map((n) => n.message)
     .filter((m) => m.toLowerCase().includes("error"));

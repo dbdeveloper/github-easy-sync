@@ -15,8 +15,8 @@ An Obsidian plugin that syncs a local vault with a GitHub repository using **onl
 The conflict-view UX is the one area still openly known to be primitive; everything else is intentional. All behaviour described below is locked in by the integration tests (`pnpm test:integration`). Test series A–L each correspond to a different concern — bootstrap, adoption, normalization, incremental, atomic conflicts, special chars, multi-device stress, out-of-band drift, settings lifecycle, auth/API failures, manifest corruption, accumulate semantics.
 
 > **⚠️ Planned rework — Pseudo-merge mode (foundation).** The entire conflict-resolution layer is being rebuilt per [`PSEUDO-MERGE-MODE.md`](./PSEUDO-MERGE-MODE.md). High-level summary:
-> - **User-visible removal:** manual commit messages disappear — 2 of 4 Obsidian commands (`(custom message)` variants) gone. Everything else stays as in 2.0.0-beta from the user's POV.
-> - **Under the hood:**
+> - **User-visible removal:** ✅ Stage 1 landed — manual commit messages removed (2 of 4 Obsidian commands gone). Everything else stays as in 2.0.0-beta from the user's POV.
+> - **Under the hood (in progress):**
 >   - Conflict files live on a per-device GitHub branch (`easy-sync-conflicts-<deviceLabel>-<YYYYMMDDHHMMSS>-<mmm>` — millisecond suffix avoids cross-device name collisions on default `"Obsidian"` label) — not just local siblings.
 >   - Resolution detection is **event-driven** via `vault.on('delete' | 'modify' | 'rename')` — explicit exception to the engine's polling rule (see "Polling model" below); conflict resolution is a separate subsystem from sync engine.
 >   - `processBatch` does **split-push**: non-conflict files → main, conflict files → conflict-branch (variant β). Drain wraps batch processing in pause/sweep — ConflictWatcher paused mid-drain, drain-start + drain-end sweeps re-evaluate ConflictStore vs vault file system state.
@@ -26,7 +26,6 @@ The conflict-view UX is the one area still openly known to be primitive; everyth
 >   - ConflictStore is the **single source of truth**; `inConflictFiles` is derived from `ConflictStore.records` (not persisted separately). Records carry `siblingSha`/`baseSha` as **cached current** SHAs vs immutable `theirsBlobSha` (dedup identity).
 >   - ConflictStore persistence follows **3-step atomic create protocol** (stage sibling content → atomic write meta.json → copy sibling to vault), with per-crash-window recovery sweep on onload. Concretizes existing principle #9 "Crash resilience" from `IMPLEMENTATION_PLAN.md`.
 >   - The 2.0.0-beta conflict-resolution code (`applyRemoteAddOrModify`, `reconcileBatchAgainstHead` Case 4, `ConflictModal`, `onConflict` callback, `cascadeDeferRemoval`, `resolveBinaryConflict`) is **replaced from scratch**, not extended.
->   - `EnqueueMeta.isolated` field is **removed** (verified dead code after manual commit messages go away).
 >
 > **⚠️ Planned rework — Diff-Edit widget (`diff2` sub-project).** The conflict-view UI/UX is being reworked per [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md). After pseudo-merge mode lands, **Diff2 becomes a pure UX layer** on top of it — diff side-by-side, multi-sibling navigation, bulk-resolve buttons. Nothing in Diff2 is critical for the resolution mechanism. `IMPLEMENTATION_PLAN.md` is partially outdated; **`PSEUDO-MERGE-MODE.md` has priority** wherever the two conflict.
 >
@@ -71,12 +70,12 @@ Releases are triggered by pushing a tag matching `[0-9].[0-9]+.[0-9]+*` (a `-bet
 
 `Sync2Manager` is the only orchestrator. Public methods, all idempotent; `drain` is guarded by a `running` flag so concurrent calls don't double-process:
 
-- `syncAll(customMessage?: string)` — whole-vault sync. Click body is LOCAL-ONLY after bootstrap: `reconcileRemoteIdentity` → `bootstrapIfNeeded` (one-time when `lastSyncCommitSha === null`, O(1) skip thereafter) → `invariants.enforce` → `findChanges` → `enqueueOrMerge` → `drain()`. The drain pulls + pushes; the click returns when the batch is on disk so the user can keep editing while network catches up.
-- `syncFile(path, customMessage?)` — single-file sync, same shape as `syncAll`. Custom message → isolated batch.
+- `syncAll()` — whole-vault sync. Click body is LOCAL-ONLY after bootstrap: `reconcileRemoteIdentity` → `bootstrapIfNeeded` (one-time when `lastSyncCommitSha === null`, O(1) skip thereafter) → `invariants.enforce` → `findChanges` → `enqueueOrMerge` → `drain()`. The drain pulls + pushes; the click returns when the batch is on disk so the user can keep editing while network catches up.
+- `syncFile(path)` — single-file sync, same shape as `syncAll`.
 - `resumeQueue()` — thin wrapper around `drain()`. Called from `main.ts` onload to drain any pending batches left over from a previous Obsidian session, and from the interval/watchdog timer's `backgroundDrain()` wrapper (which adds `suppressConflictModals` so a pull-side conflict auto-defers instead of blocking on a modal). `drain()` already pulls at the start of each iteration, so a separate "pull-only" entry point isn't needed — drain with an empty queue is effectively pullOnly.
 - `hasPendingBatches()` — gate the watchdog uses to decide "interval OFF + queue empty → no-op".
 
-Wired in `main.ts` to four Obsidian commands: `Sync with GitHub`, `Sync with GitHub (custom message)…`, `Sync current file with GitHub`, `Sync current file with GitHub (custom message)…`.
+Wired in `main.ts` to two Obsidian commands: `Sync with GitHub` and `Sync current file with GitHub`.
 
 ### Drain runner (`drain()`)
 
@@ -135,13 +134,12 @@ Located at `<configDir>/plugins/github-easy-sync/.push-queue/`. Each pending syn
 - `parentCommitSha` / `parentTreeSha` — where we'll build the commit. Updated by reconcile, by the stale-parent guard, or by `seedBareRepo`.
 - `createdAt` — local clock at enqueue.
 - `uploadedBlobs: Record<path, sha>` — paths whose `createBlob` succeeded in a prior attempt. TreeBuilder consults this map before re-uploading.
-- `isolated: boolean` — true for custom-message batches; blocks merge in either direction.
 - `fileMtimes: Record<path, mtime>` — per-file mtime captured at enqueue BEFORE `copyFileFromVault`'s canonical-text writeback can bump live mtime. Reconcile's binary/plugin-js atomic resolution uses this — otherwise the canonicalize-write-back path would silently flip every mtime tie toward "local wins" and break E3/E4-shaped scenarios.
 
 **Marker semantics:**
 - `.in-progress` set at start of `processBatch`, cleared on success (via `delete(id)`) OR failure (via `clearInProgress`).
 - `.attempted` set at start of `processBatch` and **never cleared on failure** — only removed when the batch dir is deleted on commit success. Models the rule: "failed batch is frozen against new merges; the next sync click creates a new batch".
-- `mergeIntoLatestPending` skips batches that are `in-progress` OR `attempted` OR `isolated`.
+- `mergeIntoLatestPending` skips batches that are `in-progress` OR `attempted`.
 
 ### Adoption (first sync against a non-bare remote)
 
@@ -286,14 +284,11 @@ When canonicalization is on AND a write changed bytes, `recordSync` is INTENTION
 
 Toggle threaded via live getters into both `PushQueue` and `Sync2Manager` so flipping it in the settings tab takes effect on the very next sync.
 
-### Custom-message commits & accumulate semantics
+### Accumulate semantics
 
-> **⚠️ Custom-message commits are being removed** per PSEUDO-MERGE-MODE.md — this is the **only user-visible removal** from 2.0.0-beta. `syncAll(customMessage?)` / `syncFile(path, customMessage?)` lose the `customMessage` parameter; 2 of 4 Obsidian commands (`(custom message)` variants) disappear; `EnqueueMeta.isolated` is removed (verified dead code after this change). Accumulate semantics for non-custom batches stay exactly as below.
-
-- Every command that takes a custom message routes through `enqueueOrMerge({…, isolated: true})`. Isolated batches **never** absorb other changes and **never** themselves fold into a prior batch. User's typed message survives intact.
-- For standard (non-isolated) syncs with `accumulateOfflineSyncs: true`: `mergeIntoLatestPending` finds the youngest pending+non-in-progress+non-attempted+non-isolated batch and folds new changes into it. After the merge, `enqueueOrMerge` calls `updateCommitMessage` so the batch's commit message reflects the **latest** click's template render — not the first.
+- With `accumulateOfflineSyncs: true`: `mergeIntoLatestPending` finds the youngest pending+non-in-progress+non-attempted batch and folds new changes into it. After the merge, `enqueueOrMerge` calls `updateCommitMessage` so the batch's commit message reflects the **latest** click's template render — not the first.
 - A failed batch is `attempted=true` → next click creates a fresh batch (not folded). Practical "accumulate" window: clicks that arrive WHILE a previous slow push is in-progress accumulate into a NEW second batch that the runner will pick up after the in-progress one finishes.
-- Covered by **L1–L4** in `tests/integration/scenarios/sync2/accumulate/`.
+- Covered by **L1, L4** in `tests/integration/scenarios/sync2/accumulate/`.
 
 ### "Push plugins data.json to GitHub" toggle
 
@@ -460,7 +455,7 @@ What's covered:
 | `tests/sync2/conflict-view.test.ts` | Merge-view leaf wiring, dep injection |
 | `tests/sync2/gitignore-invariants.test.ts` | `enforce()`, `spliceInvariantBlock`, `extractInvariantBlock`, `blockHasAllowLine`; "Push plugins data.json" toggle state encoded in block |
 | `tests/sync2/plugin-js.test.ts` | `isAtomicPluginFile`, `compareSemver`, `readPluginVersion` |
-| `tests/sync2/push-queue.test.ts` | Batch persistence, markers (`.in-progress` / `.attempted`), `uploadedBlobs`, isolated-batch rules |
+| `tests/sync2/push-queue.test.ts` | Batch persistence, markers (`.in-progress` / `.attempted`), `uploadedBlobs` |
 | `tests/sync2/snapshot-store.test.ts` | `migrate()` defensive coercion, `clear()`, `setLastSync`, invariant-state slot |
 | `tests/sync2/sync2-manager.test.ts` | The orchestrator under a fake `GithubClient` — bootstrap routing, conflict-resolution dispatch, processBatch Cases 1–4, drain entry-point bootstrap guard |
 | `tests/sync2/text-normalize.test.ts` | CRLF→LF, BOM strip, trailing-NL canonicalisation |
@@ -508,7 +503,7 @@ The bucket form takes a glob — `tests/integration/scenarios/sync2/conflicts*` 
 | `settings-lifecycle/I1-reset-metadata.test.ts` … `I6-repo-switch-auto-detect.test.ts` | I1–I6 | Snapshot reset (I1), syncConfigDir ON→OFF (I2), OFF→ON forward-looking (I3), deviceLabel change reflected in next commit message (I4), pull-side OFF blocks incoming configDir changes (I5), owner/repo/branch change in settings auto-wipes snapshot + queue and re-adopts from new remote (I6). |
 | `api-failures/J1-invalid-token.test.ts` … `J4-network-drop.test.ts` | J1–J4 | Invalid token 401 (J1), 429 backoff (J2), wrong repo 404 (J3), simulated network drop on first call (J4). Each pins fail-fast + batch persistence + recovery on next sync. |
 | `manifest-corruption/K1-invalid-json.test.ts` … `K5-empty-files-map.test.ts` | K1–K5 | Garbage JSON in snapshot manifest (K1), file deleted (K2), bogus `lastSyncCommitSha` → `compare` 404 → auto-advance to live head (K3), unknown top-level + per-file fields ignored (K4), files: {} with lastSync intact (K5). |
-| `accumulate/L1-sequential-clicks.test.ts` … `L4-attempted-locks-merge.test.ts` | L1–L4 | Sequential clicks fold (L1), custom-message stays isolated (L2), syncAll with custom message (L3), attempted-marker locks a failed batch out of merge (L4). |
+| `accumulate/L1-sequential-clicks.test.ts`, `L4-attempted-locks-merge.test.ts` | L1, L4 | Sequential clicks fold (L1); attempted-marker locks a failed batch out of merge (L4). |
 | `conflicts/` (4 files) | — | Deferred + sibling-delete close (defer-then-resolve-via-sibling-delete), merge-into-one resolver, multi-copy pair resolution, pending-conflict blocks push. |
 | `gitignore/gitignore-rename-suite.test.ts` | — | gitignore-driven filtering interacting with renames. |
 | `empty-progression.test.ts` | — | "Nothing in vault, nothing on remote, click sync" path stays no-op. |

@@ -460,15 +460,11 @@ edit `<vault>/.gitignore` and remove the `*.conflict-from-*` line.
 
 ## Commands and integrations
 
-The plugin registers four commands (all available via the command
+The plugin registers two commands (both available via the command
 palette and assignable to hotkeys):
 
 - `Sync with GitHub` — full vault sync
-- `Sync with GitHub (custom message)…` — same, prompts for a
-  custom commit message
 - `Sync current file with GitHub` — pushes just the active file
-- `Sync current file with GitHub (custom message)…` — same, with
-  custom message
 
 ### Vim mode integration
 

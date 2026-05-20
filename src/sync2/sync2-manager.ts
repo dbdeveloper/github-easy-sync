@@ -362,10 +362,8 @@ export class Sync2Manager {
   // invariants → findChanges → enqueue. Returns when the batch is on
   // disk. Network drain (pull + push) runs inside drain() which can
   // also be triggered by the interval timer or onload.
-  async syncAll(customMessage?: string): Promise<void> {
-    await this.logger.info("Sync2 syncAll start", {
-      customMessage: customMessage !== undefined,
-    });
+  async syncAll(): Promise<void> {
+    await this.logger.info("Sync2 syncAll start");
     // Remote-identity drift check runs FIRST — before bootstrapIfNeeded.
     // If the user pointed the plugin at a different
     // (owner, repo, branch), we wipe local state here so the rest of
@@ -403,23 +401,7 @@ export class Sync2Manager {
         await this.logger.info("Sync2 syncAll: nothing to sync");
         return;
       }
-      // Custom-message syncAll goes through enqueueOrMerge as an
-      // isolated batch — user's typed message must survive intact
-      // and must not absorb later std-syncs into its commit on
-      // GitHub.
-      const meta: EnqueueMeta =
-        customMessage !== undefined
-          ? {
-              commitMessage: appendDeviceSuffix(
-                customMessage,
-                this.deviceLabel(),
-              ),
-              parentCommitSha: this.store.getLastSyncCommitSha(),
-              parentTreeSha: this.store.getLastSyncTreeSha(),
-              isolated: true,
-            }
-          : this.fullSyncMeta();
-      const enqueued = await this.enqueueOrMerge(changes, meta);
+      const enqueued = await this.enqueueOrMerge(changes, this.fullSyncMeta());
       syncedFiles = enqueued;
       if (enqueued > 0) {
         this.onLocalCommitted?.(enqueued);
@@ -437,17 +419,12 @@ export class Sync2Manager {
     }
   }
 
-  // Action 2/3 — sync just the file at `path`.
-  //
-  // customMessage, when set, replaces the templated commit message.
-  // It's still passed verbatim — no further template expansion — so a
-  // user typing literal `{filename}` into the modal sees that string
-  // committed.
+  // Action 2 — sync just the file at `path`.
   //
   // Behaviour when there's nothing to push (file matches snapshot,
   // missing on both sides, hardcoded-blocked, gitignored): logs a
   // notice and returns silently. No queue batch is created.
-  async syncFile(path: string, customMessage?: string): Promise<void> {
+  async syncFile(path: string): Promise<void> {
     await this.logger.info(`Sync2 syncFile start`, { path });
     // Remote-identity drift check first — same reason as syncAll. If
     // settings now point at a different remote, the snapshot is
@@ -478,20 +455,16 @@ export class Sync2Manager {
         return;
       }
 
-      const baseMessage =
-        customMessage !== undefined
-          ? customMessage
-          : applyTemplate(this.commitMessageFile(), {
-              date: new Date(this.now()),
-              filename: path.split("/").pop() ?? path,
-              path,
-            });
+      const baseMessage = applyTemplate(this.commitMessageFile(), {
+        date: new Date(this.now()),
+        filename: path.split("/").pop() ?? path,
+        path,
+      });
       const message = appendDeviceSuffix(baseMessage, this.deviceLabel());
       const enqueued = await this.enqueueOrMerge([change], {
         commitMessage: message,
         parentCommitSha: this.store.getLastSyncCommitSha(),
         parentTreeSha: this.store.getLastSyncTreeSha(),
-        isolated: customMessage !== undefined,
       });
       syncedFiles = enqueued;
       if (enqueued > 0) {
@@ -1447,10 +1420,7 @@ export class Sync2Manager {
   ): Promise<number> {
     const filtered = this.dropPendingConflictPaths(changes);
     if (filtered.length === 0) return 0;
-    // Custom-message ("isolated") batches always stand alone — never
-    // try to fold them into a prior batch. Standard syncs still
-    // honour accumulateOfflineSyncs.
-    if (this.accumulateOfflineSyncs && !meta.isolated) {
+    if (this.accumulateOfflineSyncs) {
       const target = await this.queue.mergeIntoLatestPending(filtered);
       if (target !== null) {
         // Refresh the merged batch's commit message to the latest

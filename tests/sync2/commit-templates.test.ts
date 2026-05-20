@@ -126,7 +126,7 @@ describe("appendDeviceSuffix", () => {
     );
   });
 
-  it("works on a custom (un-templated) message — covers syncFile's customMessage path", () => {
+  it("works on an un-templated message", () => {
     expect(appendDeviceSuffix("manual cleanup pass", "Phone")).toBe(
       "manual cleanup pass (Phone)",
     );

@@ -758,20 +758,6 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
     );
   });
 
-  it("syncFile: customMessage gets the device suffix appended (parseable on GitHub)", async () => {
-    writeVaultFile(f.root, "x.md", "v\n");
-    f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
-    await f.manager.syncFile("x.md", "manual: tweak {filename}");
-    const commits = f.client.calls.filter((c) => c.op === "createCommit");
-    // {filename} stays literal (customMessage skips applyTemplate),
-    // BUT the device suffix is still appended — invariant: every
-    // sync2 commit ends with " (label)" so a future viewer can tell
-    // which device produced it.
-    expect((commits[0].args as { message: string }).message).toBe(
-      "manual: tweak {filename} (test-device)",
-    );
-  });
-
   it("syncFile: deleted file → push with sha:null, snapshot dropped", async () => {
     f.store.set("x.md", {
       path: "x.md",
