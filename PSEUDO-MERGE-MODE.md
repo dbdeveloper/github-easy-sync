@@ -816,6 +816,7 @@ batches **uniformly** (з ConflictWatcher на паузі). Resolution
 | crash між merge-commit і deleteRef | є, але branch.tree досягається з main через merge | видалити branch |
 | нема | є з нашою назвою | orphan від попередньої сесії — нічого не робити |
 | нема | нема | OK |
+| createReference 422 "already exists" на create attempt | branch з тією ж назвою на GitHub (cross-device race з same deviceLabel + same timestamp+msec) | regenerate timestamp з фресшею now() msec → retry createReference; loop until 2xx |
 
 ### B. ConflictStore catch-up з file-system state (onload + drain-start)
 
@@ -868,18 +869,51 @@ real-time; push чекає на [Sync]).
 
 ---
 
-## Branch naming
+## Branch naming + lifecycle
 
 ```
-easy-sync-conflicts-<deviceLabel>-<YYYYMMDDHHMMSS>
+easy-sync-conflicts-<deviceLabel>-<YYYYMMDDHHMMSS>-<mmm>
 ```
 
-Приклад: `easy-sync-conflicts-Phone-20260520143022`
+Приклад: `easy-sync-conflicts-Obsidian-20260520143022-847`
 
 - Префікс `easy-sync-conflicts-` → `listReferences("refs/heads/easy-sync-conflicts-*")`
-- `<deviceLabel>` → alphabetical grouping
-- `<timestamp>` → chronological order; orphan branches з минулих
-  run'ів видно "ага, оцей з січня"
+- `<deviceLabel>` → alphabetical grouping (default `"Obsidian"`, customizable per device у settings)
+- `<YYYYMMDDHHMMSS>` → chronological order до секунди
+- `<mmm>` → milliseconds, гарантує uniqueness навіть для multi-device
+  same-label sub-second collisions (два пристрої обидва з default
+  `"Obsidian"` label запускають drain одночасно — можливо)
+
+### Collision fallback
+
+Якщо `createReference` повертає 422 `"Reference already exists"`
+(extremely rare race window):
+- Re-generate timestamp з поточним now() → incremented msec
+- Retry createReference
+- Лоопати до success (cheap, бо ймовірність повторного collision ще
+  нижча)
+
+### Lifecycle: branch per "conflict session"
+
+Кожна **сесія конфліктів** на пристрої → один branch. Послідовність:
+
+1. **Створення:** конфлікт виявлено → `createReference` на поточному
+   main HEAD з freshly-generated name. Запис у `metadata.conflictBranch`.
+2. **Заповнення:** наступні drain'и додають commits через split-push
+   (наш local content конфліктних paths). Branch росте.
+3. **Resolution:** user поступово резолвить siblings. ConflictStore
+   records прибираються через `evaluateConflictState()`.
+4. **Finalize:** коли `inConflictFiles` стає порожнім + branch != null
+   → marker commit + merge-commit на main → `deleteReference` branch.
+   `metadata.conflictBranch = null`.
+5. **Наступний конфлікт** (можливо тижні пізніше) — **новий branch** з
+   новим timestamp. Старий лишається reachable через merge-commit на
+   main (commits not GC'd).
+
+**Net history view**: у GitHub Network graph — chronological серія
+коротких бічних гілок, кожна merged назад. "Ага, оцей з січня"
+(branch уже deleted, але commits видно через merge-commit's second
+parent). Свіжіша колізна сесія = окрема гілка, не reuse старого.
 
 ---
 
