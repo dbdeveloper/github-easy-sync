@@ -315,7 +315,7 @@ same atomic resolution functions.
 коли auto-merge не зміг розв'язати.
 
 **Pull-side (drain step 1, pullIfNeeded):**
-- pull виявляє SHA divergence на файлі який локально модифікований
+- pull виявляє розбіжність SHA на файлі який локально модифікований
 - attempt auto-merge:
   - text → 3-way merge `mergeText`
   - plugin-js → atomic semver
@@ -415,12 +415,14 @@ interface ConflictRecord {
   id: string;                    // unique record id
   vaultPath: string;             // "Folder/note.md"
   kind: "modify-vs-modify" | "delete-vs-modify" | "modify-vs-delete";
-  oursBlobSha: string | null;    // null if ours was "delete"
-  theirsBlobSha: string;
+  oursBlobSha: string | null;    // null if ours was "delete" (kind=delete-vs-modify)
+  theirsBlobSha: string | null;  // null if theirs was "delete" (kind=modify-vs-delete)
   remoteDevice: string;          // "Phone", "Laptop", ...
-  siblingPath: string;           // "Folder/note.conflict-from-Phone-<ts>.md"
+  siblingPath: string;
+  // modify-vs-modify / delete-vs-modify → "Folder/note.conflict-from-Phone-<ts>.md"
+  // modify-vs-delete                     → "Folder/note.conflict-from-Phone-<ts>.md.deleted" (0 bytes)
   siblingMtime: number;          // cached for evaluation fast-path
-  siblingSize: number;
+  siblingSize: number;           // 0 for modify-vs-delete placeholder
   baseMtime: number | null;      // null when kind=delete-vs-modify (base absent)
   baseSize: number | null;
   createdAt: number;             // when conflict was detected
@@ -434,11 +436,28 @@ interface ConflictRecord {
 |---|---|---|---|---|
 | `modify-vs-modify` | SHA нашої версії | mtime/size base-файлу при створенні conflict | theirs (remote) content | base exists with ours; sibling exists with theirs |
 | `delete-vs-modify` | `null` (ми видалили) | `null` (base не існує) | theirs (remote) content | base absent; sibling exists with theirs |
-| `modify-vs-delete` | SHA нашої версії | mtime/size base-файлу | placeholder (empty marker file? TBD) | base exists with ours; sibling empty/absent |
+| `modify-vs-delete` | SHA нашої версії | mtime/size base-файлу | **0-byte placeholder з `.deleted` suffix** | base exists with ours; sibling = `<file>.conflict-from-<dev>-<ts>.<ext>.deleted` (empty) |
 
-`modify-vs-delete` — рідший кейс (remote видалив, local модифікував).
-Sibling representation TBD при реалізації (можливо empty file з
-marker prefix, можливо record-only без vault sibling).
+**Sibling representation для `modify-vs-delete`:**
+
+Placeholder файл `<file>.conflict-from-<dev>-<ts>.<ext>.deleted` з
+розміром **0 байт**. Це візуально розрізняє "remote видалив цей файл"
+від звичайних content-siblings (у file-explorer suffix `.deleted` явно
+говорить що це). User options:
+- **Видалити `.deleted` sibling** → accept ours (зберегти local
+  модифіковану версію, ignore remote delete)
+- **Видалити base-файл** → accept theirs (propagate the delete до main).
+  `.deleted` sibling потім auto-cleaned як частина resolution.
+- Rename `.deleted` → base path не має сенсу (створив би 0-byte base),
+  тому не подовжуємо UX інструкції тут.
+
+**`.deleted` pattern у gitignore:** `*.conflict-from-*` уже catches
+обидва варіанти (з суфіксом `.deleted` і без — wildcard покриває). Просто
+переконатись що `GitignoreInvariants.CONFIG_DIR_SEED` / `ROOT_SEED` має
+це правило (як у 2.0.0-beta). **Не потрібно окремого правила для
+`.deleted`** — поточна wildcard pattern достатня. Зафіксувати у
+implementation: при init поточних invariants перевірити що
+`*.conflict-from-*` теж catches `.deleted` варіант (test case).
 
 ### Dedup
 
@@ -480,13 +499,17 @@ siblingSha = siblingExists ? hashFile(record.siblingPath) : null
 
 | Стан | Семантика | Resolution action |
 |---|---|---|
-| !siblingExists | user видалив sibling — accept ours | Прибрати record. Якщо для path більше records немає → propagate ours (base content АБО deletion) до main + remove from branch |
+| !siblingExists, kind=`modify-vs-modify` чи `delete-vs-modify` | user видалив content sibling — accept ours | Прибрати record. Якщо для path більше records немає → propagate ours (base content АБО deletion) до main + remove from branch |
+| !siblingExists, kind=`modify-vs-delete` | user видалив `.deleted` placeholder — accept ours (keep local modified) | Прибрати record. Якщо для path більше records немає → propagate base content до main |
 | siblingExists, !baseExists, kind=`modify-vs-modify` | user видалив base — delete-wins | Прибрати всі records для path. Видалити всі siblings локально. Propagate delete до main + remove from branch |
+| siblingExists, !baseExists, kind=`modify-vs-delete` | user видалив base — accept theirs (confirm remote deletion) | Прибрати record + .deleted sibling. Якщо для path більше records немає → propagate delete до main |
 | siblingExists, !baseExists, kind=`delete-vs-modify` | початковий стан, user ще не вирішив | No-op |
-| siblingExists, baseExists, SHA(base) == record.theirsBlobSha | user copy-паст / rename sibling-content в base — accept theirs (цей варіант) | Видалити sibling + record. Якщо останній — propagate base content до main |
+| siblingExists, baseExists, SHA(base) == record.theirsBlobSha, kind=`modify-vs-modify`/`delete-vs-modify` | user copy-паст / rename sibling-content в base — accept theirs (цей варіант) | Видалити sibling + record. Якщо останній — propagate base content до main |
 | siblingExists, baseExists, SHA(base) ≠ record.theirsBlobSha, kind=`delete-vs-modify` | user створив base manually (custom resolution) | Видалити sibling + record. Якщо останній — propagate base content до main |
 | siblingExists, baseExists, SHA(base) ≠ record.theirsBlobSha, SHA(base) ≠ ours, kind=`modify-vs-modify` | user редагує base, ще не настиг ні з ким збігтись | No-op |
 | siblingExists, baseExists, SHA(base) == record.oursBlobSha | base незмінений, sibling ще там — initial state | No-op |
+| siblingExists (= `.deleted` placeholder), baseExists, SHA(base) == record.oursBlobSha, kind=`modify-vs-delete` | initial state | No-op |
+| siblingExists (= `.deleted` placeholder), baseExists, SHA(base) ≠ record.oursBlobSha, kind=`modify-vs-delete` | user edits base (still rejecting remote delete) — no-op until further action | No-op |
 
 ### Trigger points
 
@@ -499,16 +522,63 @@ siblingSha = siblingExists ? hashFile(record.siblingPath) : null
 
 **Усе** — той самий sync algorithm. ≤ 30 records при типовому scale → full scan <50ms.
 
-### Mtime cache (optional optimization)
+### Mtime + size cache (findChanges-style watermark pattern)
 
-Кожен record несе `siblingMtime + siblingSize` (і `baseMtime + baseSize` де relevant).
-При evaluation:
-- `stat(file)` дешевий — fs syscall
-- Якщо stat == cached → skip read+SHA
-- Якщо ≠ → read content, recompute SHA, оновити cache
+Той самий pattern що `change-detector.ts` у 2.0.0-beta для vault scan.
+Кожен record несе `siblingMtime + siblingSize` (і `baseMtime + baseSize`).
 
-При типовому usage (більшість evals хитають кеш) — eval вкладається у
-кілька мс.
+При evaluation **per record**:
+
+```
+stat = vault.adapter.stat(record.siblingPath)  ← cheap syscall
+if !stat:
+  siblingExists = false
+elif stat.mtime == record.siblingMtime AND stat.size == record.siblingSize:
+  # Cache hit — no read/hash needed
+  siblingExists = true
+  siblingSha = <cached, last known sibling SHA>  ← stored or recomputed-once-cached
+else:
+  # mtime/size touched → must read
+  siblingExists = true
+  content = read(record.siblingPath)
+  siblingSha = computeSha(content)
+  
+  # Refresh mtime/size cache regardless of SHA outcome —
+  # file was touched, future evals shouldn't re-read.
+  record.siblingMtime = stat.mtime
+  record.siblingSize = stat.size
+  persist record  ← atomic write (per ConflictStore persistence contract)
+```
+
+Same pattern apply до `baseMtime + baseSize`. Якщо SHA після перерахунку
+збігається з old cached value — значить файл був "touched" (наприклад,
+mtime бамп через ОС-події), без content change → cache update + no
+resolution action. Якщо SHA differs — user реально щось редагував →
+class fyer вирішує наступну дію.
+
+### Immutable identity vs current content
+
+Один ключовий нюанс:
+
+- **`record.theirsBlobSha`** — **immutable identity** SHA remote content
+  на момент створення конфлікту. Використовується для **dedup** при
+  `ConflictStore.create` (`(vaultPath, theirsBlobSha)` key). НЕ міняється
+  після створення record-а.
+- **`siblingSha`** — поточний SHA sibling-файла, computed at evaluation
+  time (з cache коли можливо).
+
+Класифікатор використовує **current `siblingSha`**, не immutable
+`theirsBlobSha`. Це важливо тому що user **може** edit sibling content
+вручну (типовий приклад: спершу глянути що там, потім поправити перед
+прийняттям). Якщо порівнювати з immutable theirsBlobSha — user's edits
+до sibling ігнорувались би. З поточним siblingSha — case 4 (accept
+theirs) спрацює коли user скопіює *поточний* sibling content до base.
+
+### Performance budget
+
+При типовому usage (більшість записів — cache hit) eval вкладається в
+кілька мс. Cold start (всі mtime потрібно перевірити з диска) — ≤30 stat
+calls + кілька read+hash = ~50ms навіть на mobile.
 
 ### Multi-sibling consequence
 
