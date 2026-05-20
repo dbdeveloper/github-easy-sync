@@ -131,6 +131,11 @@ export default class ConflictStore {
   // "is this path in conflict?" or fetch all siblings for a path in
   // O(1) lookup + O(k) walk, where k = number of siblings on that path.
   private byPath: Map<string, Set<string>> = new Map();
+  // Tertiary index: siblingPath → recordId. Drives ConflictWatcher's
+  // fast-path event check ("is this vault event touching a sibling?")
+  // in O(1). Sibling paths are unique per record by construction
+  // (timestamp+ms suffix), so the map is 1-to-1.
+  private bySibling: Map<string, string> = new Map();
   // Serializes meta-file rewrites so concurrent updateCache calls
   // (Stage 3 classifier scanning records in parallel) don't clobber
   // each other. Same pattern as push-queue's recordBlobUpload.
@@ -158,6 +163,7 @@ export default class ConflictStore {
   async load(): Promise<void> {
     this.records.clear();
     this.byPath.clear();
+    this.bySibling.clear();
     if (!(await this.vault.adapter.exists(this.conflictsRoot))) return;
     const { folders } = await this.vault.adapter.list(this.conflictsRoot);
     for (const folder of folders) {
@@ -356,6 +362,7 @@ export default class ConflictStore {
   async clearAll(): Promise<void> {
     this.records.clear();
     this.byPath.clear();
+    this.bySibling.clear();
     if (await this.vault.adapter.exists(this.conflictsRoot)) {
       await this.vault.adapter.rmdir(this.conflictsRoot, true);
     }
@@ -385,6 +392,19 @@ export default class ConflictStore {
   hasPending(vaultPath: string): boolean {
     const set = this.byPath.get(vaultPath);
     return set !== undefined && set.size > 0;
+  }
+
+  // O(1) sibling lookup — drives ConflictWatcher's fast-path check.
+  // Returns the record whose siblingPath equals the argument, or
+  // undefined when the path is not a known sibling.
+  getBySibling(siblingPath: string): ConflictRecord | undefined {
+    const id = this.bySibling.get(siblingPath);
+    if (id === undefined) return undefined;
+    return this.records.get(id);
+  }
+
+  hasSibling(siblingPath: string): boolean {
+    return this.bySibling.has(siblingPath);
   }
 
   // Derived inConflictFiles set, computed on every call. Cheap because
@@ -418,6 +438,7 @@ export default class ConflictStore {
       this.byPath.set(record.vaultPath, set);
     }
     set.add(record.id);
+    this.bySibling.set(record.siblingPath, record.id);
   }
 
   private unindexRecord(record: ConflictRecord): void {
@@ -427,6 +448,7 @@ export default class ConflictStore {
       set.delete(record.id);
       if (set.size === 0) this.byPath.delete(record.vaultPath);
     }
+    this.bySibling.delete(record.siblingPath);
   }
 
   // Atomic write to <recordDir>/meta.json via .tmp + rename.

@@ -237,6 +237,19 @@ describe("ConflictStore", () => {
       expect(f.store.getByPath("Notes/note.md").map((r) => r.id)).toEqual([rec.id]);
       expect([...f.store.pathSet()]).toEqual(["Notes/note.md"]);
     });
+
+    it("indexes by sibling path (O(1) lookup for ConflictWatcher fast-path)", async () => {
+      await f.store.load();
+      const rec = await f.store.create(baseArgs());
+      expect(f.store.hasSibling(rec.siblingPath)).toBe(true);
+      expect(f.store.getBySibling(rec.siblingPath)?.id).toBe(rec.id);
+      expect(f.store.hasSibling("unknown/path.md")).toBe(false);
+      expect(f.store.getBySibling("unknown/path.md")).toBeUndefined();
+
+      // Delete drops the sibling index too.
+      await f.store.delete(rec.id);
+      expect(f.store.hasSibling(rec.siblingPath)).toBe(false);
+    });
   });
 
   describe("dedup", () => {

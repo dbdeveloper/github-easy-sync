@@ -105,9 +105,9 @@ export class Vault {
     return out;
   }
 
-  // Stub for the events API the plugin's EventsListener subscribes to.
-  // Integration tests don't fire vault events — they drive sync()
-  // directly — so we just record the listener for shape compat.
+  // Subscribe to vault events. ConflictWatcher relies on this for
+  // its delete/modify/rename triggers — Stage 4 tests fire events
+  // synchronously via the test helper `fireEvent` below.
   on(event: string, cb: (...args: unknown[]) => void): EventRef {
     const ref = { event, cb };
     this.listeners.push(ref);
@@ -115,7 +115,33 @@ export class Vault {
   }
 
   off(_event: string, _cb: (...args: unknown[]) => void): void {
-    // no-op
+    // no-op — kept for legacy callers; offref is the modern API.
+  }
+
+  // Remove a previously-registered listener via its EventRef.
+  // Mirrors Obsidian's vault.offref(ref). ConflictWatcher.stop()
+  // calls this for every listener it registered.
+  offref(ref: EventRef): void {
+    const i = this.listeners.indexOf(ref as { event: string; cb: (...args: unknown[]) => void });
+    if (i !== -1) this.listeners.splice(i, 1);
+  }
+
+  // Test-only helper: fire a vault event synchronously to every
+  // registered listener for that event. Production Obsidian fires
+  // these from native code; in tests we drive them manually.
+  // Returns the number of listeners that received the event.
+  fireEvent(event: string, ...args: unknown[]): number {
+    let n = 0;
+    // Snapshot to avoid mutation-during-iteration if a listener
+    // unsubscribes itself in response.
+    const snapshot = [...this.listeners];
+    for (const ref of snapshot) {
+      if (ref.event === event) {
+        ref.cb(...args);
+        n++;
+      }
+    }
+    return n;
   }
 
   get adapter() {

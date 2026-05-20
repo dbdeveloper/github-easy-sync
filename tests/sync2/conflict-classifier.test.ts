@@ -344,7 +344,7 @@ describe("evaluateConflictState (orchestrator)", () => {
     // User opens file explorer, deletes sibling.
     fs.unlinkSync(path.join(f.root, rec.siblingPath));
 
-    const result = await evaluateConflictState(f.store, f.vault, () => 100);
+    const result = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 100);
 
     expect(result.recordsRemoved).toEqual([rec.id]);
     expect([...result.pathsResolved]).toEqual(["Notes/note.md"]);
@@ -363,7 +363,7 @@ describe("evaluateConflictState (orchestrator)", () => {
       path.join(f.root, "Notes/note.md"),
     );
 
-    const result = await evaluateConflictState(f.store, f.vault, () => 100);
+    const result = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 100);
 
     expect(result.recordsRemoved).toEqual([rec.id]);
     expect([...result.pathsResolved]).toEqual(["Notes/note.md"]);
@@ -386,7 +386,7 @@ describe("evaluateConflictState (orchestrator)", () => {
     // User deletes the base file.
     fs.unlinkSync(path.join(f.root, "Notes/note.md"));
 
-    const result = await evaluateConflictState(f.store, f.vault, () => 100);
+    const result = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 100);
 
     expect(new Set(result.recordsRemoved)).toEqual(new Set([a.id, b.id]));
     expect([...result.pathsResolved]).toEqual(["Notes/note.md"]);
@@ -411,7 +411,7 @@ describe("evaluateConflictState (orchestrator)", () => {
     });
     fs.unlinkSync(path.join(f.root, "a.md"));
 
-    const result = await evaluateConflictState(f.store, f.vault, () => 100);
+    const result = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 100);
 
     expect(result.recordsRemoved).toEqual([rec.id]);
     expect([...result.pathsResolved]).toEqual(["a.md"]);
@@ -432,7 +432,7 @@ describe("evaluateConflictState (orchestrator)", () => {
       remoteDevice: "Phone",
     });
 
-    const result = await evaluateConflictState(f.store, f.vault, () => 100);
+    const result = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 100);
 
     expect(result.recordsRemoved).toEqual([rec.id]);
     expect([...result.pathsResolved]).toEqual(["a.md"]);
@@ -455,7 +455,7 @@ describe("evaluateConflictState (orchestrator)", () => {
       baseSha: "ours-sha-1",
     });
 
-    const result = await evaluateConflictState(f.store, f.vault, () => 12345);
+    const result = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 12345);
 
     expect(result.recordsRemoved).toEqual([]);
     expect(result.pathsResolved.size).toBe(0);
@@ -469,7 +469,7 @@ describe("evaluateConflictState (orchestrator)", () => {
     const rec = await createBaseConflict();
     // Sibling was just created → cache reflects current state.
 
-    const result = await evaluateConflictState(f.store, f.vault, () => 100);
+    const result = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 100);
 
     expect(result.recordsRefreshed).toEqual([]);
   });
@@ -483,7 +483,7 @@ describe("evaluateConflictState (orchestrator)", () => {
     fs.writeFileSync(siblingAbs, "edited by user\n");
     const newStat = fs.statSync(siblingAbs);
 
-    const result = await evaluateConflictState(f.store, f.vault, () => 200);
+    const result = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 200);
 
     expect(result.recordsRefreshed).toEqual([rec.id]);
     const updated = f.store.get(rec.id)!;
@@ -517,7 +517,7 @@ describe("evaluateConflictState (orchestrator)", () => {
     // User deletes only A's sibling.
     fs.unlinkSync(path.join(f.root, a.siblingPath));
 
-    const r1 = await evaluateConflictState(f.store, f.vault, () => 100);
+    const r1 = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 100);
 
     expect(r1.recordsRemoved).toEqual([a.id]);
     // Path NOT closed — B still active.
@@ -526,7 +526,7 @@ describe("evaluateConflictState (orchestrator)", () => {
 
     // Now user deletes B too.
     fs.unlinkSync(path.join(f.root, b.siblingPath));
-    const r2 = await evaluateConflictState(f.store, f.vault, () => 200);
+    const r2 = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 200);
     expect(r2.recordsRemoved).toEqual([b.id]);
     expect([...r2.pathsResolved]).toEqual(["Notes/note.md"]);
     expect(f.store.getAll().length).toBe(0);
@@ -562,7 +562,7 @@ describe("evaluateConflictState (orchestrator)", () => {
     // User deletes sibling for a.md ONLY. b.md untouched.
     fs.unlinkSync(path.join(f.root, ra.siblingPath));
 
-    const result = await evaluateConflictState(f.store, f.vault, () => 100);
+    const result = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 100);
 
     expect(result.recordsRemoved).toEqual([ra.id]);
     expect([...result.pathsResolved]).toEqual(["a.md"]);
@@ -576,10 +576,10 @@ describe("evaluateConflictState (orchestrator)", () => {
     const rec = await createBaseConflict();
     fs.unlinkSync(path.join(f.root, rec.siblingPath));
 
-    const first = await evaluateConflictState(f.store, f.vault, () => 100);
+    const first = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 100);
     expect(first.recordsRemoved).toEqual([rec.id]);
 
-    const second = await evaluateConflictState(f.store, f.vault, () => 200);
+    const second = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 200);
     expect(second.recordsRemoved).toEqual([]);
     expect(second.pathsResolved.size).toBe(0);
     expect(second.recordsRefreshed).toEqual([]);
@@ -589,7 +589,7 @@ describe("evaluateConflictState (orchestrator)", () => {
 
   it("empty store → empty result, no I/O failures", async () => {
     await f.store.load();
-    const result = await evaluateConflictState(f.store, f.vault, () => 100);
+    const result = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 100);
     expect(result.recordsRemoved).toEqual([]);
     expect(result.pathsResolved.size).toBe(0);
     expect(result.recordsRefreshed).toEqual([]);
