@@ -70,12 +70,26 @@ unit-spec файлами + 65 інтеграційними тестами A1–L
 Алгоритми resolve-конфліктів з 2.0.0-beta — переглядаємо критично і
 **замінюємо новими** з огляду на pseudo-merge model:
 
-- `applyRemoteAddOrModify` (pull-side conflict path)
-- `reconcileBatchAgainstHead` Case 4 (push-side conflict path)
+- `applyRemoteAddOrModify` (pull-side conflict path) — переписується:
+  text 3-way merge зберігається; binary тепер register-as-conflict
+  замість atomic mtime; sibling write через новий conflict-branch flow
+- `reconcileBatchAgainstHead` Case 4 (push-side conflict path) — те саме
+- `resolveBinaryConflict` — **повністю видаляється** (binary тепер
+  завжди йде через conflict-branch sibling pattern; раніше це був
+  silent atomic-mtime picker що з 2.0.0-beta lost data without user awareness)
 - `cascadeDeferRemoval`
 - `ConflictModal` (модальне вікно per-file під час sync) — прибирається
-- `ConflictStore` — суттєво розширюється
+- `onConflict` callback з sync2-manager (заміщується silent sibling write через ConflictStore)
+- `ConflictStore` — суттєво розширюється: persistent record schema з `kind`
+  field (modify-vs-modify / delete-vs-modify / modify-vs-delete),
+  mtime/size cache, crash-resistant atomic write
 - `ConflictView` (sync2-conflict-view) — повністю видаляється. Новий diff-edit UI буде створено на стадії 2 (Diff2) (окремий шар)
+
+**Зберігається без змін:**
+- `mergeText` (з `three-way-merge.ts`) — text 3-way merge alg
+- `resolvePluginJsConflict` — plugin-js atomic semver (semver = explicit author intent)
+- `isAtomicPluginFile`, `compareSemver`, `readPluginVersion` (з `plugin-js.ts`)
+- `hasTextExtension`, `pluginRootOf` (з `utils.ts` + `plugin-js.ts`)
 
 Нова реалізація — згідно з цим документом, з нуля, з фокусом на
 **продуктивність, ясність, передбачуваність і тестованість**.
@@ -132,7 +146,7 @@ drain():
        - plugin toggled off→on mid-session (events not registered window)
        - OS-level file-watcher edge cases на mobile suspension
      ConflictStore — authoritative source; sweep verifies state
-     proти actual vault file system. Якщо resolution → cleanup state
+     проти actual vault file system. Якщо resolution → cleanup state
      + synthesize side-batches; вони обробляться у цьому ж drain.
   1. pull main (як зараз — у drain top через pullIfNeeded)
   
@@ -235,13 +249,36 @@ markers).
 | Тип файлу | Класифікатор | Auto-merge стратегія | Успіх | Невдача → step 4 |
 |---|---|---|---|---|
 | Текст | `hasTextExtension(path)` (з utils.ts 2.0.0-beta) | **3-way merge** `mergeText(base, ours, theirs)` (з `three-way-merge.ts`) | Clean merge без markers — use merged content as "ours" | Conflict markers → register conflict |
-| Plugin-js | `isAtomicPluginFile(path, configDir)` (з plugin-js.ts) — `main.js` або `manifest.json` під plugin folder | **Atomic semver** — read `manifest.json` обох сторін, higher version wins. Mtime tie-break | Resolution clear → apply winner | Same version + mtime tie → register conflict |
-| Binary | усе інше (`hasTextExtension` returns false) | **Atomic mtime** | local.mtime ≠ remote.mtime → newer wins; apply | Mtime tie → register conflict |
+| Plugin-js | `isAtomicPluginFile(path, configDir)` (з plugin-js.ts) — `main.js` або `manifest.json` під plugin folder | **Atomic semver** — read `manifest.json` обох сторін, higher version wins. Mtime tie-break зберігається з 2.0.0-beta | Resolution clear → apply winner | Identical version + identical mtime → register conflict |
+| Binary | усе інше (`hasTextExtension` returns false) | **No auto-merge** — pseudo-merge mode дає user sibling-pattern resolution через file ops (delete sibling, rename, etc.), як для тексту | — | **Завжди → step 4 (register as conflict)** |
+
+**Зміна для binary vs 2.0.0-beta:** 2.0.0-beta робить silent atomic
+mtime для binary бо там не було user-facing UI що showed би binary diff
+(ConflictModal був text-only). Pseudo-merge mode ламає це обмеження —
+sibling-file pattern працює для **будь-якого** file type. Binary
+sibling `image.conflict-from-Phone-<ts>.png` стає поруч з `image.png`
+у vault; user resolves тими ж file ops що і для тексту (delete sibling
+= keep ours, rename sibling → base = accept theirs). **Silent picking
+з mtime = data loss without user awareness** — pseudo-merge цього
+уникає для binary.
+
+**Plugin-js атомік семвер зберігається:** semver — це **explicit
+author intent** (a not арбітражне picking), 3-way merge minified JS
+crashes Obsidian, sibling pattern для `main.js` semantically дивний
+(user не редагує bundled JS). Тому silent semver resolution OK.
+
+**Adoption flow (перший sync проти non-bare remote — окремий layer)**
+лишається на atomic mtime для всіх file types, включно з binary.
+Adoption — це pre-conflict-resolution context: немає shared base, нема
+ConflictStore як setup; mtime — єдиний reasonable heuristic. Цього
+layer pseudo-merge не торкається.
 
 Класифікатори і реалізації — **успадковані з 2.0.0-beta** (через існуючі
-unit-тести E2/E3/E4 для plugin-js, G4 для binary). Pseudo-merge mode
-переписує "що робити при невдачі" — push до conflict-branch замість
-`ConflictModal` / `applyRemoteAddOrModify` direct sibling write.
+unit-тести: E3/E4 для plugin-js — зберігаються; E2/G4 для binary —
+переписуються бо semantics змінюється; E1 reconcile-onload — переглянути).
+Pseudo-merge mode переписує "що робити при невдачі" — push до
+conflict-branch замість `ConflictModal` / `applyRemoteAddOrModify` direct
+sibling write.
 
 ### Two entry points, both run auto-merge first
 
@@ -279,17 +316,20 @@ same atomic resolution functions.
 
 **Pull-side (drain step 1, pullIfNeeded):**
 - pull виявляє SHA divergence на файлі який локально модифікований
-- attempt auto-merge (3-way text / atomic binary / atomic plugin-js)
+- attempt auto-merge:
+  - text → 3-way merge `mergeText`
+  - plugin-js → atomic semver
+  - binary → no attempt (завжди register as conflict)
 - ЯКЩО auto-merge успіх → apply merged content, recordSync, NOT registered as conflict
 - ЯКЩО auto-merge невдалий:
   - додає path у `inConflictFiles`
-  - зберігає theirsBlobSha у ConflictStore
+  - зберігає theirsBlobSha у ConflictStore (з kind = `modify-vs-modify` чи `delete-vs-modify` залежно від base presence)
   - sibling-файл write'иться у vault
   - на наступному push step branch створюється (якщо ще нема)
 
 **Push-side (drain step 3-4, processBatch):**
 - reconcile case 4 виявляє SHA-divergence vs main HEAD
-- attempt auto-merge (those самі стратегії)
+- attempt auto-merge (ті ж стратегії)
 - ЯКЩО auto-merge успіх → use merged content, push як plainPath до main
 - ЯКЩО auto-merge невдалий → step 4 flow (push до branch, sibling, register)
 
@@ -820,17 +860,36 @@ easy-sync-conflicts-<deviceLabel>-<YYYYMMDDHHMMSS>
 
 **Q-series: Recovery sweeps**
 - Q1: onload sweep with deleted sibling (case 1 fires retroactively)
-- Q2: onload sweep with orphan sibling (no ConflictStore record)
+- Q2: onload sweep with orphan sibling (no ConflictStore record) → ignored by-default
 - Q3: onload sweep with orphan record (no sibling on disk)
 - Q4: branch state mismatch — local has, remote gone → recreate
 - Q5: branch state mismatch — local empty, remote has → finalize
 
+**R-series: Auto-merge attempt**
+- R1: text 3-way merge clean → push merged до main (not registered as conflict)
+- R2: text 3-way merge marker'd → register as conflict (branch + sibling)
+- R3: plugin-js semver higher version wins → atomic apply (E3 ported)
+- R4: plugin-js same version + mtime delta → tie-break wins (E4 ported)
+- R5: plugin-js identical version + identical mtime → register as conflict (new edge)
+- **R6 (replaces E2)**: binary modified both sides → **register as conflict** (sibling pattern), NOT atomic mtime. User resolves via file ops.
+- **R7 (replaces G4)**: binary across two devices → same — register as conflict, no silent picking.
+
+**Existing 2.0.0-beta tests — fate:**
+- E1 (reconcile-onload) — переглянути, частково valid
+- E2 (binary atomic) — **delete** (replaced by R6)
+- E3 (plugin-js semver) — ported as R3
+- E4 (plugin-js same-version mtime) — ported as R4, R5 added
+- G4 (binary atomic across devices) — **delete** (replaced by R7)
+
 Unit tests — point-coverage для:
-- `ConflictWatcher` event handler
-- `evaluateResolutionFor` 3-case classifier
-- `gitBlobSha` cache invalidation
+- `ConflictWatcher` event handler (fast-path Set check)
+- `evaluateConflictState` 3-case classifier (per-kind paths)
+- ConflictStore atomic write (crash mid-write recovery)
+- ConflictStore record schema validation (defensive coercion on load)
+- mtime+size cache invalidation
 - split-push partition logic
 - per-half marker handling
+- Auto-merge attempt branching (text 3-way / plugin-js semver / binary skip)
 
 ---
 
@@ -931,16 +990,22 @@ workflow. Але самостійно теж дає mobile users важливи�
 
 1. **Прибрати custom commit messages** (API + 2 команди + L2/L3 тести +
    `isolated` cleanup)
-2. **`inConflictFiles` + ConflictStore extensions** (multi-sibling, дедуп,
-   orphan cleanup, gitBlobSha cache)
-3. **ConflictWatcher** — vault event listener + drain-start sweep + onload sweep
-4. **Conflict detection** — pull-side + push-side entry points, обидва
-   наповнюють shared state
-5. **Split-push у processBatch** (β) + per-half marker + branch lifecycle
-6. **Branch operations** — create, push (з rebase forward), finalize merge, deleteRef
-7. **Recovery sweeps** (onload state + ConflictStore catch-up)
-8. **4-point visibility warnings** (status bar + pre-sync modal + settings + ribbon)
-9. **Видалити старий conflict-resolution code** (applyRemoteAddOrModify, reconcileBatchAgainstHead Case 4, ConflictModal, cascadeDeferRemoval)
-10. **CLAUDE.md + README.md update** — нова conflict resolution секція
-11. **Integration tests M/N/O/P/Q series**
-12. **Cleanup IMPLEMENTATION_PLAN.md** — прибрати все що суперечить цьому документу
+2. **ConflictStore schema rewrite + persistence** (multi-sibling, kind
+   field, mtime/size cache, atomic write protocol, crash-resistant
+   load, dedup за `(vaultPath, theirsBlobSha)`)
+3. **`evaluateConflictState()` algorithm** — unified 7-row classifier,
+   per-kind handling, mtime cache
+4. **ConflictWatcher** — vault event listener + fast-path Set check + delegate to `evaluateConflictState()`
+5. **Conflict detection rebuild** — pull-side + push-side entry points,
+   обидва пробують auto-merge (text 3-way / plugin-js semver), невдача
+   → register conflict, обидва наповнюють shared ConflictStore
+6. **Видалити `resolveBinaryConflict`** — binary тепер register as
+   conflict (no silent atomic mtime)
+7. **Split-push у processBatch** (β) + per-half marker + branch lifecycle
+8. **Branch operations** — create, push (з rebase forward), finalize merge, deleteRef
+9. **Drain wraps**: pause ConflictWatcher → drain-start sweep → batches → drain-end sweep → finalize check → resume
+10. **4-point visibility warnings** (status bar + pre-sync modal + settings + ribbon)
+11. **Видалити старий conflict-resolution code** (`applyRemoteAddOrModify` rewrite, `reconcileBatchAgainstHead` Case 4 rewrite, `ConflictModal`, `onConflict` callback, `cascadeDeferRemoval`, `resolveBinaryConflict`, `ConflictView`)
+12. **CLAUDE.md + README.md update** — нова conflict resolution секція
+13. **Integration tests M/N/O/P/Q/R series**: M (branch lifecycle), N (split-push), O (resolution detection), P (multi-device), Q (recovery sweeps), R (auto-merge attempt; replaces E2/G4 for binary)
+14. **Cleanup IMPLEMENTATION_PLAN.md** — прибрати все що суперечить цьому документу (stage 2)
