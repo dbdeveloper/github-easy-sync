@@ -17,11 +17,15 @@ The conflict-view UX is the one area still openly known to be primitive; everyth
 > **⚠️ Planned rework — Pseudo-merge mode (foundation).** The entire conflict-resolution layer is being rebuilt per [`PSEUDO-MERGE-MODE.md`](./PSEUDO-MERGE-MODE.md). High-level summary:
 > - **User-visible removal:** manual commit messages disappear — 2 of 4 Obsidian commands (`(custom message)` variants) gone. Everything else stays as in 2.0.0-beta from the user's POV.
 > - **Under the hood:**
->   - Conflict files live on a per-device GitHub branch (`easy-sync-conflicts-<deviceLabel>-<ts>`) — not just local siblings.
->   - Resolution detection is **event-driven** via `vault.on('delete' | 'modify' | 'rename')` — explicit exception to the engine's polling rule (see "Polling model" below); conflict resolution is a separate layer from sync engine.
->   - `processBatch` does **split-push**: non-conflict files → main, conflict files → conflict-branch (variant β).
+>   - Conflict files live on a per-device GitHub branch (`easy-sync-conflicts-<deviceLabel>-<YYYYMMDDHHMMSS>-<mmm>` — millisecond suffix avoids cross-device name collisions on default `"Obsidian"` label) — not just local siblings.
+>   - Resolution detection is **event-driven** via `vault.on('delete' | 'modify' | 'rename')` — explicit exception to the engine's polling rule (see "Polling model" below); conflict resolution is a separate subsystem from sync engine.
+>   - `processBatch` does **split-push**: non-conflict files → main, conflict files → conflict-branch (variant β). Drain wraps batch processing in pause/sweep — ConflictWatcher paused mid-drain, drain-start + drain-end sweeps re-evaluate ConflictStore vs vault file system state.
+>   - **Auto-merge attempt** preserved from 2.0.0-beta with one change: text → 3-way merge (`mergeText`); plugin-js → atomic semver; **binary → no auto-merge, always register as conflict** (`resolveBinaryConflict` removed — sibling pattern now works for any file type, avoiding silent atomic-mtime data loss).
+>   - Three conflict **kinds** captured in ConflictStore record schema: `modify-vs-modify`, `delete-vs-modify`, `modify-vs-delete` (the last uses 0-byte `.deleted` suffix placeholder sibling).
 >   - All resolution actions available through standard Obsidian file operations (delete sibling, rename over base, edit to SHA-identity, delete base) — no plugin UI required for the mechanism.
->   - The 2.0.0-beta conflict-resolution code (`applyRemoteAddOrModify`, `reconcileBatchAgainstHead` Case 4, `ConflictModal`, `cascadeDeferRemoval`) is **replaced from scratch**, not extended.
+>   - ConflictStore is the **single source of truth**; `inConflictFiles` is derived from `ConflictStore.records` (not persisted separately). Records carry `siblingSha`/`baseSha` as **cached current** SHAs vs immutable `theirsBlobSha` (dedup identity).
+>   - ConflictStore persistence follows **3-step atomic create protocol** (stage sibling content → atomic write meta.json → copy sibling to vault), with per-crash-window recovery sweep on onload. Concretizes existing principle #9 "Crash resilience" from `IMPLEMENTATION_PLAN.md`.
+>   - The 2.0.0-beta conflict-resolution code (`applyRemoteAddOrModify`, `reconcileBatchAgainstHead` Case 4, `ConflictModal`, `onConflict` callback, `cascadeDeferRemoval`, `resolveBinaryConflict`) is **replaced from scratch**, not extended.
 >   - `EnqueueMeta.isolated` field is **removed** (verified dead code after manual commit messages go away).
 >
 > **⚠️ Planned rework — Diff-Edit widget (`diff2` sub-project).** The conflict-view UI/UX is being reworked per [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md). After pseudo-merge mode lands, **Diff2 becomes a pure UX layer** on top of it — diff side-by-side, multi-sibling navigation, bulk-resolve buttons. Nothing in Diff2 is critical for the resolution mechanism. `IMPLEMENTATION_PLAN.md` is partially outdated; **`PSEUDO-MERGE-MODE.md` has priority** wherever the two conflict.
