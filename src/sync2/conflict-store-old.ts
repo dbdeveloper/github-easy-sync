@@ -33,7 +33,7 @@ import { UNKNOWN_DEVICE_LABEL } from "./commit-templates";
 // (Same directory as the original. `Notes/note.md` →
 // `Notes/note.conflict-from-Phone-2026-05-08T15-30-00Z.md`.)
 
-const CONFLICTS_DIRNAME = ".conflicts";
+const CONFLICTS_DIRNAME = ".conflicts-old";
 const META_FILE = "meta.json";
 
 export interface ConflictRecord {

@@ -6,7 +6,7 @@ import {
   groupByVaultPath,
   formatTs,
 } from "../../src/sync2/views/conflict-view-helpers";
-import { ConflictRecord } from "../../src/sync2/conflict-store";
+import { ConflictRecord } from "../../src/sync2/conflict-store-old";
 
 function rec(o: Partial<ConflictRecord> & Pick<ConflictRecord, "id" | "vaultPath" | "ts">): ConflictRecord {
   return {

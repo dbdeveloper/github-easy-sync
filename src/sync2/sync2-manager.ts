@@ -30,7 +30,7 @@ import {
   DEFAULT_INIT_COMMIT_MESSAGE,
   parseDeviceSuffix,
 } from "./commit-templates";
-import ConflictStore from "./conflict-store";
+import ConflictStore from "./conflict-store-old";
 import { normalizeText } from "./text-normalize";
 import { ConflictResolution, FileChange } from "./types";
 

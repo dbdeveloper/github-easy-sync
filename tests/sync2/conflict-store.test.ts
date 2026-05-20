@@ -14,7 +14,7 @@ import ConflictStore, {
   buildSiblingPath,
   extensionOf,
   ConflictRecord,
-} from "../../src/sync2/conflict-store";
+} from "../../src/sync2/conflict-store-old";
 import { Vault } from "../../mock-obsidian";
 
 const CONFIG_DIR = ".obsidian";
@@ -56,7 +56,7 @@ function fixture(): {
     CONFIG_DIR,
     "plugins",
     SELF_PLUGIN_ID,
-    ".conflicts",
+    ".conflicts-old",
   );
   return { root, vault, store, conflictsRoot, clock };
 }

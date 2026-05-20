@@ -26,7 +26,7 @@ import ChangeDetector from "../../../../src/sync2/change-detector";
 import GitignoreInvariants from "../../../../src/sync2/gitignore-invariants";
 import PushQueue from "../../../../src/sync2/push-queue";
 import TreeBuilder from "../../../../src/sync2/tree-builder";
-import ConflictStore from "../../../../src/sync2/conflict-store";
+import ConflictStore from "../../../../src/sync2/conflict-store-old";
 import {
   GitHubSyncSettings,
   DEFAULT_SETTINGS,

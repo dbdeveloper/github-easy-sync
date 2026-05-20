@@ -32,7 +32,7 @@ import {
 } from "./sync2/views/conflict-view";
 import { DiffPane } from "./sync2/views/diff-pane";
 import { ConflictStatusBar } from "./sync2/views/conflict-status-bar";
-import ConflictStore from "./sync2/conflict-store";
+import ConflictStore from "./sync2/conflict-store-old";
 import { mergeIntoOne } from "./sync2/conflict-merge-all";
 import manifest from "../manifest.json";
 

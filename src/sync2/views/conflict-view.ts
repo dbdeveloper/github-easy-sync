@@ -5,7 +5,7 @@
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import ConflictStore, {
   ConflictRecord,
-} from "../conflict-store";
+} from "../conflict-store-old";
 import { DiffPane } from "./diff-pane";
 import { formatTs, groupByVaultPath } from "./conflict-view-helpers";
 

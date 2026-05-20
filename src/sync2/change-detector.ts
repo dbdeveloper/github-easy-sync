@@ -45,7 +45,7 @@ export async function isSyncable(
   // blocks them when sync2's invariant gitignore is in place, but the
   // hardcoded rule guards setups (tests, partial init) where that
   // gitignore hasn't been seeded yet.
-  const conflictsPrefix = `${configDir}/plugins/${selfPluginId}/.conflicts/`;
+  const conflictsPrefix = `${configDir}/plugins/${selfPluginId}/.conflicts-old/`;
   if (path.startsWith(conflictsPrefix)) return false;
   if (path === ".git" || path.startsWith(".git/")) return false;
   if (path.includes("/.git/")) return false;

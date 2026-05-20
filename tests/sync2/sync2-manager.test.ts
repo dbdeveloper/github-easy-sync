@@ -295,7 +295,7 @@ function fixture(opts?: {
     | { kind: "deferred" }
     | { kind: "merged-into-one"; content: string }
   >;
-  conflictStore?: import("../../src/sync2/conflict-store").default;
+  conflictStore?: import("../../src/sync2/conflict-store-old").default;
   accumulateOfflineSyncs?: boolean;
   onProgress?: (msg: string) => {
     update: (m: string) => void;
@@ -1655,7 +1655,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
 
     it("kind=deferred: ConflictStore.create called, path NOT in this push, local file unchanged", async () => {
       const ConflictStore = (
-        await import("../../src/sync2/conflict-store")
+        await import("../../src/sync2/conflict-store-old")
       ).default;
       const f2 = fixture({}); // we'll wire the conflict store separately
       const conflictStore = new ConflictStore({
@@ -1788,7 +1788,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
       // returns the UNKNOWN_DEVICE_LABEL sentinel; the sibling
       // file should reflect that, NOT the local device's label.
       const ConflictStore = (
-        await import("../../src/sync2/conflict-store")
+        await import("../../src/sync2/conflict-store-old")
       ).default;
       const f2 = fixture({});
       const conflictStore = new ConflictStore({
@@ -1856,7 +1856,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
 
     it("pending-conflict path is dropped from enqueue; push only carries clean paths", async () => {
       const ConflictStore = (
-        await import("../../src/sync2/conflict-store")
+        await import("../../src/sync2/conflict-store-old")
       ).default;
       const f2 = fixture({});
       const conflictStore = new ConflictStore({
@@ -1926,7 +1926,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
 
     it("resolving the conflict (delete sibling) unblocks the path on the next sync", async () => {
       const ConflictStore = (
-        await import("../../src/sync2/conflict-store")
+        await import("../../src/sync2/conflict-store-old")
       ).default;
       const f2 = fixture({});
       const conflictStore = new ConflictStore({
@@ -2029,7 +2029,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
       // c.md still go through. Expect count = 2 (filtered length),
       // not 3 (raw findChanges length).
       const ConflictStore = (
-        await import("../../src/sync2/conflict-store")
+        await import("../../src/sync2/conflict-store-old")
       ).default;
       const calls: number[] = [];
       const f2 = fixture({});

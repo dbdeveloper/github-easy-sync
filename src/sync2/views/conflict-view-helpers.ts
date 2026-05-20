@@ -6,7 +6,7 @@
 // tests can import them without dragging in Obsidian's ItemView
 // (which crashes outside the live Obsidian environment).
 
-import { ConflictRecord } from "../conflict-store";
+import { ConflictRecord } from "../conflict-store-old";
 
 // Group conflict records by their target vault path. Inner arrays
 // sorted by ts ascending; outer key order is "earliest first ts per
