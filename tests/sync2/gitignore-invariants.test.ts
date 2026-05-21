@@ -101,6 +101,28 @@ describe("GitignoreInvariants.enforce", () => {
     expect(content).toContain("workspace.json");
     expect(content).toContain("Recommended defaults");
     expect(content).toContain("plugins/*/*");
+    // `*.log` rule moved from configDir to root .gitignore — the
+    // plugin's log lives at the vault root now, so the matching
+    // gitignore rule lives there too.
+    expect(content).not.toContain("*.log");
+  });
+
+  it("creates root .gitignore with *.log rule + conflict-sibling invariant when absent", async () => {
+    const rootGitignorePath = path.join(f.root, ".gitignore");
+    expect(fs.existsSync(rootGitignorePath)).toBe(false);
+    await f.inv.enforce();
+    const content = fs.readFileSync(rootGitignorePath, "utf8");
+    // Invariant block: conflict-sibling files must never propagate
+    // across devices.
+    expect(content).toContain(INVARIANT_BEGIN);
+    expect(content).toContain("*.conflict-from-*");
+    // Recommended defaults: *.log (the plugin's own log lives at
+    // <vault>/<plugin-id>.log; remove the rule to opt into log
+    // sync).
+    expect(content).toContain("*.log");
+    // OS noise + editor junk seeded too.
+    expect(content).toContain(".DS_Store");
+    expect(content).toContain("*.swp");
   });
 
   it("creates self-plugin/.gitignore with canonical allowlist when absent", async () => {

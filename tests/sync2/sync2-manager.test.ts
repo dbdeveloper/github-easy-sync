@@ -391,8 +391,7 @@ function fixture(opts?: {
     logger: silentLogger(),
     configDir: CONFIG_DIR,
     selfPluginId: SELF_PLUGIN_ID,
-    commitMessageAll: "Sync at {date} {time}",
-    commitMessageFile: "Update {filename} at {date} {time}",
+    commitMessage: "Sync at {date} {time}",
     deviceLabel: "test-device",
     conflictStore: defaultConflictStore,
     accumulateOfflineSyncs: opts?.accumulateOfflineSyncs ?? false,
@@ -718,7 +717,7 @@ describe("Sync2Manager.syncAll — basic flow", () => {
     expect(f.client.calls.filter((c) => c.op === "createCommit")).toEqual([]);
   });
 
-  it("syncFile: pushes a single-file batch with file-template message", async () => {
+  it("syncFile: pushes a single-file batch with the unified commit message", async () => {
     writeVaultFile(f.root, "Notes/note.md", "fresh\n");
     f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
 
@@ -726,10 +725,11 @@ describe("Sync2Manager.syncAll — basic flow", () => {
 
     const commits = f.client.calls.filter((c) => c.op === "createCommit");
     expect(commits).toHaveLength(1);
-    // legacy 6.5: "Update {filename} at {date} {time}" + " (test-device)"
-    // suffix appended via appendDeviceSuffix.
+    // Unified template: "Sync at {date} {time}" + " (test-device)"
+    // suffix appended via appendDeviceSuffix. syncFile no longer
+    // has a separate per-file template.
     expect((commits[0].args as { message: string }).message).toBe(
-      "Update note.md at 2026-05-03 09:38:23.000 (test-device)",
+      "Sync at 2026-05-03 09:38:23.000 (test-device)",
     );
 
     // Tree contains exactly the one file we asked for.
@@ -1473,8 +1473,7 @@ describe("Sync2Manager.syncAll — basic flow", () => {
         logger: silentLogger(),
         configDir: CONFIG_DIR,
         selfPluginId: SELF_PLUGIN_ID,
-        commitMessageAll: "Sync at {date} {time}",
-        commitMessageFile: "Update {filename} at {date} {time}",
+        commitMessage: "Sync at {date} {time}",
         deviceLabel: "test-device",
         conflictStore,
         onLocalCommitted: (n) => calls.push(n),

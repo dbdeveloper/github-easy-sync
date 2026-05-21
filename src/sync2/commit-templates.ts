@@ -4,14 +4,12 @@
 
 import { CommitMessagePlaceholders } from "./types";
 
-// Sync2 commit-message templates support these placeholders. Each is
+// Sync2 commit-message template supports these placeholders. Each is
 // substituted only if the matching field is supplied; unknown braces
 // are left untouched so users can include literal `{` in their text.
 //
 //   {date}     YYYY-MM-DD UTC, e.g. "2026-05-03"
 //   {time}     HH:MM:SS.ccc UTC (ms-precision), e.g. "09:38:23.123"
-//   {filename} basename of a single-file action, e.g. "note.md"
-//   {path}     full vault-relative path, e.g. "Folder/note.md"
 //
 // {date} and {time} both come from the same Date in placeholders.date
 // — they're two views of the same instant, not independent values.
@@ -20,6 +18,13 @@ import { CommitMessagePlaceholders } from "./types";
 // multi-device syncs without forcing the user to remember to add
 // {time}.
 //
+// One unified template drives both syncAll AND syncFile (the
+// "Commit message" setting). File-identity placeholders like
+// {filename}/{path} are intentionally absent: pseudo-merge's
+// split-push + accumulate-offline-syncs mean a commit's content may
+// include more than the file the user clicked Sync on, so a
+// per-file template would mislead.
+//
 // deviceLabel is NOT a template placeholder — it's appended in a fixed
 // trailing position by appendDeviceSuffix(), so any commit message
 // produced by sync2 ends with `" (deviceLabel)"`. That fixed position
@@ -27,9 +32,7 @@ import { CommitMessagePlaceholders } from "./types";
 // how the user customized their template, and prevents users from
 // accidentally dropping the device tag while editing the template.
 
-export const DEFAULT_COMMIT_MESSAGE_ALL = "Sync at {date} {time}";
-export const DEFAULT_COMMIT_MESSAGE_FILE =
-  "Update {filename} at {date} {time}";
+export const DEFAULT_COMMIT_MESSAGE = "Sync at {date} {time}";
 
 // Used as the seed commit message when sync2 bootstraps a bare repo
 // (no commits yet). The seed is created via the Contents API with a
@@ -59,12 +62,6 @@ export function applyTemplate(
     // or neither.
     out = out.replace(/\{date\}/g, formatDateOnly(placeholders.date));
     out = out.replace(/\{time\}/g, formatTimeOnly(placeholders.date));
-  }
-  if (placeholders.filename !== undefined) {
-    out = out.replace(/\{filename\}/g, placeholders.filename);
-  }
-  if (placeholders.path !== undefined) {
-    out = out.replace(/\{path\}/g, placeholders.path);
   }
   return out;
 }

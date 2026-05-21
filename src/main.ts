@@ -84,7 +84,11 @@ export default class GitHubSyncPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
-    this.logger = new Logger(this.app.vault, this.settings.enableLogging);
+    this.logger = new Logger(
+      this.app.vault,
+      manifest.id,
+      this.settings.enableLogging,
+    );
     this.logger.init();
 
     this.addSettingTab(new GitHubSyncSettingsTab(this.app, this));
@@ -293,10 +297,8 @@ export default class GitHubSyncPlugin extends Plugin {
       // Templates + label read live from settings so the user can
       // change them in the settings tab and the next syncAll picks
       // up the new value — no plugin reload needed.
-      commitMessageAll: () =>
-        this.settings.commitMessageAll ?? "Sync at {date} {time}",
-      commitMessageFile: () =>
-        this.settings.commitMessageFile ?? "Update {filename} at {date} {time}",
+      commitMessage: () =>
+        this.settings.commitMessage ?? "Sync at {date} {time}",
       deviceLabel: () => this.settings.deviceLabel ?? "Obsidian",
       // Remote identity read live so the manager catches a mid-session
       // settings change (user edits the repo coords in the settings

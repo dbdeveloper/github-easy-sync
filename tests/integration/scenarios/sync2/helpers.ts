@@ -111,7 +111,7 @@ export async function createSync2Client(
     syncConfigDir: opts.syncConfigDir ?? true,
   };
 
-  const logger = new Logger(vault, opts.enableLogging ?? false);
+  const logger = new Logger(vault, SELF_PLUGIN_ID, opts.enableLogging ?? false);
   const client = new GithubClient(settings, logger);
 
   const store = new SnapshotStore(vault);
@@ -176,8 +176,7 @@ export async function createSync2Client(
     // Pass through live getters so I-series tests can mutate
     // `settings.deviceLabel` / `settings.commitMessage*` between
     // syncs and the next push picks up the new value.
-    commitMessageAll: () => settings.commitMessageAll ?? "Sync2 test {date}",
-    commitMessageFile: () => settings.commitMessageFile ?? "Update {filename}",
+    commitMessage: () => settings.commitMessage ?? "Sync2 test {date}",
     deviceLabel: () => settings.deviceLabel ?? "sync2-int-test",
     remoteIdentity: () => ({
       owner: settings.githubOwner,

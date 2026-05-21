@@ -408,8 +408,12 @@ credentials → one Sync click → reload → done.
 ### Logging
 
 - **Enable logging** — appends every operation to
-  `<vault>/.obsidian/github-easy-sync.log`. Off by default. Turn it
-  on temporarily when reproducing a bug for an issue report.
+  `<vault>/<plugin-id>.log` (e.g. `<vault>/github-easy-sync.log`).
+  Off by default. The log lives at the vault root so you can open
+  it directly in Obsidian. `*.log` is gitignored at the vault root
+  by default — remove that rule if you want the log to sync to
+  GitHub (useful for analysing mobile logs from desktop, but
+  multi-device writes will collide on the same filename).
 
 ---
 

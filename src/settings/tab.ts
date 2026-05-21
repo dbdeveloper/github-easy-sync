@@ -12,11 +12,12 @@ import {
   requestUrl,
 } from "obsidian";
 import GitHubSyncPlugin from "src/main";
-import { copyToClipboard } from "src/utils";
+import { logFileNameFor } from "src/logger";
 import {
   applyTemplate,
   appendDeviceSuffix,
 } from "src/sync2/commit-templates";
+import manifest from "../../manifest.json";
 
 // Sync2-only settings tab. Mirrors the shape of GitHubSyncSettings —
 // every input here writes to one field and persists via saveSettings.
@@ -289,8 +290,6 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     // device-label input can also nudge them when label changes.
     const previewSamples = {
       date: new Date(),
-      filename: "test.md",
-      path: "Notes/test.md",
     };
     const previews: Array<() => void> = [];
     const renderPreview = (template: string): string => {
@@ -314,7 +313,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.deviceLabel = value.trim() || "Obsidian";
             await this.plugin.saveSettings();
-            // Refresh both commit-message previews — the trailing
+            // Refresh the commit-message preview — the trailing
             // suffix changed.
             for (const refresh of previews) refresh();
           }),
@@ -397,65 +396,40 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           });
       });
 
-    // ── Commit messages ─────────────────────────────────────────────
-    const allDefault = "Sync at {date} {time}";
-    const allSetting = new Setting(containerEl)
-      .setName("Commit message — full sync")
+    // ── Commit message ──────────────────────────────────────────────
+    // One unified template — pseudo-merge's split-push +
+    // accumulate-offline-syncs mean a commit's content may include
+    // more than the file the user clicked Sync on, so a per-file
+    // template would mislead. {filename}/{path} placeholders are
+    // gone for the same reason.
+    const messageDefault = "Sync at {date} {time}";
+    const messageSetting = new Setting(containerEl)
+      .setName("Commit message")
       .setDesc(
-        "Template used when pushing all local changes. " +
+        "Template used on every commit (single file or whole-vault). " +
           "Placeholders: {date} (YYYY-MM-DD), {time} (HH:MM:SS.ccc). " +
-          'A " (deviceLabel)" suffix is always appended automatically.',
+          'A " (deviceLabel)" suffix is appended automatically.',
       )
       .addText((text) =>
         text
-          .setPlaceholder(allDefault)
-          .setValue(this.plugin.settings.commitMessageAll ?? allDefault)
+          .setPlaceholder(messageDefault)
+          .setValue(this.plugin.settings.commitMessage ?? messageDefault)
           .onChange(async (value) => {
-            this.plugin.settings.commitMessageAll = value.trim() || allDefault;
+            this.plugin.settings.commitMessage =
+              value.trim() || messageDefault;
             await this.plugin.saveSettings();
-            updateAllPreview();
+            updateMessagePreview();
           }),
       );
-    // Mount preview INSIDE the setting row's info column (the same
-    // container that holds name + description) so it stays visually
-    // attached to the input. Appending to containerEl breaks the
-    // row rhythm and looks orphaned in themed UIs that draw a
-    // background around each setting.
-    const allPreview = makePreviewElement(allSetting.infoEl);
-    const updateAllPreview = (): void => {
-      const tpl = this.plugin.settings.commitMessageAll ?? allDefault;
-      allPreview.setText(`Preview: "${renderPreview(tpl)}"`);
+    // Mount preview INSIDE the setting row's info column so it stays
+    // visually attached to the input.
+    const messagePreview = makePreviewElement(messageSetting.infoEl);
+    const updateMessagePreview = (): void => {
+      const tpl = this.plugin.settings.commitMessage ?? messageDefault;
+      messagePreview.setText(`Preview: "${renderPreview(tpl)}"`);
     };
-    updateAllPreview();
-    previews.push(updateAllPreview);
-
-    const fileDefault = "Update {filename} at {date} {time}";
-    const fileSetting = new Setting(containerEl)
-      .setName("Commit message — single file")
-      .setDesc(
-        "Template used when pushing a single file. " +
-          "Placeholders: {date} (YYYY-MM-DD), {time} (HH:MM:SS.ccc), " +
-          "{filename}, {path}. " +
-          'A " (deviceLabel)" suffix is always appended automatically.',
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder(fileDefault)
-          .setValue(this.plugin.settings.commitMessageFile ?? fileDefault)
-          .onChange(async (value) => {
-            this.plugin.settings.commitMessageFile =
-              value.trim() || fileDefault;
-            await this.plugin.saveSettings();
-            updateFilePreview();
-          }),
-      );
-    const filePreview = makePreviewElement(fileSetting.infoEl);
-    const updateFilePreview = (): void => {
-      const tpl = this.plugin.settings.commitMessageFile ?? fileDefault;
-      filePreview.setText(`Preview: "${renderPreview(tpl)}"`);
-    };
-    updateFilePreview();
-    previews.push(updateFilePreview);
+    updateMessagePreview();
+    previews.push(updateMessagePreview);
 
     new Setting(containerEl)
       .setName("Auto-canonicalize text files")
@@ -583,12 +557,13 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       });
 
     // ── Logging ─────────────────────────────────────────────────────
-    new Setting(containerEl).setName("Extra").setHeading();
+    new Setting(containerEl).setName("Logging").setHeading();
 
     new Setting(containerEl)
       .setName("Enable logging")
       .setDesc(
-        "Persist logs to <configDir>/github-easy-sync.log. Useful for bug reports.",
+        `Persist logs to <vault>/${logFileNameFor(manifest.id)}. Useful for bug reports. ` +
+        "To view this log file, make sure that Settings > Files and links > Show all file types is enabled",
       )
       .addToggle((toggle) => {
         toggle
@@ -599,21 +574,6 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
             else this.plugin.logger.disable();
             await this.plugin.saveSettings();
           });
-      });
-
-    new Setting(containerEl)
-      .setName("Copy logs")
-      .setDesc("Copy the log file content to the clipboard.")
-      .addButton((button) => {
-        button.setButtonText("Copy").onClick(async () => {
-          const logs = await this.plugin.logger.read();
-          try {
-            await copyToClipboard(logs);
-            new Notice("Logs copied", 5000);
-          } catch (err) {
-            new Notice(`Failed copying logs: ${err}`, 10000);
-          }
-        });
       });
 
     new Setting(containerEl)

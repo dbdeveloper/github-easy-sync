@@ -64,9 +64,6 @@ ${INVARIANT_END}`;
 // untouched below the invariant block.
 const CONFIG_DIR_RECOMMENDED_DEFAULTS = `# Recommended defaults — feel free to edit.
 
-# Logs (covers the plugin's own github-easy-sync.log and any other *.log).
-*.log
-
 # Plugin folder allowlist — by default sync only the four canonical
 # files (main.js, manifest.json, styles.css; data.json is governed
 # by the settings-tab toggle "Push plugins data.json to GitHub",
@@ -105,6 +102,13 @@ ${INVARIANT_END}`;
 // creates <vault>/.gitignore. Pre-existing files keep user content
 // untouched below the invariant block.
 const ROOT_RECOMMENDED_DEFAULTS = `# Recommended defaults — feel free to edit.
+
+# Logs (covers the plugin's own <plugin-id>.log at the vault root
+# plus any other *.log anywhere in the vault). Remove this line if
+# you want logs to sync to GitHub — useful for analysing mobile
+# logs from desktop, but multi-device writes will collide on the
+# same filename.
+*.log
 
 # OS noise
 .DS_Store

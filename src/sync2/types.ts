@@ -91,6 +91,11 @@ export type QueueBatch = {
 
 // Placeholder substitutions allowed in commit-message templates.
 //
+// {date}/{time} both expand from the same Date instant. There is no
+// {filename}/{path} support — pseudo-merge's split-push + accumulate-
+// offline-syncs mean any commit may include more than the file the
+// user clicked Sync on, so a per-file template would mislead.
+//
 // Note: deviceLabel is intentionally NOT a placeholder. It's appended
 // as a fixed-position trailing " (deviceLabel)" suffix by
 // appendDeviceSuffix() so it lands at a reliable, parseable position
@@ -98,6 +103,4 @@ export type QueueBatch = {
 // /\s\(([^)]+)\)$/ pulls it back out of any commit on GitHub.
 export type CommitMessagePlaceholders = {
   date?: Date;
-  filename?: string;
-  path?: string;
 };

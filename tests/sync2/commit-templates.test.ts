@@ -4,8 +4,7 @@ import {
   appendDeviceSuffix,
   parseDeviceSuffix,
   UNKNOWN_DEVICE_LABEL,
-  DEFAULT_COMMIT_MESSAGE_ALL,
-  DEFAULT_COMMIT_MESSAGE_FILE,
+  DEFAULT_COMMIT_MESSAGE,
 } from "../../src/sync2/commit-templates";
 
 describe("applyTemplate", () => {
@@ -48,45 +47,24 @@ describe("applyTemplate", () => {
     );
   });
 
-  it("substitutes {filename}", () => {
-    expect(
-      applyTemplate("Update {filename}", { filename: "note.md" }),
-    ).toBe("Update note.md");
-  });
-
-  it("substitutes {path}", () => {
-    expect(applyTemplate("at {path}", { path: "Folder/note.md" })).toBe(
-      "at Folder/note.md",
-    );
-  });
-
   it("substitutes multiple occurrences of the same placeholder", () => {
     expect(
-      applyTemplate("{filename}: {filename} changed", {
-        filename: "x.md",
-      }),
-    ).toBe("x.md: x.md changed");
+      applyTemplate("{date}: {date} sync", { date: fixedDate }),
+    ).toBe("2026-05-03: 2026-05-03 sync");
   });
 
-  it("leaves unknown placeholders alone (incl. {device}, which is suffix-only)", () => {
-    expect(applyTemplate("{unknown} {device} text", { date: fixedDate })).toBe(
-      "{unknown} {device} text",
-    );
-  });
-
-  it("supports the default 'sync all' template with date + time", () => {
+  it("leaves unknown placeholders alone (incl. {filename}/{path} which are no longer supported, and {device} which is suffix-only)", () => {
     expect(
-      applyTemplate(DEFAULT_COMMIT_MESSAGE_ALL, { date: fixedDate }),
-    ).toBe("Sync at 2026-05-03 09:38:23.123");
-  });
-
-  it("supports the default file template with all placeholders", () => {
-    expect(
-      applyTemplate(DEFAULT_COMMIT_MESSAGE_FILE, {
-        filename: "todo.md",
+      applyTemplate("{filename} {path} {unknown} {device} text", {
         date: fixedDate,
       }),
-    ).toBe("Update todo.md at 2026-05-03 09:38:23.123");
+    ).toBe("{filename} {path} {unknown} {device} text");
+  });
+
+  it("supports the default unified template with date + time", () => {
+    expect(
+      applyTemplate(DEFAULT_COMMIT_MESSAGE, { date: fixedDate }),
+    ).toBe("Sync at 2026-05-03 09:38:23.123");
   });
 
   it("returns template unchanged if no placeholders supplied", () => {
@@ -107,22 +85,12 @@ describe("appendDeviceSuffix", () => {
     );
   });
 
-  it("works with the default ALL template + Phone", () => {
-    const base = applyTemplate(DEFAULT_COMMIT_MESSAGE_ALL, {
+  it("works with the default unified template + Phone", () => {
+    const base = applyTemplate(DEFAULT_COMMIT_MESSAGE, {
       date: new Date("2026-05-03T09:38:23.123Z"),
     });
     expect(appendDeviceSuffix(base, "Phone")).toBe(
       "Sync at 2026-05-03 09:38:23.123 (Phone)",
-    );
-  });
-
-  it("works with the default FILE template + Desktop", () => {
-    const base = applyTemplate(DEFAULT_COMMIT_MESSAGE_FILE, {
-      filename: "todo.md",
-      date: new Date("2026-05-03T09:38:23.123Z"),
-    });
-    expect(appendDeviceSuffix(base, "Desktop")).toBe(
-      "Update todo.md at 2026-05-03 09:38:23.123 (Desktop)",
     );
   });
 

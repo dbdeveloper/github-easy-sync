@@ -41,7 +41,11 @@ describe.skipIf(!integrationEnabled())(
       );
       fs.mkdirSync(tmpRoot, { recursive: true });
       const mockVault = new MockVault(tmpRoot);
-      const logger = new Logger(mockVault as unknown as import("obsidian").Vault, false);
+      const logger = new Logger(
+        mockVault as unknown as import("obsidian").Vault,
+        "github-easy-sync",
+        false,
+      );
       const client = new GithubClient(
         {
           ...DEFAULT_SETTINGS,

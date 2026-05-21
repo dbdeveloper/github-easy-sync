@@ -179,8 +179,8 @@ export interface ProgressHandle {
 export type ProgressFactory = (initialMessage: string) => ProgressHandle;
 
 // Thin async logger surface — Sync2Manager records phase markers and
-// errors so the same `github-easy-sync.log` line format used by legacy
-// instrumentation continues to work.
+// errors. Backed by src/logger.ts which appends JSON lines to
+// <vault>/<plugin-id>.log.
 export interface Sync2Logger {
   info(message: string, data?: unknown): Promise<void>;
   warn(message: string, data?: unknown): Promise<void>;
@@ -205,8 +205,7 @@ export interface Sync2ManagerDeps {
   // Accept string OR getter so callers that read live from settings
   // can pass a closure; the manager re-reads on every use, so a
   // settings-tab edit propagates without rebuilding the manager.
-  commitMessageAll: string | (() => string);
-  commitMessageFile: string | (() => string);
+  commitMessage: string | (() => string);
   // Per-device label appended to every commit message as a fixed
   // " (label)" suffix and recorded in conflict-store metadata. One
   // setting drives both surfaces — see commit-templates.ts /
@@ -296,8 +295,7 @@ export class Sync2Manager {
   private readonly invariants: GitignoreInvariants | undefined;
   private readonly configDir: string;
   private readonly selfPluginId: string;
-  private readonly commitMessageAll: () => string;
-  private readonly commitMessageFile: () => string;
+  private readonly commitMessage: () => string;
   private readonly deviceLabel: () => string;
   private readonly conflictStore: ConflictStore | undefined;
   private readonly conflictWatcher: ConflictWatcher | undefined;
@@ -337,14 +335,10 @@ export class Sync2Manager {
     this.invariants = deps.invariants;
     this.configDir = deps.configDir;
     this.selfPluginId = deps.selfPluginId;
-    this.commitMessageAll =
-      typeof deps.commitMessageAll === "function"
-        ? deps.commitMessageAll
-        : () => deps.commitMessageAll as string;
-    this.commitMessageFile =
-      typeof deps.commitMessageFile === "function"
-        ? deps.commitMessageFile
-        : () => deps.commitMessageFile as string;
+    this.commitMessage =
+      typeof deps.commitMessage === "function"
+        ? deps.commitMessage
+        : () => deps.commitMessage as string;
     this.deviceLabel =
       typeof deps.deviceLabel === "function"
         ? deps.deviceLabel
@@ -463,10 +457,12 @@ export class Sync2Manager {
         return;
       }
 
-      const baseMessage = applyTemplate(this.commitMessageFile(), {
+      // Same unified template as syncAll — pseudo-merge's split-push
+      // + accumulate-offline-syncs make per-file commit identity
+      // unreliable. {filename}/{path} placeholders are no longer
+      // supported.
+      const baseMessage = applyTemplate(this.commitMessage(), {
         date: new Date(this.now()),
-        filename: path.split("/").pop() ?? path,
-        path,
       });
       const message = appendDeviceSuffix(baseMessage, this.deviceLabel());
       const enqueued = await this.enqueueOrMerge([change], {
@@ -1679,7 +1675,7 @@ export class Sync2Manager {
   }
 
   private fullSyncMeta(): EnqueueMeta {
-    const base = applyTemplate(this.commitMessageAll(), {
+    const base = applyTemplate(this.commitMessage(), {
       date: new Date(this.now()),
     });
     return {

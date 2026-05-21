@@ -4,7 +4,19 @@
 
 import { Vault, normalizePath } from "obsidian";
 
-export const LOG_FILE_NAME = "github-easy-sync.log" as const;
+// Log file lives at the VAULT ROOT, named `<plugin-id>.log` — the
+// plugin id from manifest.json is the canonical machine-readable
+// name, so the log filename rides with it (rename the plugin →
+// rename the log automatically). Locating the file at the vault
+// root lets the user see it in Obsidian's file explorer, open it
+// directly, and read it without a clipboard round-trip. *.log is
+// in the root .gitignore by default so it doesn't accidentally
+// sync to GitHub — power users can drop the rule if they want logs
+// to travel between devices (with the obvious caveat that multi-
+// device writes will collide on the same filename).
+export function logFileNameFor(pluginId: string): string {
+  return `${pluginId}.log`;
+}
 
 // Max serialized size of `data` we'll write per log entry. Anything larger
 // is replaced with a small summary (size + preview) so a single chatty
@@ -16,9 +28,10 @@ export default class Logger {
 
   constructor(
     private vault: Vault,
+    pluginId: string,
     private enabled: boolean,
   ) {
-    this.logFile = normalizePath(`${vault.configDir}/${LOG_FILE_NAME}`);
+    this.logFile = normalizePath(logFileNameFor(pluginId));
   }
 
   async init() {
