@@ -109,7 +109,7 @@ describe.skipIf(!integrationEnabled())(
         // syncAll has a clean Case 3 head match.
         await sync2AllAndAssertNoErrors(client);
 
-        // Stage 5 binaries at varying depths. PNG extension to keep
+        // binaries at varying depths. PNG extension to keep
         // `hasTextExtension` returning false → tree-builder routes
         // them through createBlob.
         const paths = [

@@ -4,7 +4,7 @@
 
 // Canonicalisation for text files synced by sync2.
 //
-// Locked policy (see IMPLEMENTATION_PLAN.md → Stage 6.6):
+// Locked policy:
 //   - LF line endings universally (CRLF → LF, lone CR → LF).
 //   - No leading UTF-8 BOM (decoded as the U+FEFF code point at index 0).
 //   - Trailing newline iff the content is non-empty. Empty stays empty.

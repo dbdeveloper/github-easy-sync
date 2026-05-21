@@ -73,8 +73,8 @@ describe.skipIf(!integrationEnabled())(
         // sync, so when the merge happens at retry time both sides
         // share a real base. Without this the merge becomes
         // add-vs-add and diff3 produces a conflict, which is a
-        // different scenario (and one that's covered by the explicit
-        // conflict-modal tests, not this one).
+        // different scenario (covered by the conflicts/ test family,
+        // not this one).
         await writeRemoteFile(
           branch,
           "notes.md",

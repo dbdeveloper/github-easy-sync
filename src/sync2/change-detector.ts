@@ -39,22 +39,23 @@ export async function isSyncable(
   // user content and we'd push them on the next sync.
   const queuePrefix = `${configDir}/plugins/${selfPluginId}/.push-queue/`;
   if (path.startsWith(queuePrefix)) return false;
-  // Same protection for the Stage 6.5 conflict-store: meta.json + the
-  // captured (base, theirs) snapshots are per-device internals. The
+  // Same protection for the ConflictStore (pseudo-merge): meta.json +
+  // the captured theirs-bytes backups are per-device internals. The
   // strict-allowlist `<configDir>/plugins/<self>/.gitignore` already
-  // blocks them when sync2's invariant gitignore is in place, but the
+  // blocks them when the invariant gitignore is in place, but the
   // hardcoded rule guards setups (tests, partial init) where that
   // gitignore hasn't been seeded yet.
   const conflictsPrefix = `${configDir}/plugins/${selfPluginId}/.conflicts/`;
   if (path.startsWith(conflictsPrefix)) return false;
   if (path === ".git" || path.startsWith(".git/")) return false;
   if (path.includes("/.git/")) return false;
-  // Stage 6.5 conflict-resolver sibling files (`<base>.conflict-from-
-  // <label>-<ts>.<ext>`) are per-device markers — they sit visibly in
-  // the vault for the user to reconcile, but pushing them to GitHub
-  // would propagate one device's deferred-conflict state to others
-  // and create a feedback loop. Match the structured filename pattern
-  // anywhere in the vault tree.
+  // Conflict sibling files (`<base>.conflict-from-<label>-<ts>.<ext>`,
+  // with an optional `.deleted` suffix for modify-vs-delete) are
+  // per-device markers — they sit visibly in the vault for the user
+  // to reconcile, but pushing them to GitHub via main would
+  // propagate one device's pending-conflict state to others. The
+  // user's "ours" copy DOES land on the conflict branch via the
+  // split-push (sync2-manager.pushConflictPathsToBranch).
   if (CONFLICT_SIBLING_PATTERN.test(path)) return false;
   return !(await gi.ignoredAsync(path, asyncReader));
 }

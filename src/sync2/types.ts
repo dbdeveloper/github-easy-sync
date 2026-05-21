@@ -89,35 +89,6 @@ export type QueueBatch = {
   fileMtimes: Record<string, number>;
 };
 
-// Outcome of a 3-way merge attempt.
-export type MergeResult =
-  | { kind: "clean"; content: string }
-  | {
-      kind: "conflict";
-      // Marker-laden text the conflict modal will show.
-      conflictMarkedContent: string;
-    };
-
-// What the user (or test stub) chose when sync2 surfaced a conflict
-// it couldn't auto-resolve. Three flavours, matching the per-file
-// modal in Stage 6.5:
-//   - resolved        — user picked "Resolve now" and finished merging
-//                       through the diff editor. `content` overwrites
-//                       the local file and goes up on the next push.
-//   - deferred        — user picked "Later". The conflict-store has
-//                       already been told to capture (base, theirs)
-//                       and write the sibling file in the vault. The
-//                       local copy stays as `ours`; sync2 excludes
-//                       this path from push until resolution arrives.
-//   - merged-into-one — markdown-only "auto-merge" via callouts; the
-//                       merged document overwrites the local file and
-//                       goes up like a regular `resolved`. Named
-//                       separately for logging/telemetry clarity.
-export type ConflictResolution =
-  | { kind: "resolved"; content: string }
-  | { kind: "deferred" }
-  | { kind: "merged-into-one"; content: string };
-
 // Placeholder substitutions allowed in commit-message templates.
 //
 // Note: deviceLabel is intentionally NOT a placeholder. It's appended

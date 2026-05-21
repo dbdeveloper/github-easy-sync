@@ -9,7 +9,8 @@ import {
   EvaluationResult,
 } from "./conflict-classifier";
 
-// Pseudo-merge ConflictWatcher (PSEUDO-MERGE-MODE.md, stage 4).
+// Pseudo-merge ConflictWatcher (PSEUDO-MERGE-MODE.md §"Trigger
+// points").
 //
 // Subscribes to `vault.on('delete' | 'modify' | 'rename')` and, on
 // each event, runs the O(1) fast-path Set check — is the touched
@@ -22,9 +23,9 @@ import {
 // real-time state updates so the user sees status-bar counts move
 // the moment they delete a sibling.
 //
-// Stage 4 ships the class only — it is NOT instantiated from main.ts
-// yet. The drain orchestration that calls `pause()` / `resume()` lands
-// in stage 9, and the main.ts wire-up lands at cutover (stage 8 / 9).
+// Drain orchestration owns pause() / resume() — events fire freely
+// outside drain, are dropped during drain, and the drain-start +
+// drain-end sweeps recover any missed state via fs scan.
 
 export interface ConflictWatcherDeps {
   vault: Vault;

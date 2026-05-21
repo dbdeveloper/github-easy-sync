@@ -107,7 +107,7 @@ export interface CreateArgs {
   remoteDevice: string;
 }
 
-// Optional partial update for cache fields. Used by Stage 3 classifier
+// Optional partial update for cache fields. Used by classifier
 // when stat reveals user-edited sibling or base. Routed through the
 // metaWriteQueue to serialize concurrent updates.
 export interface CacheUpdate {
@@ -137,7 +137,7 @@ export default class ConflictStore {
   // (timestamp+ms suffix), so the map is 1-to-1.
   private bySibling: Map<string, string> = new Map();
   // Serializes meta-file rewrites so concurrent updateCache calls
-  // (Stage 3 classifier scanning records in parallel) don't clobber
+  // (classifier scanning records in parallel) don't clobber
   // each other. Same pattern as push-queue's recordBlobUpload.
   private metaWriteQueue: Promise<void> = Promise.resolve();
 
@@ -300,7 +300,7 @@ export default class ConflictStore {
 
   // Patch cache fields and re-persist. Routed through metaWriteQueue
   // so concurrent callers (multiple records evaluated in parallel by
-  // Stage 3's classifier) don't clobber each other's writes. Returns
+  // the classifier) don't clobber each other's writes. Returns
   // the new record state.
   async updateCache(
     id: string,
@@ -324,7 +324,7 @@ export default class ConflictStore {
     return next;
   }
 
-  // Read raw bytes of the sibling backup. Stage 3 classifier uses
+  // Read raw bytes of the sibling backup. classifier uses
   // this when it needs the original theirs content (e.g., to write
   // back over the base as part of "accept theirs" resolution before
   // we can drop the backup).
@@ -336,7 +336,7 @@ export default class ConflictStore {
 
   // Remove a record and its on-disk footprint (recordDir +
   // sibling-content.bin). Does NOT remove the vault sibling — the
-  // classifier (Stage 3) decides whether the sibling should stay
+  // classifier the classifierdecides whether the sibling should stay
   // (case 4 user copied content over → leave vault sibling for user
   // to clean up; case 1 user already deleted sibling → no-op).
   async delete(id: string): Promise<void> {
@@ -493,7 +493,7 @@ export default class ConflictStore {
   }
 }
 
-// ── Sibling-path helpers (exported for tests + Stage 3 classifier) ────
+// ── Sibling-path helpers (exported for tests + classifier) ────
 
 // Strip the trailing extension (".md", ".png", ...) — empty string when
 // the basename has none. Returns the dot too so callers can append

@@ -25,12 +25,13 @@ import {
 } from "../helpers";
 import { evaluateConflictState } from "../../../../../src/sync2/conflict-classifier";
 
-// Stage 6.5 — `enqueueOrMerge` filters out file changes whose path
-// has an active conflict record. This test pre-creates a conflict,
-// then edits BOTH the conflicted path and a clean path, and asserts
-// only the clean path lands on GitHub. After the conflict is
-// resolved (sibling delete), the next sync includes the previously-
-// blocked path.
+// Pseudo-merge — paths currently in the ConflictStore are routed to
+// the per-device conflict branch by processBatch's split-push
+// partition, NOT to main. This test pre-creates a conflict, edits
+// both the conflicted path and a clean one, and asserts only the
+// clean path reaches main on GitHub. After the conflict resolves
+// (sibling delete + classifier sweep), the next sync ships the
+// previously-routed-aside path to main.
 
 describe.skipIf(!integrationEnabled())(
   "sync2 conflict — pending-conflict path blocked from push, unblocks on resolve",

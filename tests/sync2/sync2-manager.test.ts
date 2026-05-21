@@ -298,17 +298,6 @@ function silentLogger(): Sync2Logger {
 }
 
 function fixture(opts?: {
-  onConflict?: (a: {
-    path: string;
-    ours: string;
-    base: string;
-    theirs: string;
-    conflictMarkedContent: string;
-  }) => Promise<
-    | { kind: "resolved"; content: string }
-    | { kind: "deferred" }
-    | { kind: "merged-into-one"; content: string }
-  >;
   conflictStore?: import("../../src/sync2/conflict-store").default;
   accumulateOfflineSyncs?: boolean;
   onProgress?: (msg: string) => {
@@ -338,12 +327,6 @@ function fixture(opts?: {
   client: ReturnType<typeof makeFakeClient>;
   manager: Sync2Manager;
   clock: { tick: () => Date; nowMs: () => number };
-  conflictCalls: {
-    path: string;
-    ours: string;
-    base: string;
-    theirs: string;
-  }[];
 } {
   const root = path.join(
     os.tmpdir(),
@@ -388,12 +371,6 @@ function fixture(opts?: {
     configDir: CONFIG_DIR,
     selfPluginId: SELF_PLUGIN_ID,
   });
-  const conflictCalls: {
-    path: string;
-    ours: string;
-    base: string;
-    theirs: string;
-  }[] = [];
   // Default ConflictStore so detection paths that would auto-register
   // a conflict don't throw "no store wired". Tests can override via
   // opts.conflictStore.
@@ -444,7 +421,6 @@ function fixture(opts?: {
     client,
     manager,
     clock,
-    conflictCalls,
   };
 }
 
@@ -463,7 +439,7 @@ async function shaOf(content: string): Promise<string> {
   return await calculateGitBlobSHA(buf);
 }
 
-describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
+describe("Sync2Manager.syncAll — basic flow", () => {
   let f: ReturnType<typeof fixture>;
 
   beforeEach(async () => {
@@ -524,7 +500,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
 
     await f.manager.syncAll();
 
-    // New defaults (Stage 6.5): "Sync at {date} {time}" template + auto-
+    // New defaults (legacy 6.5): "Sync at {date} {time}" template + auto-
     // appended " (deviceLabel)" suffix from appendDeviceSuffix.
     expect(f.client.state.lastCommit?.message).toBe(
       "Sync at 2026-05-03 09:38:23.000 (test-device)",
@@ -608,8 +584,8 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
       (treeCall?.args as { tree: { base_tree?: string } }).tree.base_tree,
     ).toBe("OTHER_HEAD_TREE");
 
-    // No conflict UI was needed.
-    expect(f.conflictCalls).toEqual([]);
+    // No conflict registered.
+    expect(f.manager["conflictStore"]?.getAll() ?? []).toEqual([]);
   });
 
   it("first-ever sync against bare repo: seeds .gitignore, then commits batch on top", async () => {
@@ -750,7 +726,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
 
     const commits = f.client.calls.filter((c) => c.op === "createCommit");
     expect(commits).toHaveLength(1);
-    // Stage 6.5: "Update {filename} at {date} {time}" + " (test-device)"
+    // legacy 6.5: "Update {filename} at {date} {time}" + " (test-device)"
     // suffix appended via appendDeviceSuffix.
     expect((commits[0].args as { message: string }).message).toBe(
       "Update note.md at 2026-05-03 09:38:23.000 (test-device)",
@@ -806,7 +782,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
     expect(f.store.get("b.md")).toBeUndefined();
   });
 
-  describe("conflict reconciliation (Stage 6c)", () => {
+  describe("conflict reconciliation", () => {
     it("clean 3-way merge when remote and local touched non-overlapping parts", async () => {
       // 5-line base with 'middle' between the two edit zones so
       // node-diff3 treats them as separate hunks.
@@ -837,7 +813,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
 
       await f.manager.syncAll();
 
-      expect(f.conflictCalls).toEqual([]);
+      expect(f.manager["conflictStore"]?.getAll() ?? []).toEqual([]);
       // Pull merged the file in place. The push then ships the merged
       // content because findChanges still saw x.md as modified.
       const tree = f.client.state.lastTree!;
@@ -859,8 +835,12 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
 
       await f.manager.syncAll();
 
-      // No conflict modal.
-      expect(f.conflictCalls).toEqual([]);
+      // Binary path: pseudo-merge keeps live local bytes; conflict
+      // gets registered for the user to resolve via sibling ops, but
+      // the batch's "ours" still pushes for paths that AREN'T in
+      // conflict yet (img.png isn't in ConflictStore — this is the
+      // initial sync, not a reconcile drift).
+      expect(f.manager["conflictStore"]?.getAll() ?? []).toEqual([]);
       // Tree has our binary blob.
       const tree = f.client.state.lastTree!;
       expect(tree).toHaveLength(1);
@@ -911,15 +891,12 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
       f.client.setContentAtRef("BASE_HEAD", "x.md", "V1\nshared\ntail");
       f.client.setContentAtRef("REMOTE_HEAD", "x.md", "V1\nshared\nremote-tail");
 
-      // Conflict resolver always picks ours.
-      const f2 = fixture({
-        onConflict: async (a) => ({ kind: "resolved", content: a.ours }),
-      });
-      // We need to replicate state in f2 to share it with the new
-      // manager. Simpler: just do everything in the same fixture and
-      // override onConflict by re-creating the manager. But we already
-      // set things up here — so re-run with the auto-resolver fixture
-      // by mirroring state.
+      // Re-run with a fresh fixture so the cascade rebase has clean
+      // state to operate on. The text 3-way merge auto-cleans
+      // non-overlapping edits (V2-extra adds a line at the top,
+      // remote-tail modifies the bottom), so no conflict registers.
+      const f2 = fixture();
+      // Mirror the BASE_HEAD / REMOTE_HEAD content + per-batch state.
       writeVaultFile(f2.root, "x.md", "V2-extra\nV1\nshared\ntail");
       await f2.store.load();
       f2.store.setLastSync("BASE_HEAD", "BASE_TREE");
@@ -964,7 +941,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
     it("downloads every remote file when lastSyncCommitSha is null and branch has commits", async () => {
       f.client.setBranchHead("FRESH_HEAD");
       f.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
-      // Inputs are canonical (LF + trailing-NL) so the Stage 6.6
+      // Inputs are canonical (LF + trailing-NL) so the text canonicalisation
       // pull-side normalizer is a no-op for them — the test stays a
       // clean bootstrap-only scenario without follow-up republish.
       f.client.setContentAtRef("FRESH_HEAD", "Notes/a.md", "alpha\n");
@@ -1045,7 +1022,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
     });
   });
 
-  describe("pullIfNeeded (Stage 6c-pull)", () => {
+  describe("pullIfNeeded", () => {
     it("no-op when lastSyncCommitSha is null (first sync)", async () => {
       writeVaultFile(f.root, "x.md", "v");
       // No setLastSync, but a remote already exists.
@@ -1070,7 +1047,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
       f.store.setLastSync("BASE_HEAD", "BASE_TREE");
       f.client.setBranchHead("NEW_HEAD");
       f.client.setTreeShaForCommit("NEW_HEAD", "NEW_TREE");
-      // Canonical input → Stage 6.6 normalizer is a no-op, so this
+      // Canonical input → text canonicalisation normalizer is a no-op, so this
       // test stays focused on pull-detection rather than republish.
       f.client.setContentAtRef("NEW_HEAD", "Notes/new.md", "fresh content\n");
       f.client.setCompareResult("BASE_HEAD", "NEW_HEAD", {
@@ -1226,7 +1203,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
     });
   });
 
-  // ── Stage 6.6 — text canonicalisation on pull -----------------------
+  // ── text canonicalisation — text canonicalisation on pull -----------------------
   // Pull-side normalization is non-negotiable ("ГОЛОВНЕ ПРАВИЛО":
   // locally everything is canonical regardless of what's on remote).
   // When the remote bytes for a text file aren't already canonical,
@@ -1234,7 +1211,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
   // recordSync. The next findChanges pass sees the file as new/
   // modified and the next syncAll pushes the canonical bytes back —
   // the server converges on the canonical form over one extra click.
-  describe("text canonicalisation on pull (Stage 6.6)", () => {
+  describe("text canonicalisation on pull (text canonicalisation)", () => {
     it("CRLF in remote text → local LF + next syncAll pushes canonical", async () => {
       f.store.setLastSync("BASE_HEAD", "BASE_TREE");
       f.client.setBranchHead("NEW_HEAD");
@@ -1655,7 +1632,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
     });
   });
 
-  describe("resumeQueue + accumulateOfflineSyncs (Stage 6d)", () => {
+  describe("resumeQueue + accumulateOfflineSyncs", () => {
     it("resumeQueue picks up a pending batch left over from a previous run", async () => {
       // Simulate a previous Sync2Manager that enqueued but crashed
       // before pushing.
@@ -1713,7 +1690,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
     });
   });
 
-  describe("accumulateOfflineSyncs (Stage 6d)", () => {
+  describe("accumulateOfflineSyncs", () => {
     function brokenNetworkFixture() {
       // Helper: client whose updateBranchHead always throws so the
       // first push fails and leaves the batch on disk.

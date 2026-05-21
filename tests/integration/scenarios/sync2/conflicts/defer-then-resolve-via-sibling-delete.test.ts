@@ -35,10 +35,11 @@ import { evaluateConflictState } from "../../../../../src/sync2/conflict-classif
 // classifier's case 1 (!siblingExists) fires → accept-ours → record
 // dropped. Next sync pushes ours to GitHub, replacing theirs.
 //
-// Stage 5c is detection cutover only; ConflictWatcher (stage 4
-// scaffolding) is not wired into main.ts yet, so the classifier is
-// invoked manually via evaluateConflictState() to model the eventual
-// real-time flow.
+// ConflictWatcher is wired in production; this test invokes the
+// classifier manually via evaluateConflictState() because the
+// mock-obsidian vault doesn't fire vault.on events for fs ops
+// (production Obsidian does — verified end-to-end by
+// conflicts/watcher-realtime.test.ts).
 
 describe.skipIf(!integrationEnabled())(
   "sync2 conflict — register + resolve via sibling delete",

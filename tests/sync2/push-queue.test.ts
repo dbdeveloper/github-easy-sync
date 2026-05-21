@@ -445,13 +445,13 @@ describe("PushQueue", () => {
     });
   });
 
-  // ── Stage 6.6 — text canonicalisation -------------------------------
+  // ── text canonicalisation — text canonicalisation -------------------------------
   // Push side: any non-canonical text file (CRLF / BOM / missing
   // trailing-NL) gets normalized into the snapshot AND written back to
   // the live vault file. Binaries are byte-exact regardless of byte
   // patterns that might look like CRLF. overwriteFile normalizes the
   // text input as a safety net for cascade-rebase callers.
-  describe("text canonicalisation (Stage 6.6)", () => {
+  describe("text canonicalisation (text canonicalisation)", () => {
     it("CRLF in vault → snapshot has LF, vault file rewritten to LF", async () => {
       writeVaultFile(f.root, "a.md", "first\r\nsecond\r\n");
       const id = await f.queue.enqueue([ADD("a.md")], {

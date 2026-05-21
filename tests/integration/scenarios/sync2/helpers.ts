@@ -74,7 +74,7 @@ export interface Sync2TestClient {
   client: GithubClient;
   logger: Logger;
   // Always present in the integration fixture so tests don't have
-  // to wire it up themselves. Stage 6.5 conflict-resolver tests use
+  // to wire it up themselves. conflict-resolution tests use
   // it directly to assert on pending records / sibling files.
   conflictStore: ConflictStore;
   conflictWatcher: ConflictWatcher;
@@ -152,7 +152,7 @@ export async function createSync2Client(
     selfPluginId: SELF_PLUGIN_ID,
   });
   await conflictStore.load();
-  // Stage 9 ConflictWatcher — opt-in for tests that want to drive
+  // ConflictWatcher — opt-in for tests that want to drive
   // real-time vault events. Started by default so drain's pause/
   // resume cycle runs through. Tests that want to disable the
   // real-time watcher can call .stop() before fixturing.

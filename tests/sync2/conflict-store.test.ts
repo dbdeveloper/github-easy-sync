@@ -345,7 +345,7 @@ describe("ConflictStore", () => {
     it("step-3 done then user externally deletes vault sibling AND backup → record stays, but cache untouched", async () => {
       // Boundary case: if both vault sibling AND backup are gone we
       // can't auto-recover content. PSEUDO-MERGE-MODE.md says the
-      // classifier (Stage 3) will handle it as case 1 ("accept ours").
+      // classifier will handle it as case 1 ("accept ours").
       // Stage 2 just leaves the record indexed.
       await f.store.load();
       writeVaultFile(f.root, "Notes/note.md", "local\n");

@@ -9,7 +9,7 @@ import { evaluateConflictState } from "../../src/sync2/conflict-classifier";
 import { timed } from "./perf-helpers";
 
 // P5 — classifier sweep at scale (PSEUDO-MERGE-MODE.md §"Open
-// questions" #3). Stage 9's drain-start sweep will call
+// questions" #3). Drain-start sweep will call
 // evaluateConflictState() once per drain, walking every
 // ConflictRecord in the store. The question is whether the per-
 // record (mtime, size) → cached siblingSha watermark is fast

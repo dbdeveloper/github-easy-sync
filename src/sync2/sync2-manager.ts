@@ -489,8 +489,10 @@ export class Sync2Manager {
     }
   }
 
-  // resumeQueue — full implementation in Stage 6d. For 6a, drain
-  // is callable on its own and behaves correctly when called fresh.
+  // resumeQueue — drain any pending batches without re-running
+  // findChanges. Background entry point: invoked from onload (after
+  // a previous session crashed mid-push) and from the watchdog tick
+  // when interval-strategy is "manually" but the queue has work.
   async resumeQueue(): Promise<void> {
     await this.drain();
   }
@@ -526,12 +528,14 @@ export class Sync2Manager {
   //   - if locally clean, the new content overwrites the file and the
   //     snapshot is recorded;
   //   - if locally dirty (the user edited the same file between
-  //     syncs), a 3-way merge runs against base = lastSyncCommitSha
-  //     content. Clean merges land silently; conflicts route through
-  //     onConflict so the UI can prompt.
-  // Removals propagate to disk only if local is also unchanged; a
-  // delete-vs-modify race is treated like a conflict (resurrection
-  // upload on the next push, since recordSync isn't called).
+  //     syncs), `attemptAutoMerge` runs against base = lastSyncCommitSha
+  //     content. Clean merges land silently; plugin-js gets atomic
+  //     semver resolution; everything that can't auto-resolve goes
+  //     into the ConflictStore as a sibling on a per-device conflict
+  //     branch (split-push, pseudo-merge).
+  // Removals: delete-vs-modify races route through the same conflict
+  // path (kind="delete-vs-modify"), so the user explicitly picks
+  // keep-delete vs accept-remote-version via the sibling-file UI.
   private async pullIfNeeded(
     sharedProgress: ProgressHandle | null = null,
   ): Promise<string | null> {
@@ -1288,13 +1292,14 @@ export class Sync2Manager {
     return { oursVersion, theirsVersion, oursMtime, theirsMtime };
   }
 
-  // Register a conflict in the new ConflictStore and remove the path
-  // from any queued batches. Pull-side callers pass fromBatchId=null
-  // (no batch yet for this path); push-side reconcile callers pass
-  // the batch id so the path drops out of the current batch + every
-  // later batch — same cascade behavior the legacy
-  // `cascadeDeferRemoval` provided, inlined here so removing the old
-  // helper doesn't take this with it.
+  // Register a conflict in the ConflictStore and remove the path from
+  // any queued batches. Pull-side callers pass fromBatchId=null (no
+  // batch yet for this path); push-side reconcile callers pass the
+  // batch id so the path drops out of the current batch + every
+  // later batch (cascade-defer) before reaching the main-push tree
+  // build. Also pushes a snapshot of the local "ours" version to the
+  // per-device conflict branch so the pre-conflict state is preserved
+  // on GitHub even though it's filtered out of main.
   private async registerConflictAndDropPath(args: {
     vaultPath: string;
     kind: ConflictKind;
@@ -1342,7 +1347,8 @@ export class Sync2Manager {
     if (args.fromBatchId === null) return;
 
     // Push-side cascade: drop the path from the current batch + every
-    // later batch. Mirrors the legacy cascadeDeferRemoval contract.
+    // later queued batch so main-push doesn't accidentally upload
+    // pre-conflict bytes.
     const ids = await this.queue.list();
     const startIdx = ids.indexOf(args.fromBatchId);
     if (startIdx < 0) return;
@@ -1638,16 +1644,14 @@ export class Sync2Manager {
   // there's already a non-in-progress batch waiting. mergeIntoLatest
   // returns null when no candidate exists; we then create a new one.
   //
-  // Stage 6.5: paths with pending conflicts (sibling file present,
-  // .conflicts/<id>/ persisted, awaiting user resolution) are dropped
-  // here BEFORE enqueueing — pushing the local "ours" mid-resolution
-  // would commit a half-merged version. The path comes back into the
-  // push pipeline naturally on the next syncAll once ConflictStore
-  // confirms the conflict is closed (sibling deleted by user OR diff
-  // editor finalised the merge).
-  // Returns the number of distinct file paths actually enqueued (after
-  // pending-conflict filtering). Callers use this to drive the local-
-  // phase user feedback Notice ("Commit N files").
+  // Pseudo-merge note: paths currently in the ConflictStore are NOT
+  // filtered here — processBatch's split-push partition (see below)
+  // routes them to the conflict branch instead of main. The user's
+  // edits to an in-conflict file thus accumulate as commits on the
+  // branch, and never leak to main until the conflict resolves.
+  // Returns the number of distinct file paths actually enqueued.
+  // Callers use this to drive the local-phase user feedback Notice
+  // ("Commit N files").
   private async enqueueOrMerge(
     changes: import("./types").FileChange[],
     meta: EnqueueMeta,
@@ -1679,10 +1683,10 @@ export class Sync2Manager {
       date: new Date(this.now()),
     });
     return {
-      // Always-trailing " (deviceLabel)" lets a future viewer
-      // (Stage 8 file-history) read the source-device off any sync2
-      // commit on GitHub regardless of how the user customized the
-      // template. See commit-templates.ts → appendDeviceSuffix.
+      // Always-trailing " (deviceLabel)" lets a future viewer read
+      // the source-device off any sync2 commit on GitHub regardless
+      // of how the user customized the template.
+      // See commit-templates.ts → appendDeviceSuffix.
       commitMessage: appendDeviceSuffix(base, this.deviceLabel()),
       parentCommitSha: this.store.getLastSyncCommitSha(),
       parentTreeSha: this.store.getLastSyncTreeSha(),
@@ -2130,11 +2134,12 @@ export class Sync2Manager {
   }
 
   // Reconcile a batch's contents against a remote head that moved
-  // past the batch's parent. For each text file in the batch, we run
-  // a 3-way merge against (base = expectedHead, theirs = currentHead);
-  // clean merges silently overwrite the batch snapshot, conflicts hand
-  // off to onConflict. Binary files are pushed as-is for now (legacy's
-  // atomic timestamp resolution would land in a follow-up).
+  // past the batch's parent. For each path in the batch we run
+  // `attemptAutoMerge` against (ours = batch snapshot, theirs =
+  // currentHead, base = expectedHead). Clean merges silently
+  // overwrite the batch snapshot; plugin-js gets atomic semver;
+  // anything else routes through `registerConflictAndDropPath`
+  // (sibling + ConflictStore + branch push).
   //
   // After reconcile, the batch's parent SHAs are rewritten so the next
   // step in processBatch builds the commit on top of currentHead. Any

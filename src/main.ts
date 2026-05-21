@@ -359,11 +359,9 @@ export default class GitHubSyncPlugin extends Plugin {
       onSyncCompleted: () => {},
     });
 
-    // Stage 5c: vault listeners that closed conflicts on sibling
-    // delete are gone — the new ConflictStore's classifier runs
-    // through ConflictWatcher (stage 4, wired in a later stage).
-    // The old in-line notifySiblingDeleted path doesn't exist on
-    // the new store.
+    // Conflict resolution events (sibling delete, edit, rename) are
+    // observed by ConflictWatcher above — no separate vault.on
+    // wiring needed here.
 
     // Deliberately NO drain on enable. Users running with "Sync
     // strategy: manual" + "Sync on startup: false" expect to be in
@@ -596,9 +594,10 @@ export default class GitHubSyncPlugin extends Plugin {
       intervalMinutes: () => this.settings.syncInterval,
       autoCommitOnSync: () => this.settings.autoCommitOnSync ?? false,
       hasPendingBatches: () => this.sync2Manager.hasPendingBatches(),
-      // Background drain wraps suppressConflictModals so a pull-side
-      // conflict auto-defers instead of blocking on the modal. The
-      // interval timer never wants a modal popping up under the user.
+      // Background drain skips the pre-sync confirmation modal —
+      // interval timers and the startup pulse are not user-driven,
+      // so a blocking dialog would surprise the user. Detection
+      // still runs; conflicts still land as siblings in the vault.
       drain: () => this.backgroundDrain(),
       fullSync: () => this.sync(),
       logError: (label, err) => {

@@ -10,12 +10,12 @@ import {
 import { mergeText } from "./three-way-merge";
 import { ConflictKind } from "./conflict-store";
 
-// Pseudo-merge conflict-detection helpers (PSEUDO-MERGE-MODE.md,
-// stage 5b).
+// Pseudo-merge conflict-detection helpers
+// (PSEUDO-MERGE-MODE.md §"Auto-merge attempt").
 //
-// Pure functions. No vault/network I/O. Stage 5b ships them with
-// dedicated unit tests; stage 5c wires them into
-// applyRemoteAddOrModify + reconcileBatchAgainstHead.
+// Pure functions. No vault/network I/O. Wired into
+// `Sync2Manager.applyRemoteAddOrModify` (pull side) and
+// `reconcileBatchAgainstHead` (push side).
 
 // ── classifyConflictKind ──────────────────────────────────────────────
 

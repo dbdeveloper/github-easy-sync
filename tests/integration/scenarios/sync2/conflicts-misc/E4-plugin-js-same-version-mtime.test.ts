@@ -24,11 +24,12 @@ import {
   sync2AllAndAssertNoErrors,
 } from "../helpers";
 
-// E4 — plugin-js conflict at EQUAL semver. Atomic resolution falls
-// back to mtime: whichever main.js was touched more recently wins.
-// (Same code path resolveBinaryConflict uses for any binary
-// divergence, just reached via the plugin-js branch after semver
-// compare returned 0.)
+// E4 — plugin-js conflict at EQUAL semver. Pseudo-merge's
+// `attemptAutoMerge` for `isAtomicPluginFile` paths falls back to
+// mtime when `compareSemver` returns 0: whichever main.js was
+// touched more recently wins atomically. The plugin-js path is the
+// last "silent atomic" survivor in pseudo-merge mode — binary
+// files now register as conflicts instead.
 
 const pluginRoot = ".obsidian/plugins/tie-version-plugin";
 const mainJsPath = `${pluginRoot}/main.js`;

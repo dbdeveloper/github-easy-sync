@@ -22,7 +22,7 @@ import {
   sync2AllAndAssertNoErrors,
 } from "../helpers";
 
-// Stage 6.6 — convergence + idempotency. The first syncAll after a
+// text canonicalisation — convergence + idempotency. The first syncAll after a
 // noisy remote pull should converge in exactly two commits (the
 // remote's noisy commit + sync2's auto-republish). The second
 // syncAll, with no further changes anywhere, must produce ZERO new

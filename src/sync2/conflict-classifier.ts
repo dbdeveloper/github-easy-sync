@@ -14,13 +14,10 @@ import ConflictStore, { ConflictRecord } from "./conflict-store";
 // resolution outcomes (Decision below) or no-op.
 //
 // Per spec §"Trigger points" this is invoked from 4 places:
-//   - drain-start sweep
-//   - drain-end sweep
+//   - drain-start sweep (Sync2Manager.drain)
+//   - drain-end sweep   (Sync2Manager.drain)
 //   - UI op on conflict-related view
-//   - vault.on(...) fast-path hit (Stage 4)
-//
-// Stage 3 ships the algorithm only — it is NOT wired to any trigger
-// point yet. Drain orchestration lands in stages 5–6.
+//   - ConflictWatcher fast-path hit (vault.on event)
 
 // ── Decision (output of the pure classify() function) ─────────────────
 
@@ -149,10 +146,6 @@ export interface EvaluationResult {
 // ConflictStore. Side-effects: removes resolved records, deletes
 // vault siblings where the resolution dictates, refreshes cache
 // fields on records that survived.
-//
-// Stage 3 deliverable — this function is exported but not yet
-// wired to drain / vault events. Tests instantiate it directly
-// against a real ConflictStore + a fixture vault.
 export async function evaluateConflictState(
   store: ConflictStore,
   vault: Vault,
