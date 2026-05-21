@@ -291,14 +291,29 @@ export default class ConflictStore {
     // user-authored content; user resolves manually).
     await this.ensureParentDir(siblingPath);
     await this.vault.adapter.writeBinary(siblingPath, args.theirsContent);
-    const stat = await this.vault.adapter.stat(siblingPath);
-    if (stat) {
-      record.siblingMtime = stat.mtime;
-      record.siblingSize = stat.size;
-      await this.persistRecord(recordDir, record);
-    }
 
+    // Index the record NOW, before the optional stat refresh. If the
+    // refresh throws (it's best-effort cache hygiene, not a
+    // correctness step) the record still lands in the in-memory index
+    // so future create() calls with the same identity short-circuit
+    // via findDuplicate instead of spawning another orphan record.
     this.indexRecord(record);
+
+    // Best-effort cache refresh: real mtime/size from the just-written
+    // vault sibling, persisted to meta.json. Failures here don't break
+    // correctness — the classifier's stat-vs-cache check will detect
+    // the staleness and re-hash on its next sweep.
+    try {
+      const stat = await this.vault.adapter.stat(siblingPath);
+      if (stat) {
+        record.siblingMtime = stat.mtime;
+        record.siblingSize = stat.size;
+        await this.persistRecord(recordDir, record);
+      }
+    } catch {
+      // Swallowed: the record is already indexed; stat refresh is
+      // strictly an optimisation.
+    }
     return record;
   }
 
@@ -466,10 +481,16 @@ export default class ConflictStore {
     const tmpPath = `${recordDir}/${META_TMP_FILE}`;
     const finalPath = `${recordDir}/${META_FILE}`;
     await this.vault.adapter.write(tmpPath, JSON.stringify(record));
-    // If a previous failed write left a stale finalPath behind, rename
-    // overwrites it (POSIX semantics). On platforms with non-overwriting
-    // rename we'd need to remove first; Obsidian's adapter mirrors
-    // POSIX so a direct rename is enough.
+    // Capacitor's adapter.rename on iOS/Android does NOT overwrite an
+    // existing destination — it throws "Destination file already
+    // exists". This bit users on the second persistRecord call inside
+    // create() (after the sibling write refreshes mtime/size) and
+    // produced phantom duplicate conflict records because indexRecord
+    // never ran. Explicit remove before rename keeps the protocol
+    // portable across desktop + mobile.
+    if (await this.vault.adapter.exists(finalPath)) {
+      await this.vault.adapter.remove(finalPath);
+    }
     await this.vault.adapter.rename(tmpPath, finalPath);
   }
 

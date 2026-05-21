@@ -84,44 +84,85 @@ export default class GitHubSyncPlugin extends Plugin {
   }
 
   async onload(): Promise<void> {
-    await this.loadSettings();
-    this.logger = new Logger(
-      this.app.vault,
-      manifest.id,
-      this.settings.enableLogging,
-    );
-    await this.logger.init();
+    const startedAt = Date.now();
+    try {
+      await this.loadSettings();
+      this.logger = new Logger(
+        this.app.vault,
+        manifest.id,
+        this.settings.enableLogging,
+      );
+      await this.logger.init();
+      await this.logger.info("Plugin onload start", {
+        version: manifest.version,
+        deviceLabel: this.settings.deviceLabel,
+        enableLogging: this.settings.enableLogging,
+        syncStrategy: this.settings.syncStrategy,
+        configured: this.isConfigured(),
+      });
 
-    this.addSettingTab(new GitHubSyncSettingsTab(this.app, this));
+      this.addSettingTab(new GitHubSyncSettingsTab(this.app, this));
+      await this.logger.info("Plugin onload: settings tab registered");
 
-    await this.initSync2();
+      await this.initSync2();
+      await this.logger.info("Plugin onload: initSync2 done");
 
-    // Always start the timer: when interval is enabled, it runs at the
-    // user's configured cadence and ticks pull + drain; when disabled
-    // it's a 5-min watchdog that only drains pending batches (so a
-    // failed earlier drain gets retried automatically).
-    this.startSyncInterval();
+      // Always start the timer: when interval is enabled, it runs at the
+      // user's configured cadence and ticks pull + drain; when disabled
+      // it's a 5-min watchdog that only drains pending batches (so a
+      // failed earlier drain gets retried automatically).
+      this.startSyncInterval();
+      await this.logger.info("Plugin onload: interval scheduler started");
 
-    this.app.workspace.onLayoutReady(() => {
-      if (this.settings.showStatusBarItem) this.showStatusBarItem();
-      if (this.settings.showSyncRibbonButton) this.showSyncRibbonIcon();
-      if (this.settings.syncOnStartup && this.isConfigured()) {
-        void this.runStartupSync();
-      }
-    });
+      this.app.workspace.onLayoutReady(() => {
+        if (this.settings.showStatusBarItem) this.showStatusBarItem();
+        if (this.settings.showSyncRibbonButton) this.showSyncRibbonIcon();
+        if (this.settings.syncOnStartup && this.isConfigured()) {
+          void this.runStartupSync();
+        }
+      });
 
-    this.addCommand({
-      id: "sync-files",
-      name: "Sync with GitHub",
-      icon: "refresh-cw",
-      callback: this.sync.bind(this),
-    });
-    this.addCommand({
-      id: "sync-current-file",
-      name: "Sync current file with GitHub",
-      icon: "file-up",
-      callback: this.syncCurrentFile.bind(this),
-    });
+      this.addCommand({
+        id: "sync-files",
+        name: "Sync with GitHub",
+        icon: "refresh-cw",
+        callback: this.sync.bind(this),
+      });
+      this.addCommand({
+        id: "sync-current-file",
+        name: "Sync current file with GitHub",
+        icon: "file-up",
+        callback: this.syncCurrentFile.bind(this),
+      });
+
+      await this.logger.info(
+        `Plugin onload complete (duration=${Date.now() - startedAt}ms)`,
+      );
+    } catch (err) {
+      // Best-effort crash log. Writes to a fixed-name file at the
+      // vault root so a Mac/Android user can grab it via adb / Files
+      // even when the plugin failed before Logger was ready. Always
+      // attempts logger.error first (works if we got past
+      // logger.init); falls back to direct adapter.write otherwise.
+      const stack = (err as Error)?.stack ?? "";
+      const message = `Plugin onload FAILED: ${err}`;
+      console.error(message, err);
+      try {
+        if (this.logger) {
+          await this.logger.error(message, { stack });
+        }
+      } catch {}
+      try {
+        await this.app.vault.adapter.append(
+          `${manifest.id}-crash.log`,
+          `[${new Date().toISOString()}] ${message}\n${stack}\n\n`,
+        );
+      } catch {}
+      try {
+        new Notice(`${manifest.id} failed to start: ${err}`, 30000);
+      } catch {}
+      throw err;
+    }
   }
 
   async onunload(): Promise<void> {
@@ -218,6 +259,10 @@ export default class GitHubSyncPlugin extends Plugin {
     const client = new GithubClient(this.settings, this.logger);
     const store = new SnapshotStore(this.app.vault);
     await store.load();
+    await this.logger.info("initSync2: SnapshotStore loaded", {
+      lastSyncCommitSha: store.getLastSyncCommitSha(),
+      paths: store.paths().length,
+    });
     // Crash-recovery sweep for atomic-write artifacts. Runs BEFORE the
     // engine starts touching the vault so any *.sync-tmp / *.sync-bak
     // leftovers from a previous crash are reconciled against the
@@ -225,11 +270,9 @@ export default class GitHubSyncPlugin extends Plugin {
     try {
       const recovery = new AtomicWriteRecovery(this.app.vault, store);
       const result = await recovery.sweep();
-      if (result.cleaned > 0 || result.restored > 0) {
-        void this.logger.info("Sync2 atomic-write recovery sweep", result);
-      }
+      await this.logger.info("initSync2: AtomicWriteRecovery sweep", result);
     } catch (err) {
-      void this.logger.error("Atomic-write recovery sweep failed", `${err}`);
+      await this.logger.error("Atomic-write recovery sweep failed", `${err}`);
     }
     const gi = new GI(vaultRoot);
     const queue = new PushQueue({
