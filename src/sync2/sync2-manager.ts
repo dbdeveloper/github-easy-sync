@@ -2174,7 +2174,18 @@ export class Sync2Manager {
       { oldOurs: ArrayBuffer; newOurs: ArrayBuffer }
     >();
 
-    for (const path of batch.files) {
+    // Snapshot the iteration list once so for-of stays immune to
+    // in-loop mutations of `batch.files`. `batch.files` is then kept
+    // canonical with disk state via splice on every drop site below,
+    // so helper reads (readReconcilePluginJsContext, etc.) that
+    // consult `batch.files` see the same view the disk has.
+    const toProcess = [...batch.files];
+    const dropFromBatchInMemory = (path: string): void => {
+      const idx = batch.files.indexOf(path);
+      if (idx >= 0) batch.files.splice(idx, 1);
+    };
+
+    for (const path of toProcess) {
       const baseFetched = await this.safeFetchContents(path, expectedHead);
       const theirsFetched = await this.safeFetchContents(path, currentHead);
 
@@ -2253,6 +2264,7 @@ export class Sync2Manager {
           await this.writeBinaryRemote(path, theirsFetched!.content);
           await this.detector.recordSync(path, theirsFetched!.sha);
           await this.queue.removeFile(batchId, path);
+          dropFromBatchInMemory(path);
           await this.logger.info(
             "Sync2 reconcile atomic: theirs wins, dropped from batch",
             { path },
@@ -2273,6 +2285,7 @@ export class Sync2Manager {
         remoteDevice: await this.fetchRemoteDevice(currentHead),
         fromBatchId: batchId,
       });
+      dropFromBatchInMemory(path);
     }
 
     if (resolvedPerPath.size > 0) {
