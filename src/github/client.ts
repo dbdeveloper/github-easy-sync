@@ -226,15 +226,23 @@ export default class GithubClient {
     message,
     treeSha,
     parent,
+    parents,
     retry = false,
     maxRetries = 5,
   }: {
     message: string;
     treeSha: string;
+    // Single parent (existing call sites). Mutually exclusive with
+    // `parents`; if both are passed, `parents` wins.
     parent?: string;
+    // Multi-parent (pseudo-merge stage 7+: manual merge commits land
+    // tree-of-main with parents=[main.head, branch.head]).
+    parents?: string[];
     retry?: boolean;
     maxRetries?: number;
   }): Promise<string> {
+    const parentsArr =
+      parents !== undefined ? parents : parent !== undefined ? [parent] : [];
     const response = await retryUntil(
       async () => {
         return this.timed(
@@ -245,7 +253,7 @@ export default class GithubClient {
             body: JSON.stringify({
               message: message,
               tree: treeSha,
-              parents: parent ? [parent] : [],
+              parents: parentsArr,
             }),
             throw: false,
           },
@@ -485,6 +493,141 @@ export default class GithubClient {
         `Failed to create reference, status ${response.status}`,
       );
     }
+  }
+
+  /**
+   * Updates an arbitrary ref (not just the configured `githubBranch`)
+   * to point at a new commit. Pseudo-merge mode uses this for conflict
+   * branches (refs/heads/easy-sync-conflicts-*). Pass `ref` without
+   * the "refs/" prefix — same shape GitHub's API expects after
+   * "/git/refs/".
+   *
+   * @param ref e.g. "heads/easy-sync-conflicts-Obsidian-20260520143022-847"
+   */
+  async updateReference({
+    ref,
+    sha,
+    force = false,
+    retry = false,
+    maxRetries = 5,
+  }: {
+    ref: string;
+    sha: string;
+    force?: boolean;
+    retry?: boolean;
+    maxRetries?: number;
+  }): Promise<void> {
+    const response = await retryUntil(
+      async () => {
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/refs/${ref}`,
+            headers: this.headers(),
+            method: "PATCH",
+            body: JSON.stringify({ sha, force }),
+            throw: false,
+          },
+          `PATCH ref ${ref}${force ? " (force)" : ""}`,
+        );
+      },
+      (res) => !isWriteRetriableStatus(res.status),
+      retry ? maxRetries : 0,
+    );
+
+    if (response.status < 200 || response.status >= 400) {
+      await this.logger.error(`Failed to update ref ${ref}`, response);
+      throw new GithubAPIError(
+        response.status,
+        `Failed to update ref ${ref}, status ${response.status}`,
+      );
+    }
+  }
+
+  /**
+   * Delete a ref. Used to drop a conflict branch after finalize merge
+   * back to main. Returns 204 on success and 422 if the ref does not
+   * exist — the latter is treated as success ("already gone").
+   */
+  async deleteReference({
+    ref,
+    retry = false,
+    maxRetries = 5,
+  }: {
+    ref: string;
+    retry?: boolean;
+    maxRetries?: number;
+  }): Promise<void> {
+    const response = await retryUntil(
+      async () => {
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/refs/${ref}`,
+            headers: this.headers(),
+            method: "DELETE",
+            throw: false,
+          },
+          `DELETE ref ${ref}`,
+        );
+      },
+      (res) => !isWriteRetriableStatus(res.status),
+      retry ? maxRetries : 0,
+    );
+
+    if (response.status === 204) return;
+    if (response.status === 422) return; // already gone
+    await this.logger.error(`Failed to delete ref ${ref}`, response);
+    throw new GithubAPIError(
+      response.status,
+      `Failed to delete ref ${ref}, status ${response.status}`,
+    );
+  }
+
+  /**
+   * List refs whose names start with the given prefix. Pseudo-merge
+   * uses this to enumerate active conflict branches during the
+   * recovery sweep — e.g. `getMatchingRefs("heads/easy-sync-conflicts-")`.
+   * Returns an empty array on 404 (no matches).
+   */
+  async getMatchingRefs({
+    prefix,
+    retry = false,
+    maxRetries = 5,
+  }: {
+    prefix: string;
+    retry?: boolean;
+    maxRetries?: number;
+  }): Promise<Array<{ ref: string; sha: string }>> {
+    const response = await retryUntil(
+      async () => {
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/git/matching-refs/${prefix}`,
+            headers: this.headers(),
+            throw: false,
+          },
+          `GET matching-refs ${prefix}`,
+        );
+      },
+      (res) => !isRetriableStatus(res.status),
+      retry ? maxRetries : 0,
+    );
+
+    if (response.status === 404) return [];
+    if (response.status < 200 || response.status >= 400) {
+      await this.logger.error(
+        `Failed to get matching refs for ${prefix}`,
+        response,
+      );
+      throw new GithubAPIError(
+        response.status,
+        `Failed to get matching refs ${prefix}, status ${response.status}`,
+      );
+    }
+    const arr = response.json as Array<{ ref: string; object: { sha: string } }>;
+    return arr.map((r) => ({
+      ref: r.ref.replace(/^refs\//, ""),
+      sha: r.object.sha,
+    }));
   }
 
   /**

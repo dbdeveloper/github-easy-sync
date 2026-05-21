@@ -48,10 +48,36 @@ export interface Sync2Client {
   createCommit(args: {
     message: string;
     treeSha: string;
+    // Single parent (existing call sites). Use `parents` for merge
+    // commits in pseudo-merge stage 7+ (multi-parent finalize).
     parent?: string;
+    parents?: string[];
     retry?: boolean;
   }): Promise<string>;
   updateBranchHead(args: { sha: string; retry?: boolean }): Promise<void>;
+  // Pseudo-merge stage 7+: arbitrary-ref operations for the per-
+  // device conflict branch lifecycle.
+  // `ref` is in the post-"refs/" form, e.g. "heads/easy-sync-
+  // conflicts-Obsidian-20260520143022-847".
+  createReference(args: {
+    ref: string;
+    sha: string;
+    retry?: boolean;
+  }): Promise<void>;
+  updateReference(args: {
+    ref: string;
+    sha: string;
+    force?: boolean;
+    retry?: boolean;
+  }): Promise<void>;
+  deleteReference(args: { ref: string; retry?: boolean }): Promise<void>;
+  // Lists refs whose name starts with `prefix` (post-"refs/" form).
+  // Returns [] on 404. Used by the recovery sweep to enumerate our
+  // conflict branches on this device's GitHub repo.
+  getMatchingRefs(args: {
+    prefix: string;
+    retry?: boolean;
+  }): Promise<Array<{ ref: string; sha: string }>>;
   // Contents API write. The only endpoint that works against a bare
   // repo (no commits yet) — Git Data API returns 409 "Git Repository
   // is empty" until at least one ref exists. Sync2 uses this to seed

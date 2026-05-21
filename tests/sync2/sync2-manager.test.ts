@@ -163,6 +163,19 @@ function makeFakeClient(): Sync2Client & {
       calls.push({ op: "updateBranchHead", args });
       state.branchHead = args.sha;
     },
+    async createReference(args) {
+      calls.push({ op: "createReference", args });
+    },
+    async updateReference(args) {
+      calls.push({ op: "updateReference", args });
+    },
+    async deleteReference(args) {
+      calls.push({ op: "deleteReference", args });
+    },
+    async getMatchingRefs(args) {
+      calls.push({ op: "getMatchingRefs", args });
+      return [];
+    },
     async createFile(args) {
       calls.push({ op: "createFile", args });
       // Synthesise SHAs deterministically from the content so the

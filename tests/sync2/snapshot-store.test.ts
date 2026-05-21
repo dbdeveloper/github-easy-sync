@@ -222,6 +222,68 @@ describe("SnapshotStore", () => {
     expect(store.getLastSyncCommitSha()).toBe("abc");
   });
 
+  it("conflictBranch: starts null, round-trips through save+load", async () => {
+    const store = newStore(vault);
+    await store.load();
+    expect(store.getConflictBranch()).toBeNull();
+    store.setConflictBranch({
+      name: "easy-sync-conflicts-Obsidian-20260520143022-847",
+      head: "deadbeef".repeat(5),
+    });
+    await store.save();
+
+    const reloaded = newStore(vault);
+    await reloaded.load();
+    expect(reloaded.getConflictBranch()).toEqual({
+      name: "easy-sync-conflicts-Obsidian-20260520143022-847",
+      head: "deadbeef".repeat(5),
+    });
+  });
+
+  it("conflictBranch: clearConflictBranch resets to null", async () => {
+    const store = newStore(vault);
+    await store.load();
+    store.setConflictBranch({ name: "easy-sync-conflicts-X-1-001", head: "sha" });
+    store.clearConflictBranch();
+    expect(store.getConflictBranch()).toBeNull();
+  });
+
+  it("conflictBranch: tolerates missing/malformed values in raw JSON", async () => {
+    fs.writeFileSync(
+      manifestAbs,
+      JSON.stringify({
+        lastSyncCommitSha: "abc",
+        files: {},
+        conflictBranch: { name: "easy-sync-conflicts-X-1-001" /* head missing */ },
+      }),
+    );
+    const store = newStore(vault);
+    await store.load();
+    expect(store.getConflictBranch()).toBeNull();
+    expect(store.getLastSyncCommitSha()).toBe("abc");
+  });
+
+  it("conflictBranch: unknown type → null on load", async () => {
+    fs.writeFileSync(
+      manifestAbs,
+      JSON.stringify({
+        files: {},
+        conflictBranch: "not-an-object",
+      }),
+    );
+    const store = newStore(vault);
+    await store.load();
+    expect(store.getConflictBranch()).toBeNull();
+  });
+
+  it("clear() drops conflictBranch too (panic-button reset)", async () => {
+    const store = newStore(vault);
+    await store.load();
+    store.setConflictBranch({ name: "easy-sync-conflicts-X-1-001", head: "sha" });
+    store.clear();
+    expect(store.getConflictBranch()).toBeNull();
+  });
+
   it("clear() drops remoteIdentity too (panic-button reset)", async () => {
     const store = newStore(vault);
     await store.load();

@@ -39,6 +39,16 @@ export interface RemoteIdentity {
   branch: string;
 }
 
+// Per-device conflict branch state (pseudo-merge mode, stage 7).
+// `name` is the bare branch name (no `refs/heads/` prefix), `head`
+// is its current commit SHA. `null` when no active conflict branch
+// — the absence is the source of truth for "no pending pseudo-merge
+// session on this device".
+export interface ConflictBranchState {
+  name: string;
+  head: string;
+}
+
 export interface Sync2Metadata {
   // Branch state at the moment of this device's last successful sync.
   lastSyncCommitSha: string | null;
@@ -65,6 +75,12 @@ export interface Sync2Metadata {
   // adoption-from-remote instead of pushing stale local state at the
   // new remote.
   remoteIdentity: RemoteIdentity | null;
+
+  // Active conflict branch for this device (pseudo-merge mode,
+  // stage 7+). Set when the first conflict of a session lands on
+  // GitHub; cleared when finalize merge + deleteRef succeed. `null`
+  // means there's no in-flight conflict session.
+  conflictBranch: ConflictBranchState | null;
 }
 
 function freshMetadata(): Sync2Metadata {
@@ -75,6 +91,7 @@ function freshMetadata(): Sync2Metadata {
     files: {},
     invariantState: {},
     remoteIdentity: null,
+    conflictBranch: null,
   };
 }
 
@@ -144,6 +161,12 @@ function migrate(raw: unknown): Sync2Metadata {
         repo: ri.repo,
         branch: ri.branch,
       };
+    }
+  }
+  if (r.conflictBranch && typeof r.conflictBranch === "object") {
+    const cb = r.conflictBranch as Record<string, unknown>;
+    if (typeof cb.name === "string" && typeof cb.head === "string") {
+      out.conflictBranch = { name: cb.name, head: cb.head };
     }
   }
   return out;
@@ -241,6 +264,23 @@ export default class SnapshotStore {
 
   setRemoteIdentity(identity: RemoteIdentity): void {
     this.data.remoteIdentity = identity;
+  }
+
+  // Active conflict-branch state (pseudo-merge stage 7+).
+  // `setConflictBranch({name, head})` records a freshly-created or
+  // updated branch; `clearConflictBranch()` is called after a
+  // successful finalize merge + deleteRef. Save the snapshot to
+  // disk afterwards so a crash doesn't lose this slot.
+  getConflictBranch(): ConflictBranchState | null {
+    return this.data.conflictBranch;
+  }
+
+  setConflictBranch(state: ConflictBranchState): void {
+    this.data.conflictBranch = { name: state.name, head: state.head };
+  }
+
+  clearConflictBranch(): void {
+    this.data.conflictBranch = null;
   }
 
   // Invariant gitignore freshness cache. Read by GitignoreInvariants
