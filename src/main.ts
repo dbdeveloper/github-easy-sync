@@ -89,7 +89,7 @@ export default class GitHubSyncPlugin extends Plugin {
       manifest.id,
       this.settings.enableLogging,
     );
-    this.logger.init();
+    await this.logger.init();
 
     this.addSettingTab(new GitHubSyncSettingsTab(this.app, this));
 

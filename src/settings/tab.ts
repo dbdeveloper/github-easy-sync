@@ -627,27 +627,38 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       .setName("Enable logging")
       .setDesc(
         `Persist logs to <vault>/${logFileNameFor(manifest.id)}. Useful for bug reports. ` +
-        "To view this log file, make sure that Settings > Files and links > Show all file types is enabled",
+        "To view this log file, make sure that Settings > Files and links > Show all file types is enabled. " +
+        "Turning logging off deletes the file from the vault.",
       )
       .addToggle((toggle) => {
         toggle
           .setValue(this.plugin.settings.enableLogging)
           .onChange(async (value) => {
             this.plugin.settings.enableLogging = value;
-            if (value) this.plugin.logger.enable();
-            else this.plugin.logger.disable();
+            if (value) await this.plugin.logger.enable();
+            else await this.plugin.logger.disable();
             await this.plugin.saveSettings();
+            // The "Clean logs" Setting below is gated on
+            // enableLogging — re-render the whole tab so the
+            // button appears / disappears in sync with the toggle.
+            this.display();
           });
       });
 
-    new Setting(containerEl)
-      .setName("Clean logs")
-      .setDesc("Delete the log file content.")
-      .addButton((button) => {
-        button.setButtonText("Clean").onClick(async () => {
-          await this.plugin.logger.clean();
+    // "Clean logs" is meaningful only while logging is on — once
+    // it's off, the file is gone (logger.disable() removed it) and
+    // there's nothing to clean. Hide the row entirely so the
+    // settings panel doesn't carry dead UI.
+    if (this.plugin.settings.enableLogging) {
+      new Setting(containerEl)
+        .setName("Clean logs")
+        .setDesc("Truncate the log file to 0 bytes.")
+        .addButton((button) => {
+          button.setButtonText("Clean").onClick(async () => {
+            await this.plugin.logger.clean();
+          });
         });
-      });
+    }
 
     // ── Danger zone ─────────────────────────────────────────────────
     new Setting(containerEl).setName("Danger zone").setHeading();

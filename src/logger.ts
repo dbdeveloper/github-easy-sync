@@ -34,12 +34,17 @@ export default class Logger {
     this.logFile = normalizePath(logFileNameFor(pluginId));
   }
 
-  async init() {
-    // Create the log file in case it doesn't exist
-    if (await this.vault.adapter.exists(this.logFile)) {
-      return;
+  // Sync on-disk presence to the `enabled` flag: when enabled, the
+  // log file must exist (touch into existence if it doesn't); when
+  // disabled, it must NOT exist (delete if a previous session left
+  // one behind). Called once at plugin load before any log writes,
+  // and again by enable()/disable() when the user flips the toggle.
+  async init(): Promise<void> {
+    if (this.enabled) {
+      await this.ensureFile();
+    } else {
+      await this.removeFile();
     }
-    this.vault.adapter.write(this.logFile, "");
   }
 
   private async write(
@@ -83,16 +88,36 @@ export default class Logger {
     return await this.vault.adapter.read(this.logFile);
   }
 
+  // Truncate the log to 0 bytes. Only meaningful while logging is
+  // enabled; the settings tab gates the Clean button behind the
+  // toggle so this isn't reachable on a disabled logger.
   async clean(): Promise<void> {
     return await this.vault.adapter.write(this.logFile, "");
   }
 
-  enable(): void {
+  async enable(): Promise<void> {
     this.enabled = true;
+    await this.ensureFile();
   }
 
-  disable(): void {
+  async disable(): Promise<void> {
     this.enabled = false;
+    await this.removeFile();
+  }
+
+  // Touch the log file into existence at 0 bytes if it's not
+  // already on disk. No-op when the file exists (preserving any
+  // accumulated lines).
+  private async ensureFile(): Promise<void> {
+    if (await this.vault.adapter.exists(this.logFile)) return;
+    await this.vault.adapter.write(this.logFile, "");
+  }
+
+  // Remove the log file from disk. No-op when the file is already
+  // missing (user deleted it manually, previous disable already ran).
+  private async removeFile(): Promise<void> {
+    if (!(await this.vault.adapter.exists(this.logFile))) return;
+    await this.vault.adapter.remove(this.logFile);
   }
 
   async info(message: string, data?: any): Promise<void> {
