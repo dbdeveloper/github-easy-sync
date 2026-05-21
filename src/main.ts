@@ -23,6 +23,8 @@ import { Sync2Manager } from "./sync2/sync2-manager";
 import { IntervalScheduler } from "./sync2/interval-scheduler";
 import ConflictStore from "./sync2/conflict-store";
 import { ConflictWatcher } from "./sync2/conflict-watcher";
+import { ConflictStatusIndicator } from "./sync2/views/conflict-status-indicator";
+import { PreSyncConflictModal } from "./sync2/views/pre-sync-conflict-modal";
 import manifest from "../manifest.json";
 
 // How long the brief local-phase notices stay visible. 700ms is the
@@ -57,6 +59,11 @@ export default class GitHubSyncPlugin extends Plugin {
   // UI elements that come and go with toggle settings.
   statusBarItem: HTMLElement | null = null;
   syncRibbonIcon: HTMLElement | null = null;
+  // Pseudo-merge stage 10 — 4-point visibility for pending conflicts.
+  // Status-bar indicator and ribbon-icon badge are created when the
+  // user's settings turn the corresponding bar/ribbon on.
+  conflictStatusIndicator: ConflictStatusIndicator | null = null;
+  ribbonConflictBadge: HTMLElement | null = null;
 
   // Vault listeners — sibling-file delete/rename closes the matching
   // conflict record. Refs kept so we can offref them on unload.
@@ -264,6 +271,10 @@ export default class GitHubSyncPlugin extends Plugin {
       store: conflictStore,
       onError: (err) =>
         void this.logger.error("ConflictWatcher error", `${err}`),
+      // Stage 10 — every watcher-triggered classifier sweep refreshes
+      // the 4 visibility surfaces. Cheap on a clean device (zero
+      // conflicts → 0-cost refresh that just hides the indicator).
+      onResolution: () => this.refreshConflictUI(),
     });
     conflictWatcher.start();
     this.conflictWatcher = conflictWatcher;
@@ -377,11 +388,13 @@ export default class GitHubSyncPlugin extends Plugin {
       new Notice("Sync plugin not configured");
       return;
     }
+    if (!(await this.confirmPendingConflictsBeforeSync())) return;
     try {
       await this.sync2Manager.syncAll();
     } catch (err) {
       new Notice(`Error syncing. ${err}`);
     }
+    this.refreshConflictUI();
   }
 
   // Background drain — entry point for the interval timer when
@@ -407,11 +420,96 @@ export default class GitHubSyncPlugin extends Plugin {
       new Notice("Sync plugin not configured");
       return;
     }
+    if (!(await this.confirmPendingConflictsBeforeSync())) return;
     try {
       await this.sync2Manager.syncFile(path);
     } catch (err) {
       new Notice(`Error syncing. ${err}`);
     }
+    this.refreshConflictUI();
+  }
+
+  // ── stage 10 — pre-sync conflict gate + UI refresh ──────────────────
+
+  // Show the pre-sync conflict modal when ConflictStore has any
+  // active records. Returns true if sync should proceed (no conflicts
+  // OR user picked "Sync anyway"). Returns false when sync should be
+  // aborted (user picked "Cancel" or "Resolve"; the latter opens the
+  // first sibling in the editor as a courtesy).
+  private async confirmPendingConflictsBeforeSync(): Promise<boolean> {
+    if (!this.conflictStore) return true;
+    const records = this.conflictStore.getAll();
+    if (records.length === 0) return true;
+    const paths = Array.from(
+      new Set(records.map((r) => r.vaultPath)),
+    ).sort();
+    const decision = await new PreSyncConflictModal(this.app, paths).prompt();
+    if (decision === "sync-anyway") return true;
+    if (decision === "resolve") {
+      // Open the first sibling file in the editor so the user can act
+      // on it immediately. workspace.openLinkText accepts a vault-
+      // relative path; the second arg ("") is the source path the
+      // resolver would use to resolve relative links, which doesn't
+      // matter for absolute paths.
+      const firstSibling = records[0].siblingPath;
+      try {
+        await this.app.workspace.openLinkText(firstSibling, "", false);
+      } catch (err) {
+        void this.logger.error(
+          "Failed to open first sibling from pre-sync modal",
+          `${err}`,
+        );
+      }
+      return false;
+    }
+    return false;
+  }
+
+  // Refresh every visibility surface (status bar, ribbon badge,
+  // settings tab) from the current ConflictStore count. Cheap —
+  // counts records and updates DOM only when count crosses zero or
+  // changes magnitude.
+  refreshConflictUI(): void {
+    const count = this.conflictStore?.getAll().length ?? 0;
+    this.conflictStatusIndicator?.refresh(count);
+    this.refreshRibbonConflictBadge(count);
+  }
+
+  private refreshRibbonConflictBadge(count: number): void {
+    if (!this.syncRibbonIcon) return;
+    if (count <= 0) {
+      this.ribbonConflictBadge?.remove();
+      this.ribbonConflictBadge = null;
+      return;
+    }
+    if (!this.ribbonConflictBadge) {
+      // Subtle absolute-positioned numeric pill in the ribbon icon's
+      // corner. The exact styling is left to user themes — we attach
+      // a CSS class so theme authors can override.
+      this.ribbonConflictBadge = this.syncRibbonIcon.createSpan({
+        cls: "github-easy-sync-ribbon-conflict-badge",
+      });
+      const el = this.ribbonConflictBadge;
+      el.style.position = "absolute";
+      el.style.top = "2px";
+      el.style.right = "2px";
+      el.style.minWidth = "14px";
+      el.style.height = "14px";
+      el.style.padding = "0 3px";
+      el.style.borderRadius = "7px";
+      el.style.background = "var(--color-orange, #d97706)";
+      el.style.color = "white";
+      el.style.fontSize = "10px";
+      el.style.lineHeight = "14px";
+      el.style.textAlign = "center";
+      el.style.pointerEvents = "none";
+      this.syncRibbonIcon.style.position = "relative";
+    }
+    this.ribbonConflictBadge.setText(String(count));
+    this.ribbonConflictBadge.setAttribute(
+      "aria-label",
+      `${count} pending sync conflict${count === 1 ? "" : "s"}`,
+    );
   }
 
   // ── status bar ──────────────────────────────────────────────────────
@@ -420,11 +518,41 @@ export default class GitHubSyncPlugin extends Plugin {
     if (this.statusBarItem) return;
     this.statusBarItem = this.addStatusBarItem();
     this.updateStatusBarItem();
+    // Stage 10 — conflict-count indicator lives in its own
+    // addStatusBarItem element so user themes can style it
+    // independently. Click opens the first sibling in the editor
+    // (same shortcut the pre-sync modal's "Resolve" button uses).
+    if (!this.conflictStatusIndicator) {
+      const indicatorParent = this.addStatusBarItem();
+      this.conflictStatusIndicator = new ConflictStatusIndicator(
+        indicatorParent,
+        () => void this.openFirstSibling(),
+      );
+    }
+    this.refreshConflictUI();
   }
 
   hideStatusBarItem(): void {
     this.statusBarItem?.remove();
     this.statusBarItem = null;
+    this.conflictStatusIndicator?.destroy();
+    this.conflictStatusIndicator = null;
+  }
+
+  // Open the first pending sibling in the editor — used by the
+  // status-bar indicator's click handler. No-op when there are no
+  // pending conflicts.
+  private async openFirstSibling(): Promise<void> {
+    const records = this.conflictStore?.getAll() ?? [];
+    if (records.length === 0) return;
+    try {
+      await this.app.workspace.openLinkText(records[0].siblingPath, "", false);
+    } catch (err) {
+      void this.logger.error(
+        "Failed to open first sibling from status bar",
+        `${err}`,
+      );
+    }
   }
 
   updateStatusBarItem(): void {
@@ -443,9 +571,12 @@ export default class GitHubSyncPlugin extends Plugin {
       "Sync with GitHub",
       this.sync.bind(this),
     );
+    this.refreshConflictUI();
   }
 
   hideSyncRibbonIcon(): void {
+    this.ribbonConflictBadge?.remove();
+    this.ribbonConflictBadge = null;
     this.syncRibbonIcon?.remove();
     this.syncRibbonIcon = null;
   }
