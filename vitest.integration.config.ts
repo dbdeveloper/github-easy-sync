@@ -34,5 +34,15 @@ export default defineConfig({
     // bootstrap repo so the public-repo + classic-PAT exposure window
     // is bounded by the test run itself.
     globalSetup: [path.resolve(__dirname, "tests/integration/teardown.ts")],
+    // Safety net for socket-level transients (undici SocketError /
+    // Electron net errors / Capacitor "Failed to fetch") that survive
+    // the GithubClient's in-flight retryUntil. Tier-1 fix lives in
+    // src/utils.ts (`isRetriableError` + throw-side retry on
+    // exponential backoff). This vitest retry sits on top — when a
+    // GitHub regional outage exceeds the 5-attempt backoff
+    // (1s+2s+4s+8s+16s ≈ 31s), the failed test gets one fresh attempt
+    // before we call it a hard failure. Doubles worst-case wall-clock
+    // on a flake, costs nothing on a clean run.
+    retry: 1,
   },
 });

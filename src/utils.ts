@@ -141,8 +141,115 @@ export function isWriteRetriableStatus(status: number): boolean {
 }
 
 /**
+ * Recognise a transient connection-level error worth retrying.
+ *
+ * Three runtimes hit this codepath:
+ *   - Node (integration tests): undici raises `TypeError("fetch
+ *     failed")` with `cause: SocketError` whose `code` is one of
+ *     UND_ERR_*. Sometimes the underlying Node `net` code
+ *     (ECONNRESET / ETIMEDOUT / EPIPE / ENOTFOUND / EAI_AGAIN) is
+ *     what surfaces — usually inside the cause chain.
+ *   - Electron (Obsidian Desktop production): Chromium's `net`
+ *     module reports its own ERR_* codes — ERR_NETWORK_CHANGED,
+ *     ERR_INTERNET_DISCONNECTED, ERR_CONNECTION_RESET / CLOSED /
+ *     ABORTED, ERR_NAME_NOT_RESOLVED — bubbled through `requestUrl`.
+ *   - Mobile WebView (iOS / Android): Capacitor exposes
+ *     fetch-style errors; message often just reads "Failed to
+ *     fetch" / "network error" with no code attached.
+ *
+ * We walk up to five `cause` levels because undici wraps the inner
+ * SocketError inside an outer TypeError. The message heuristic is
+ * the last-resort matcher for runtimes that don't set `code`.
+ *
+ * Narrow on purpose: any HTTP status returned by the server (4xx /
+ * 5xx) reaches us as a successful `requestUrl` response, not a
+ * throw. Those keep flowing through the status-code retry predicates
+ * (`isRetriableStatus` / `isWriteRetriableStatus`). This helper
+ * answers only the "throw before any HTTP response" question.
+ */
+export function isRetriableError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  let cur: unknown = err;
+  for (let depth = 0; depth < 5 && cur && typeof cur === "object"; depth++) {
+    const r = cur as {
+      code?: unknown;
+      errno?: unknown;
+      message?: unknown;
+      cause?: unknown;
+    };
+    const code = typeof r.code === "string" ? r.code : "";
+    const message = typeof r.message === "string" ? r.message : "";
+    // undici socket / timeout family.
+    if (
+      code === "UND_ERR_SOCKET" ||
+      code === "UND_ERR_CONNECT_TIMEOUT" ||
+      code === "UND_ERR_HEADERS_TIMEOUT" ||
+      code === "UND_ERR_BODY_TIMEOUT" ||
+      code === "UND_ERR_SOCKET_TIMEOUT"
+    ) {
+      return true;
+    }
+    // Node net / DNS error codes.
+    if (
+      code === "ECONNRESET" ||
+      code === "ECONNREFUSED" ||
+      code === "ECONNABORTED" ||
+      code === "ETIMEDOUT" ||
+      code === "EPIPE" ||
+      code === "ENOTFOUND" ||
+      code === "EAI_AGAIN" ||
+      code === "EHOSTUNREACH" ||
+      code === "ENETUNREACH"
+    ) {
+      return true;
+    }
+    // Electron / Chromium net errors (Obsidian Desktop production).
+    if (
+      code === "ERR_NETWORK_CHANGED" ||
+      code === "ERR_INTERNET_DISCONNECTED" ||
+      code === "ERR_CONNECTION_RESET" ||
+      code === "ERR_CONNECTION_CLOSED" ||
+      code === "ERR_CONNECTION_ABORTED" ||
+      code === "ERR_CONNECTION_REFUSED" ||
+      code === "ERR_NAME_NOT_RESOLVED" ||
+      code === "ERR_NETWORK_ACCESS_DENIED" ||
+      code === "ERR_TIMED_OUT"
+    ) {
+      return true;
+    }
+    // Message-only fallback: runtimes that don't attach a code.
+    // Patterns are narrow — only well-known socket-level phrasing,
+    // not generic "error" / "network" strings that could mask
+    // logic bugs.
+    if (
+      message.includes("other side closed") ||
+      message.includes("socket hang up") ||
+      message.includes("Failed to fetch") ||
+      message.toLowerCase() === "fetch failed" ||
+      message.toLowerCase() === "network error"
+    ) {
+      return true;
+    }
+    cur = r.cause;
+  }
+  return false;
+}
+
+/**
  * Retry an async function with exponential backoff until its result
  * passes a condition or maxRetries is reached.
+ *
+ * Two retry paths share the same backoff counter:
+ *   - Result-based: condition(result) === false → wait + retry.
+ *     Drives HTTP status retries (5xx / 429 / 422 / 409 for writes).
+ *   - Throw-based: fn() throws AND `isRetriableError(err)` is true →
+ *     wait + retry. Drives socket-level error recovery (undici
+ *     SocketError, Electron net errors, Node ECONNRESET / ETIMEDOUT,
+ *     etc.). Non-retriable throws bubble out immediately.
+ *
+ * When the caller opts out of retry (maxRetries=0), both paths
+ * collapse: the first response is returned regardless of condition,
+ * and the first throw rethrows immediately.
  */
 export async function retryUntil<T>(
   fn: () => Promise<T>,
@@ -155,7 +262,18 @@ export async function retryUntil<T>(
   let delay = initialDelay;
 
   while (true) {
-    const result = await fn();
+    let result: T;
+    try {
+      result = await fn();
+    } catch (err) {
+      if (retries < maxRetries && isRetriableError(err)) {
+        retries++;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        delay *= backoffFactor;
+        continue;
+      }
+      throw err;
+    }
     if (condition(result) || retries >= maxRetries) return result;
     retries++;
     await new Promise((resolve) => setTimeout(resolve, delay));
