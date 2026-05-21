@@ -29,6 +29,7 @@ import {
   attemptAutoMerge,
   PluginJsContext,
 } from "./conflict-detection";
+import { buildConflictBranchName } from "./conflict-branch";
 import { normalizeText } from "./text-normalize";
 import { FileChange } from "./types";
 
@@ -1315,6 +1316,19 @@ export class Sync2Manager {
       path: args.vaultPath,
       kind: args.kind,
     });
+    // Push ours' version to the per-device conflict branch so the
+    // user's pre-conflict state is preserved as a server-side commit
+    // (PSEUDO-MERGE-MODE.md §"Архітектура push: split-push у
+    // processBatch" step 4). Eager: branch is created at current
+    // main HEAD on the first conflict registration of the session,
+    // each subsequent conflict appends one commit. For
+    // delete-vs-modify, ours was "delete" → tree entry is sha:null.
+    const branchContent = args.kind === "delete-vs-modify" ? null : await this.readLocalBytesForBranchPush(args.vaultPath);
+    await this.pushConflictPathsToBranch(
+      [{ path: args.vaultPath, content: branchContent }],
+      `Conflict snapshot: ${args.vaultPath} (${args.kind})`,
+    );
+
     if (args.fromBatchId === null) return;
 
     // Push-side cascade: drop the path from the current batch + every
@@ -1341,6 +1355,198 @@ export class Sync2Manager {
         await this.queue.delete(id);
       }
     }
+  }
+
+  // Read the local "ours" bytes for a path being registered as a
+  // conflict, for the conflict-branch push. Pulls from the live
+  // vault — applyRemoteAddOrModify / applyRemoteDeletion / reconcile
+  // callers all observe a vault that matches the value we want to
+  // preserve on the server side. Missing file → 0-byte buffer
+  // (defensive; the caller should already have routed delete-vs-modify
+  // to a sha:null tree entry by the time we get here).
+  private async readLocalBytesForBranchPush(
+    vaultPath: string,
+  ): Promise<ArrayBuffer> {
+    if (!(await this.vault.adapter.exists(vaultPath))) {
+      return new ArrayBuffer(0);
+    }
+    return await this.vault.adapter.readBinary(vaultPath);
+  }
+
+  // Push N conflict-path entries to the per-device conflict branch
+  // as a single commit. Eager-create the branch at current main HEAD
+  // when this is the first conflict of the session; otherwise append
+  // to the existing branch head. `base_tree` for the new commit is
+  // ALWAYS current main.tree — that's the "rebase forward" rule from
+  // PSEUDO-MERGE-MODE.md §"Архітектура push: split-push у processBatch".
+  // It keeps the branch trivially merge-able back to main on finalize:
+  // branch.tree == main.tree + (only the conflict paths overridden).
+  //
+  // Each `entries[i].content` is the bytes that go on the branch:
+  //   - ArrayBuffer → uploaded as a blob; tree entry references the
+  //     blob's SHA.
+  //   - null        → deletion (tree entry `sha: null`).
+  //
+  // Updates SnapshotStore.conflictBranch with the new head and
+  // persists. Caller is responsible for ordering vs other writes.
+  private async pushConflictPathsToBranch(
+    entries: Array<{ path: string; content: ArrayBuffer | null }>,
+    message: string,
+  ): Promise<void> {
+    if (entries.length === 0) return;
+
+    // 1. Fresh main HEAD + tree (rebase forward).
+    const mainHead = await this.client.getBranchHeadSha({ retry: true });
+    const mainCommit = await this.client.getCommit({
+      sha: mainHead,
+      retry: true,
+    });
+    const mainTreeSha = mainCommit.tree.sha;
+
+    // 2. Resolve / create the conflict branch.
+    let cb = this.store.getConflictBranch();
+    if (cb === null) {
+      // Eager creation: name = easy-sync-conflicts-{label}-{ts}-{mmm}.
+      // On the rare 422 "Reference already exists" (cross-device
+      // sub-second collision on the default label), re-generate
+      // with a freshly-clocked now() — millisecond resolution makes
+      // a second collision vanishingly small.
+      let attempt = 0;
+      while (true) {
+        const name = buildConflictBranchName(this.deviceLabel(), this.now());
+        try {
+          await this.client.createReference({
+            ref: `refs/heads/${name}`,
+            sha: mainHead,
+            retry: true,
+          });
+          cb = { name, head: mainHead };
+          break;
+        } catch (err) {
+          attempt += 1;
+          const status = (err as { status?: number }).status;
+          if (status === 422 && attempt < 5) {
+            // Yield a millisecond and retry.
+            await new Promise((r) => setTimeout(r, 2));
+            continue;
+          }
+          throw err;
+        }
+      }
+      this.store.setConflictBranch(cb);
+      await this.store.save();
+      await this.logger.info("Sync2 conflict-branch created", {
+        name: cb.name,
+        baseSha: mainHead,
+      });
+    }
+
+    // 3. Build tree entries. For each path with content: createBlob
+    //    + tree entry referencing the blob SHA. For sha:null entries
+    //    (delete-vs-modify), the tree entry directly records the
+    //    delete against base_tree.
+    const treeEntries: NewTreeRequestItem[] = [];
+    for (const e of entries) {
+      if (e.content === null) {
+        treeEntries.push({
+          path: e.path,
+          mode: "100644",
+          type: "blob",
+          sha: null,
+        });
+      } else {
+        const base64 = arrayBufferToBase64(e.content);
+        const { sha } = await this.client.createBlob({
+          content: base64,
+          encoding: "base64",
+          retry: true,
+        });
+        treeEntries.push({
+          path: e.path,
+          mode: "100644",
+          type: "blob",
+          sha,
+        });
+      }
+    }
+
+    // 4. createTree on top of main.tree (always rebase forward).
+    const newTreeSha = await this.client.createTree({
+      tree: { tree: treeEntries, base_tree: mainTreeSha },
+      retry: true,
+    });
+
+    // 5. createCommit on branch.head. On a freshly-created branch
+    //    cb.head === mainHead, so the first conflict commit's parent
+    //    is main; subsequent conflicts chain on the previous one.
+    const commitSha = await this.client.createCommit({
+      message,
+      treeSha: newTreeSha,
+      parent: cb.head,
+      retry: true,
+    });
+
+    // 6. updateReference (PATCH /git/refs/heads/<branch>) + persist.
+    await this.client.updateReference({
+      ref: `heads/${cb.name}`,
+      sha: commitSha,
+      retry: true,
+    });
+    this.store.setConflictBranch({ name: cb.name, head: commitSha });
+    await this.store.save();
+    await this.logger.info("Sync2 conflict-branch commit pushed", {
+      branch: cb.name,
+      newHead: commitSha,
+      paths: entries.map((e) => e.path),
+    });
+  }
+
+  // Finalize the active conflict branch back into main when every
+  // record in the ConflictStore has been resolved. Manual
+  // merge-commit on main with parents=[main.head, branch.head] +
+  // tree=main.tree (the user's resolutions already landed in main
+  // via the regular push path; the branch just carries history).
+  // Then deleteReference + clear local conflictBranch state.
+  //
+  // No-op when there's no active branch OR when records remain.
+  // Safe to call multiple times — idempotent on a "nothing to do"
+  // input.
+  private async finalizeConflictBranchIfReady(): Promise<void> {
+    const cb = this.store.getConflictBranch();
+    if (cb === null) return;
+    if (!this.conflictStore) return;
+    if (this.conflictStore.getAll().length > 0) return;
+
+    const mainHead = await this.client.getBranchHeadSha({ retry: true });
+    const mainCommit = await this.client.getCommit({
+      sha: mainHead,
+      retry: true,
+    });
+    const mainTreeSha = mainCommit.tree.sha;
+
+    const message = appendDeviceSuffix(
+      `Merge ${cb.name}`,
+      this.deviceLabel(),
+    );
+    const mergeCommit = await this.client.createCommit({
+      message,
+      treeSha: mainTreeSha,
+      parents: [mainHead, cb.head],
+      retry: true,
+    });
+    await this.client.updateBranchHead({ sha: mergeCommit, retry: true });
+    await this.client.deleteReference({
+      ref: `heads/${cb.name}`,
+      retry: true,
+    });
+
+    this.store.clearConflictBranch();
+    this.store.setLastSync(mergeCommit, mainTreeSha);
+    await this.store.save();
+    await this.logger.info("Sync2 conflict-branch finalized", {
+      branch: cb.name,
+      mergeCommit,
+    });
   }
 
   // Write text content to disk in canonical form (LF, no BOM,
@@ -1531,6 +1737,7 @@ export class Sync2Manager {
       // nothing for this defensive call.
       await this.bootstrapIfNeeded(progress);
       let pushedAnyBatch = false;
+      let finalizeAttempted = false;
       while (true) {
         const headHint = await this.pullIfNeeded(progress);
         const ids = await this.queue.list();
@@ -1560,6 +1767,16 @@ export class Sync2Manager {
           commitNum + ids.length - 1,
         );
         pushedAnyBatch = true;
+      }
+      // Conflict-branch finalize hook (pseudo-merge stage 7b). Runs
+      // once per drain when the queue is empty: if the active
+      // conflict-branch state holds AND every record in the
+      // ConflictStore has been resolved, merge the branch back into
+      // main and deleteRef. Idempotent on "nothing to do" inputs;
+      // the `finalizeAttempted` guard just keeps the log line tidy.
+      if (!finalizeAttempted) {
+        finalizeAttempted = true;
+        await this.finalizeConflictBranchIfReady();
       }
       // Drain finished cleanly with an empty queue. Show "Sync done":
       //   - reuse the long-lived handle if we opened one (heavy phase)
