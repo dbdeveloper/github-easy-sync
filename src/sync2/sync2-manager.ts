@@ -407,6 +407,15 @@ export class Sync2Manager {
       syncedFiles = enqueued;
       if (enqueued > 0) {
         this.onLocalCommitted?.(enqueued);
+        // TEMPORARY DEBUG LOG: list every file the click is about to
+        // commit so a user reading `<plugin-id>.log` can cross-check
+        // the "Commit N files" notice against the actual paths. Drop
+        // once the change-detection pipeline has had enough field
+        // testing on multi-device traffic.
+        await this.logger.info("Sync2 syncAll committed", {
+          count: enqueued,
+          changes: changes.map((c) => `${c.kind} ${c.path}`),
+        });
         progress?.update(
           enqueued === 1 ? "Commit 1 file" : `Commit ${enqueued} files`,
         );
@@ -473,6 +482,12 @@ export class Sync2Manager {
       syncedFiles = enqueued;
       if (enqueued > 0) {
         this.onLocalCommitted?.(enqueued);
+        // TEMPORARY DEBUG LOG (matches syncAll). Single-file path so
+        // the entry shape stays identical for grep-ability.
+        await this.logger.info("Sync2 syncFile committed", {
+          count: enqueued,
+          changes: [`${change.kind} ${change.path}`],
+        });
         progress?.update("Commit 1 file");
       }
       await this.drain(progress);
