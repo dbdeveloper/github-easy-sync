@@ -15,6 +15,7 @@ import Logger from "./logger";
 import GithubClient from "./github/client";
 import GI from "./gi";
 import SnapshotStore from "./sync2/snapshot-store";
+import { AtomicWriteRecovery } from "./sync2/atomic-write";
 import ChangeDetector from "./sync2/change-detector";
 import PushQueue from "./sync2/push-queue";
 import TreeBuilder from "./sync2/tree-builder";
@@ -217,6 +218,19 @@ export default class GitHubSyncPlugin extends Plugin {
     const client = new GithubClient(this.settings, this.logger);
     const store = new SnapshotStore(this.app.vault);
     await store.load();
+    // Crash-recovery sweep for atomic-write artifacts. Runs BEFORE the
+    // engine starts touching the vault so any *.sync-tmp / *.sync-bak
+    // leftovers from a previous crash are reconciled against the
+    // snapshot before findChanges sees them.
+    try {
+      const recovery = new AtomicWriteRecovery(this.app.vault, store);
+      const result = await recovery.sweep();
+      if (result.cleaned > 0 || result.restored > 0) {
+        void this.logger.info("Sync2 atomic-write recovery sweep", result);
+      }
+    } catch (err) {
+      void this.logger.error("Atomic-write recovery sweep failed", `${err}`);
+    }
     const gi = new GI(vaultRoot);
     const queue = new PushQueue({
       vault: this.app.vault,

@@ -13,6 +13,7 @@ import {
   hasTextExtension,
 } from "../utils";
 import ChangeDetector from "./change-detector";
+import { atomicWriteFile } from "./atomic-write";
 import GitignoreInvariants from "./gitignore-invariants";
 import PushQueue, { EnqueueMeta } from "./push-queue";
 import SnapshotStore, { RemoteIdentity } from "./snapshot-store";
@@ -1174,10 +1175,17 @@ export class Sync2Manager {
   private async writeBinaryRemote(
     path: string,
     base64Content: string,
+    afterCommit?: () => Promise<void>,
   ): Promise<void> {
     const bytes = base64ToArrayBuffer(base64Content);
     await this.ensureParentDir(path);
-    await this.vault.adapter.writeBinary(path, bytes);
+    // Atomic-with-backup: a crash mid-write (especially of a plugin's
+    // manifest.json or main.js bundle) would otherwise leave the file
+    // partial and break the plugin at the next Obsidian launch. The
+    // afterCommit callback (typically recordSync) runs AFTER the
+    // bytes are in place but BEFORE the backup cleanup so the
+    // onload recovery sweep can disambiguate state.
+    await atomicWriteFile(this.vault, path, bytes, afterCommit);
   }
 
   private async applyRemoteDeletion(
@@ -1588,6 +1596,7 @@ export class Sync2Manager {
   private async writeRemoteText(
     path: string,
     content: string,
+    afterCommit?: () => Promise<void>,
   ): Promise<{ canonicalSha: string; changed: boolean }> {
     if (!hasTextExtension(path)) {
       // Routing guard: binary paths must never funnel through here
@@ -1601,8 +1610,9 @@ export class Sync2Manager {
       ? normalizeText(content)
       : { content, changed: false };
     await this.ensureParentDir(path);
-    await this.vault.adapter.write(path, canonical);
     const bytes = new TextEncoder().encode(canonical).buffer as ArrayBuffer;
+    // Atomic-with-backup. See writeBinaryRemote rationale.
+    await atomicWriteFile(this.vault, path, bytes, afterCommit);
     const canonicalSha = await calculateGitBlobSHA(bytes);
     return { canonicalSha, changed };
   }

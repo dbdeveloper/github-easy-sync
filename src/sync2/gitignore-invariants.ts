@@ -96,6 +96,12 @@ const ROOT_INVARIANT_BLOCK = `${INVARIANT_BEGIN}
 # Conflict-resolver sibling files — per-device markers that must
 # never propagate via sync.
 *.conflict-from-*
+
+# Atomic-write staging + backup artifacts (src/sync2/atomic-write.ts).
+# Transient files written by the crash-safe write protocol; the
+# onload recovery sweep cleans them up. Must never reach GitHub.
+*.sync-tmp
+*.sync-bak
 ${INVARIANT_END}`;
 
 // Recommended root-level defaults seeded ONLY when sync2 first

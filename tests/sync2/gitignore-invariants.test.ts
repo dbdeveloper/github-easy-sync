@@ -107,15 +107,17 @@ describe("GitignoreInvariants.enforce", () => {
     expect(content).not.toContain("*.log");
   });
 
-  it("creates root .gitignore with *.log rule + conflict-sibling invariant when absent", async () => {
+  it("creates root .gitignore with conflict-sibling + atomic-write artifact invariants + *.log default when absent", async () => {
     const rootGitignorePath = path.join(f.root, ".gitignore");
     expect(fs.existsSync(rootGitignorePath)).toBe(false);
     await f.inv.enforce();
     const content = fs.readFileSync(rootGitignorePath, "utf8");
-    // Invariant block: conflict-sibling files must never propagate
-    // across devices.
+    // Invariant block: conflict-sibling files + atomic-write
+    // staging/backup artifacts must never propagate across devices.
     expect(content).toContain(INVARIANT_BEGIN);
     expect(content).toContain("*.conflict-from-*");
+    expect(content).toContain("*.sync-tmp");
+    expect(content).toContain("*.sync-bak");
     // Recommended defaults: *.log (the plugin's own log lives at
     // <vault>/<plugin-id>.log; remove the rule to opt into log
     // sync).
