@@ -29,6 +29,8 @@ import {
   attemptAutoMerge,
   PluginJsContext,
 } from "./conflict-detection";
+import { evaluateConflictState } from "./conflict-classifier";
+import { ConflictWatcher } from "./conflict-watcher";
 import { buildConflictBranchName } from "./conflict-branch";
 import { normalizeText } from "./text-normalize";
 import { FileChange } from "./types";
@@ -216,6 +218,12 @@ export interface Sync2ManagerDeps {
   // that don't exercise the conflict path can omit it (the manager
   // throws if a conflict tries to register and the store is missing).
   conflictStore?: ConflictStore;
+  // Pseudo-merge ConflictWatcher (stage 9 wiring). The drain wraps
+  // its batch loop in pause/resume so mid-drain vault writes from
+  // sibling-create don't trigger nested evaluateConflictState
+  // invocations. Optional: tests that don't care leave it out and
+  // sweeps still run inline via evaluateConflictState directly.
+  conflictWatcher?: ConflictWatcher;
   // UI hook for queue-drain progress. main.ts wires this to a long-
   // lived Notice; tests omit it. Returns a handle whose update()
   // changes the displayed text and hide() dismisses the notice.
@@ -292,6 +300,7 @@ export class Sync2Manager {
   private readonly commitMessageFile: () => string;
   private readonly deviceLabel: () => string;
   private readonly conflictStore: ConflictStore | undefined;
+  private readonly conflictWatcher: ConflictWatcher | undefined;
   private readonly accumulateOfflineSyncs: boolean;
   private readonly onProgress: ProgressFactory | undefined;
   private readonly onLocalCommitted:
@@ -341,6 +350,7 @@ export class Sync2Manager {
         ? deps.deviceLabel
         : () => deps.deviceLabel as string;
     this.conflictStore = deps.conflictStore;
+    this.conflictWatcher = deps.conflictWatcher;
     this.accumulateOfflineSyncs = deps.accumulateOfflineSyncs ?? false;
     this.onProgress = deps.onProgress;
     this.onLocalCommitted = deps.onLocalCommitted;
@@ -1720,6 +1730,27 @@ export class Sync2Manager {
       // bootstrapIfNeeded short-circuits in O(1) when
       // lastSyncCommitSha !== null, so the click-path callers pay
       // nothing for this defensive call.
+      // Pseudo-merge stage 9: pause ConflictWatcher events for the
+      // whole drain window. Obsidian events are NOT buffered while
+      // paused (PSEUDO-MERGE-MODE.md §"Архітектура push") — that's
+      // fine because the drain-start + drain-end sweeps below
+      // re-evaluate ConflictStore vs file-system state, which
+      // catches drift regardless of whether vault events fired.
+      this.conflictWatcher?.pause();
+
+      // Drain-start sweep: catches drift that happened OUTSIDE drain
+      // since the last sweep — external mods (iCloud/file-manager
+      // edits), plugin toggle off→on windows, mobile suspension
+      // where vault.on doesn't fire reliably. Per spec the sweep is
+      // a safety net even when ConflictWatcher is wired.
+      if (this.conflictStore) {
+        await evaluateConflictState(
+          this.conflictStore,
+          this.vault,
+          this.now,
+        );
+      }
+
       await this.bootstrapIfNeeded(progress);
       let pushedAnyBatch = false;
       let finalizeAttempted = false;
@@ -1752,6 +1783,23 @@ export class Sync2Manager {
           commitNum + ids.length - 1,
         );
         pushedAnyBatch = true;
+      }
+      // Drain-end sweep (pseudo-merge stage 9). Catches state that
+      // changed DURING drain:
+      //   - our own sibling writes (registerConflictAndDropPath fired
+      //     during reconcile or applyRemoteAddOrModify) — those
+      //     vault.on events fire while ConflictWatcher is paused and
+      //     get effectively dropped; the sweep re-discovers the
+      //     state via fs scan.
+      //   - user's mid-drain actions on conflict files (delete
+      //     sibling, copy onto base, edit base) — these can resolve
+      //     conflicts inline so finalize fires in the same drain.
+      if (this.conflictStore) {
+        await evaluateConflictState(
+          this.conflictStore,
+          this.vault,
+          this.now,
+        );
       }
       // Conflict-branch finalize hook (pseudo-merge stage 7b). Runs
       // once per drain when the queue is empty: if the active
@@ -1794,6 +1842,10 @@ export class Sync2Manager {
       }
     } finally {
       this.running = false;
+      // Resume ConflictWatcher unconditionally — even on a drain
+      // error the watcher should pick up subsequent vault events
+      // (the next sync will re-evaluate).
+      this.conflictWatcher?.resume();
     }
   }
 

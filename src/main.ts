@@ -22,6 +22,7 @@ import GitignoreInvariants from "./sync2/gitignore-invariants";
 import { Sync2Manager } from "./sync2/sync2-manager";
 import { IntervalScheduler } from "./sync2/interval-scheduler";
 import ConflictStore from "./sync2/conflict-store";
+import { ConflictWatcher } from "./sync2/conflict-watcher";
 import manifest from "../manifest.json";
 
 // How long the brief local-phase notices stay visible. 700ms is the
@@ -39,6 +40,7 @@ export default class GitHubSyncPlugin extends Plugin {
   // pointers — the runtime is single-engine.
   sync2Manager!: Sync2Manager;
   conflictStore!: ConflictStore;
+  conflictWatcher!: ConflictWatcher;
   logger!: Logger;
   // Exposed for the settings tab's "Push plugins data.json" toggle,
   // which reads/writes the allow line directly via this owner.
@@ -120,6 +122,7 @@ export default class GitHubSyncPlugin extends Plugin {
       this.app.vault.offref(this.vaultRenameListener);
       this.vaultRenameListener = null;
     }
+    this.conflictWatcher?.stop();
   }
 
   // ── settings ────────────────────────────────────────────────────────
@@ -250,6 +253,20 @@ export default class GitHubSyncPlugin extends Plugin {
     });
     await conflictStore.load();
     this.conflictStore = conflictStore;
+    // Pseudo-merge stage 9: real-time vault listener that fires the
+    // classifier on delete/modify/rename events touching either a
+    // conflict's base path or its sibling. Drain pauses it during
+    // the batch loop; outside drain it picks up the user's actions
+    // (delete sibling, copy onto base, etc.) immediately so the
+    // status bar / UI surfaces stay live.
+    const conflictWatcher = new ConflictWatcher({
+      vault: this.app.vault,
+      store: conflictStore,
+      onError: (err) =>
+        void this.logger.error("ConflictWatcher error", `${err}`),
+    });
+    conflictWatcher.start();
+    this.conflictWatcher = conflictWatcher;
 
     this.sync2Manager = new Sync2Manager({
       vault: this.app.vault,
@@ -279,6 +296,7 @@ export default class GitHubSyncPlugin extends Plugin {
         branch: this.settings.githubBranch,
       }),
       conflictStore,
+      conflictWatcher,
       accumulateOfflineSyncs: this.settings.accumulateOfflineSyncs ?? false,
       autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? false,
       onProgress: (initial: string) => {

@@ -27,6 +27,7 @@ import GitignoreInvariants from "../../../../src/sync2/gitignore-invariants";
 import PushQueue from "../../../../src/sync2/push-queue";
 import TreeBuilder from "../../../../src/sync2/tree-builder";
 import ConflictStore from "../../../../src/sync2/conflict-store";
+import { ConflictWatcher } from "../../../../src/sync2/conflict-watcher";
 import {
   GitHubSyncSettings,
   DEFAULT_SETTINGS,
@@ -76,6 +77,7 @@ export interface Sync2TestClient {
   // to wire it up themselves. Stage 6.5 conflict-resolver tests use
   // it directly to assert on pending records / sibling files.
   conflictStore: ConflictStore;
+  conflictWatcher: ConflictWatcher;
   branch: string;
   // Live settings reference — same object the detector reads
   // through. I-series tests mutate fields here (e.g. syncConfigDir,
@@ -150,6 +152,15 @@ export async function createSync2Client(
     selfPluginId: SELF_PLUGIN_ID,
   });
   await conflictStore.load();
+  // Stage 9 ConflictWatcher — opt-in for tests that want to drive
+  // real-time vault events. Started by default so drain's pause/
+  // resume cycle runs through. Tests that want to disable the
+  // real-time watcher can call .stop() before fixturing.
+  const conflictWatcher = new ConflictWatcher({
+    vault,
+    store: conflictStore,
+  });
+  conflictWatcher.start();
 
   const manager = new Sync2Manager({
     vault,
@@ -174,6 +185,7 @@ export async function createSync2Client(
       branch: settings.githubBranch,
     }),
     conflictStore,
+    conflictWatcher,
     accumulateOfflineSyncs: opts.accumulateOfflineSyncs ?? false,
     autoCanonicalize: () => opts.autoCanonicalize ?? true,
   });
@@ -189,9 +201,11 @@ export async function createSync2Client(
     client,
     logger,
     conflictStore,
+    conflictWatcher,
     branch: opts.branch,
     settings,
     cleanup() {
+      conflictWatcher.stop();
       if (!ownsVaultPath) return;
       try {
         rmSync(vaultPath, { recursive: true, force: true });
