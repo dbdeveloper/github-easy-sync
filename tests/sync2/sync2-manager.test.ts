@@ -1455,10 +1455,13 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 
-    it("onLocalCommitted reports the count after pending-conflict filter", async () => {
-      // Pre-create a conflict on a.md so it gets filtered. b.md and
-      // c.md still go through. Expect count = 2 (filtered length),
-      // not 3 (raw findChanges length).
+    it("onLocalCommitted reports the full count — in-conflict paths are NOT filtered at enqueue (stage 7c)", async () => {
+      // Pre-create a conflict on a.md. Pre-7c, dropPendingConflictPaths
+      // would filter a.md out before enqueueOrMerge — onLocalCommitted
+      // would see count=2. Post-7c, edits to in-conflict paths flow
+      // through enqueue and get routed to the conflict-branch in
+      // processBatch's split-push partition; onLocalCommitted sees
+      // the full count=3.
       const ConflictStore = (
         await import("../../src/sync2/conflict-store")
       ).default;
@@ -1510,7 +1513,7 @@ describe("Sync2Manager.syncAll — basic flow (Stage 6a)", () => {
 
       await manager.syncAll();
 
-      expect(calls).toEqual([2]); // a.md filtered, b.md + c.md enqueued
+      expect(calls).toEqual([3]); // a.md kept (routed to branch later), b.md + c.md plain
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 

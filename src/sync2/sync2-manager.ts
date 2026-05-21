@@ -1642,41 +1642,26 @@ export class Sync2Manager {
     changes: import("./types").FileChange[],
     meta: EnqueueMeta,
   ): Promise<number> {
-    const filtered = this.dropPendingConflictPaths(changes);
-    if (filtered.length === 0) return 0;
+    if (changes.length === 0) return 0;
+    // Pseudo-merge stage 7c: in-conflict paths are NOT filtered here
+    // anymore. Edits to a file that's currently in conflict flow
+    // through to processBatch's split-push partition step, where
+    // they're routed to the per-device conflict branch on GitHub
+    // (not main). The conflict's local "ours" history accumulates
+    // server-side, invisible to other devices until resolution.
     if (this.accumulateOfflineSyncs) {
-      const target = await this.queue.mergeIntoLatestPending(filtered);
+      const target = await this.queue.mergeIntoLatestPending(changes);
       if (target !== null) {
         // Refresh the merged batch's commit message to the latest
         // template render. "Last std-sync in the group wins" — the
         // timestamp on GitHub then reflects when the batch actually
         // shipped, not when the first click happened.
         await this.queue.updateCommitMessage(target, meta.commitMessage);
-        return filtered.length;
+        return changes.length;
       }
     }
-    await this.queue.enqueue(filtered, meta);
-    return filtered.length;
-  }
-
-  // Filter out file changes whose path has an active conflict record
-  // in ConflictStore. Logs each dropped path so the user can audit
-  // why something they edited didn't show up on the remote.
-  private dropPendingConflictPaths(changes: FileChange[]): FileChange[] {
-    if (!this.conflictStore || changes.length === 0) return changes;
-    const out: FileChange[] = [];
-    for (const c of changes) {
-      if (this.conflictStore.hasPending(c.path)) {
-        // Fire-and-forget log; we don't want to block enqueue on a
-        // logger that might be slow.
-        void this.logger.info("Sync2 enqueue: skip pending-conflict path", {
-          path: c.path,
-        });
-        continue;
-      }
-      out.push(c);
-    }
-    return out;
+    await this.queue.enqueue(changes, meta);
+    return changes.length;
   }
 
   private fullSyncMeta(): EnqueueMeta {
@@ -1893,6 +1878,51 @@ export class Sync2Manager {
             parentCommitSha: currentHead,
             parentTreeSha: headCommit.tree.sha,
           });
+        }
+      }
+
+      // Split-push partition (PSEUDO-MERGE-MODE.md §"Архітектура
+      // push: split-push у processBatch", stage 7c).
+      //
+      // After reconcile / case-3 re-target settles, walk the batch
+      // looking for paths that are now in the ConflictStore — they
+      // were filtered into a conflict during a prior drain (then the
+      // user edited them locally, which findChanges re-detected and
+      // enqueueOrMerge accepted without filtering now that
+      // dropPendingConflictPaths is gone). These conflict paths get
+      // pushed to the per-device conflict branch instead of main:
+      // the user's edits land on GitHub but stay invisible to other
+      // devices until the conflict is resolved.
+      //
+      // We push them as a single multi-path commit via the same
+      // helper that conflict registration uses, then drop the paths
+      // from the batch so the main-side tree build below sees only
+      // plain paths.
+      if (this.conflictStore) {
+        const peek = await this.queue.read(id);
+        const conflictPaths = peek.files.filter((p) =>
+          this.conflictStore!.hasPending(p),
+        );
+        if (conflictPaths.length > 0) {
+          const branchEntries: Array<{
+            path: string;
+            content: ArrayBuffer | null;
+          }> = [];
+          for (const p of conflictPaths) {
+            const bytes = await this.queue.readFile(id, p);
+            branchEntries.push({ path: p, content: bytes });
+          }
+          await this.pushConflictPathsToBranch(
+            branchEntries,
+            `Edit-while-in-conflict: ${conflictPaths.length} path(s)`,
+          );
+          for (const p of conflictPaths) {
+            await this.queue.removeFile(id, p);
+          }
+          await this.logger.info(
+            "Sync2 split-push: routed edit-while-in-conflict paths to branch",
+            { paths: conflictPaths },
+          );
         }
       }
 
