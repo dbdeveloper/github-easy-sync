@@ -86,6 +86,14 @@ export class Vault {
           relDir === "" ? entry.name : `${relDir}/${entry.name}`.replace(/\\/g, "/");
         // Skip configDir to match real Obsidian's index behaviour.
         if (childRel === this.configDir) continue;
+        // Skip ROOT-level dotfiles — production Obsidian's file
+        // indexer omits anything whose name starts with `.` at the
+        // vault root (<vault>/.gitignore, .gitattributes, etc.).
+        // change-detector's walkRootDotfiles is the production
+        // codepath that picks them up; mirroring the gap here
+        // ensures unit tests catch any code path that wrongly
+        // assumes getFiles() returns root dotfiles.
+        if (relDir === "" && entry.name.startsWith(".")) continue;
         if (entry.isFile()) {
           const fullPath = path.join(this.rootPath, childRel);
           const s = statSync(fullPath);

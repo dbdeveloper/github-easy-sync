@@ -221,9 +221,12 @@ function makeFakeClient(): Sync2Client & {
       const got = inner.get(args.path);
       if (got === undefined) return null;
       const b64 = Buffer.from(got, "utf8").toString("base64");
-      const sha =
-        "blob-of-" +
-        crypto.createHash("sha1").update(got).digest("hex").slice(0, 8);
+      // Real git-blob SHA so production code that compares this
+      // against `calculateGitBlobSHA(oursBytes)` (reconcile's no-op
+      // convergence check) sees true matches, not synthesised
+      // strings.
+      const bytes = new TextEncoder().encode(got).buffer as ArrayBuffer;
+      const sha = await calculateGitBlobSHA(bytes);
       return { content: b64, sha };
     },
     async getRepoContent(_args) {
@@ -245,9 +248,8 @@ function makeFakeClient(): Sync2Client & {
       > = {};
       if (inner) {
         for (const [p, content] of inner.entries()) {
-          const sha =
-            "blob-of-" +
-            crypto.createHash("sha1").update(content).digest("hex").slice(0, 8);
+          const bytes = new TextEncoder().encode(content).buffer as ArrayBuffer;
+          const sha = await calculateGitBlobSHA(bytes);
           files[p] = {
             path: p,
             mode: "100644",
@@ -266,9 +268,8 @@ function makeFakeClient(): Sync2Client & {
       // to the requested SHA.
       for (const inner of state.contentsByRef.values()) {
         for (const [, content] of inner.entries()) {
-          const sha =
-            "blob-of-" +
-            crypto.createHash("sha1").update(content).digest("hex").slice(0, 8);
+          const bytes = new TextEncoder().encode(content).buffer as ArrayBuffer;
+          const sha = await calculateGitBlobSHA(bytes);
           if (sha === args.sha) {
             return {
               content: Buffer.from(content, "utf8").toString("base64"),
@@ -845,6 +846,157 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       const tree = f.client.state.lastTree!;
       expect(tree).toHaveLength(1);
       expect(tree[0].path).toBe("img.png");
+    });
+
+    it("no-op convergence: ours.bytes === theirs.bytes → reconcile completes cleanly without conflict", async () => {
+      // Real-world trigger: user out-of-band copied the same file
+      // bytes to a second device (adb push, file transfer, manual
+      // sync via another tool). Mobile finds the file modified vs
+      // its lastSync snapshot, enqueues it for push. Remote moved
+      // too (the other device pushed those exact bytes). The
+      // reconcile must detect ours == theirs and short-circuit the
+      // entire resolution dance instead of registering a conflict.
+      const convergedBytes = "shared bytes - same on both sides\n";
+      writeVaultFile(f.root, "x.md", convergedBytes);
+      f.store.set("x.md", {
+        path: "x.md",
+        remoteSha: await shaOf("old version"),
+        mtime: 0,
+        size: convergedBytes.length,
+      });
+      f.store.setLastSync("BASE_HEAD", "BASE_TREE");
+      f.client.setBranchHead("NEW_HEAD");
+      f.client.setTreeShaForCommit("NEW_HEAD", "NEW_TREE");
+      f.client.setContentAtRef("BASE_HEAD", "x.md", "old version");
+      f.client.setContentAtRef("NEW_HEAD", "x.md", convergedBytes);
+
+      // Must not throw + must not register a conflict. Without the
+      // no-op convergence short-circuit, this scenario would route
+      // through atomic-theirs-wins, do a redundant writeBinaryRemote
+      // of identical bytes, and log a misleading "theirs wins" line.
+      await expect(f.manager.syncAll()).resolves.not.toThrow();
+      expect(f.manager["conflictStore"]?.getAll() ?? []).toEqual([]);
+
+      // Live vault content unchanged — same bytes either way.
+      expect(
+        fs.readFileSync(path.join(f.root, "x.md"), "utf8"),
+      ).toBe(convergedBytes);
+    });
+
+    it("manifest dropped mid-loop: main.js reconcile reads manifest from baseRef without throwing", async () => {
+      // Race regression test: when manifest.json AND main.js both
+      // sit in a single batch and the reconcile loop drops
+      // manifest first (atomic theirs wins → queue.removeFile), the
+      // main.js iteration must NOT throw "File does not exist"
+      // trying to read the just-dropped manifest from the batch
+      // snapshot. The reconcile keeps `batch.files` (in-memory)
+      // synchronised with disk via splice after every removeFile,
+      // so `readReconcilePluginJsContext` sees the splice and falls
+      // back to reading manifest from baseRef.
+      const manifestPath = ".obsidian/plugins/test-plugin/manifest.json";
+      const mainJsPath = ".obsidian/plugins/test-plugin/main.js";
+      const oursManifest = JSON.stringify({
+        id: "test-plugin",
+        version: "1.5.0",
+        name: "Test plugin",
+      });
+      const theirsManifest = JSON.stringify({
+        id: "test-plugin",
+        version: "2.0.0",
+        name: "Test plugin",
+      });
+      const baseManifest = JSON.stringify({
+        id: "test-plugin",
+        version: "1.0.0",
+        name: "Test plugin",
+      });
+      const oursMainJs = "module.exports = { version: '1.5' };";
+      const theirsMainJs = "module.exports = { version: '2.0' };";
+      const baseMainJs = "module.exports = { version: '1.0' };";
+
+      writeVaultFile(f.root, manifestPath, oursManifest);
+      writeVaultFile(f.root, mainJsPath, oursMainJs);
+      // Snapshot at BASE so both files emit as modified.
+      f.store.set(manifestPath, {
+        path: manifestPath,
+        remoteSha: await shaOf(baseManifest),
+        mtime: 0,
+        size: oursManifest.length,
+      });
+      f.store.set(mainJsPath, {
+        path: mainJsPath,
+        remoteSha: await shaOf(baseMainJs),
+        mtime: 0,
+        size: oursMainJs.length,
+      });
+      f.store.setLastSync("BASE_HEAD", "BASE_TREE");
+      f.client.setBranchHead("NEW_HEAD");
+      f.client.setTreeShaForCommit("NEW_HEAD", "NEW_TREE");
+      f.client.setContentAtRef("BASE_HEAD", manifestPath, baseManifest);
+      f.client.setContentAtRef("NEW_HEAD", manifestPath, theirsManifest);
+      f.client.setContentAtRef("BASE_HEAD", mainJsPath, baseMainJs);
+      f.client.setContentAtRef("NEW_HEAD", mainJsPath, theirsMainJs);
+
+      // The actual assertion: syncAll completes without throwing
+      // "File does not exist". Pre-fix this would have thrown when
+      // the main.js iteration tried to read the just-dropped
+      // manifest from the batch.
+      await expect(f.manager.syncAll()).resolves.not.toThrow();
+
+      // No conflict registered — plugin-js semver wins all the way
+      // down (2.0.0 > 1.5.0).
+      expect(f.manager["conflictStore"]?.getAll() ?? []).toEqual([]);
+    });
+
+    it("register-conflict path also keeps in-memory batch.files in sync with disk", async () => {
+      // Generalisation of the previous test: ANY drop site in the
+      // reconcile loop must splice batch.files. register-conflict
+      // is the second drop site (via registerConflictAndDropPath
+      // → queue.removeFile cascade). We trigger a binary register-
+      // conflict (always registers, never atomic) on one file plus
+      // a co-located plugin-js (main.js) that reads "ours"
+      // manifest from baseRef — exact same race shape as above but
+      // through a different code path.
+      const manifestPath = ".obsidian/plugins/test-plugin/manifest.json";
+      const mainJsPath = ".obsidian/plugins/test-plugin/main.js";
+      const oursManifest = JSON.stringify({
+        id: "test-plugin",
+        version: "1.5.0",
+      });
+      const theirsManifest = JSON.stringify({
+        id: "test-plugin",
+        version: "2.0.0",
+      });
+      const baseManifest = JSON.stringify({
+        id: "test-plugin",
+        version: "1.0.0",
+      });
+
+      writeVaultFile(f.root, manifestPath, oursManifest);
+      writeVaultFile(f.root, mainJsPath, "ours main");
+      f.store.set(manifestPath, {
+        path: manifestPath,
+        remoteSha: await shaOf(baseManifest),
+        mtime: 0,
+        size: oursManifest.length,
+      });
+      f.store.set(mainJsPath, {
+        path: mainJsPath,
+        remoteSha: await shaOf("base main"),
+        mtime: 0,
+        size: 8,
+      });
+      f.store.setLastSync("BASE_HEAD", "BASE_TREE");
+      f.client.setBranchHead("NEW_HEAD");
+      f.client.setTreeShaForCommit("NEW_HEAD", "NEW_TREE");
+      f.client.setContentAtRef("BASE_HEAD", manifestPath, baseManifest);
+      f.client.setContentAtRef("NEW_HEAD", manifestPath, theirsManifest);
+      f.client.setContentAtRef("BASE_HEAD", mainJsPath, "base main");
+      f.client.setContentAtRef("NEW_HEAD", mainJsPath, "theirs main");
+
+      // Run — must not throw regardless of which path is iterated
+      // first (atomic-theirs for manifest OR for main.js).
+      await expect(f.manager.syncAll()).resolves.not.toThrow();
     });
 
     it("re-targets parent + base_tree onto the new head after reconcile", async () => {

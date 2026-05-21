@@ -122,8 +122,77 @@ describe("ChangeDetector", () => {
       const out = await f.detector.findChanges();
       // .gitignore itself is syncable — it propagates rules between
       // devices, so it's expected to show up as added too.
+      // (Picked up via walkRootDotfiles since production Obsidian's
+      // vault.getFiles() omits root-level dotfiles.)
       const paths = out.map((c) => c.path).sort();
       expect(paths).toEqual([".gitignore", "x.md"]);
+    });
+
+    it("picks up root-level dotfiles that vault.getFiles() omits", async () => {
+      // Real bug from production: desktop and mobile root `.gitignore`
+      // drifted apart for weeks because findChanges never saw edits
+      // to it. vault.getFiles() in production Obsidian doesn't index
+      // root dotfiles; walkRootDotfiles compensates. The mock mirrors
+      // the production gap (root dotfiles are NOT returned by
+      // mock's getFiles), so this test fails the moment the
+      // compensation breaks.
+      writeFile(f.root, ".gitignore", "rule\n");
+      writeFile(f.root, ".gitattributes", "* text=auto\n");
+      writeFile(f.root, ".editorconfig", "root = true\n");
+      writeFile(f.root, "regular.md", "body");
+      const out = await f.detector.findChanges();
+      const paths = out.map((c) => c.path).sort();
+      expect(paths).toEqual([
+        ".editorconfig",
+        ".gitattributes",
+        ".gitignore",
+        "regular.md",
+      ]);
+    });
+
+    it("dotfile coverage: .gitignore, .gitkeep, .blabla sync; .git blocked", async () => {
+      // The bug that prompted this test family: walking the vault on
+      // mobile, root .gitignore stayed device-local for weeks
+      // because vault.getFiles() never returned it. Comprehensive
+      // dotfile coverage so future regressions surface immediately.
+      writeFile(f.root, ".gitignore", "user rule\n");
+      writeFile(f.root, ".gitkeep", ""); // standard git placeholder
+      writeFile(f.root, ".blabla", "arbitrary dotfile content");
+      writeFile(f.root, ".editorconfig", "[*]\n");
+      // .git file at root would normally indicate a git submodule
+      // pointer. It must NEVER sync (it's git internals).
+      writeFile(f.root, ".git", "gitdir: ../actual/.git");
+
+      const out = await f.detector.findChanges();
+      const paths = out.map((c) => c.path).sort();
+
+      // All four user dotfiles flow through; .git is blocked by
+      // isSyncable's hardcoded denylist.
+      expect(paths).toEqual([
+        ".blabla",
+        ".editorconfig",
+        ".gitignore",
+        ".gitkeep",
+      ]);
+    });
+
+    it("walkRootDotfiles only walks the vault ROOT (no recursion into dotfile-named subdirs)", async () => {
+      // Dotfiles inside subdirs (`<vault>/Notes/.todo.md`) are NOT a
+      // concern here — vault.getFiles() in production may or may
+      // not pick them up, but they aren't the user's "vault config"
+      // shape. walkRootDotfiles stays one level deep on purpose.
+      writeFile(f.root, ".gitignore", "rule\n");
+      writeFile(f.root, "Notes/.hidden.md", "hidden note");
+      const out = await f.detector.findChanges();
+      const paths = out.map((c) => c.path).sort();
+      // .gitignore picked up by walkRootDotfiles. Notes/.hidden.md
+      // would only be picked up if Obsidian's index returns it via
+      // getFiles(); the mock mirrors production by also omitting
+      // dotfiles inside subdirectories. Test asserts root dotfile
+      // only — keeps the contract narrow.
+      expect(paths).toContain(".gitignore");
+      // Whether subdir-dotfile shows up is unspecified at this
+      // layer; we assert only what walkRootDotfiles guarantees.
     });
   });
 

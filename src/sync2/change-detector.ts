@@ -160,6 +160,16 @@ export default class ChangeDetector {
       path: f.path,
       stat: { mtime: f.stat.mtime, size: f.stat.size },
     }));
+    // Same indexing gap that hides <configDir>/.gitignore on production
+    // Obsidian also hides ROOT-level dotfiles (<vault>/.gitignore,
+    // <vault>/.gitattributes, etc.) — Obsidian's file index excludes
+    // anything whose name starts with `.`. Without an explicit walk
+    // here, edits to <vault>/.gitignore stay device-local forever —
+    // a fundamental sync gap. ALWAYS run this walk (unlike
+    // walkConfigDir, which is gated on syncConfigDir): root-level
+    // dotfiles are USER vault content, not per-device configDir
+    // state.
+    allFiles.push(...(await this.walkRootDotfiles()));
     if (this.syncConfigDir()) {
       allFiles.push(...(await this.walkConfigDir()));
     }
@@ -395,6 +405,37 @@ export default class ChangeDetector {
       this.gi,
       this.giReader,
     );
+  }
+
+  // Enumerate ROOT-level dotfiles via adapter.list(""). Always called
+  // (no settings gate) because root dotfiles are user vault content
+  // (`.gitignore`, `.gitattributes`, `.editorconfig`, …) that must
+  // sync between devices. vault.getFiles() silently skips these in
+  // production Obsidian — confirmed by the user with a real desktop
+  // ↔ mobile sync where root `.gitignore` was never detected as a
+  // change and stayed device-local.
+  //
+  // Only the vault root is walked, one level deep, dotfiles only:
+  // - regular root files are already in vault.getFiles()
+  // - dotfiles in subfolders are theoretically also missing from the
+  //   index, but that scenario is rarer and would need a deeper
+  //   recursive walk; address if it surfaces.
+  private async walkRootDotfiles(): Promise<FileLike[]> {
+    const out: FileLike[] = [];
+    if (!(await this.vault.adapter.exists(""))) return out;
+    const { files } = await this.vault.adapter.list("");
+    for (const filePath of files) {
+      // Only ROOT dotfiles (no slash → single path segment).
+      if (filePath.includes("/")) continue;
+      if (!filePath.startsWith(".")) continue;
+      const stat = await this.vault.adapter.stat(filePath);
+      if (!stat || stat.type !== "file") continue;
+      out.push({
+        path: filePath,
+        stat: { mtime: stat.mtime, size: stat.size },
+      });
+    }
+    return out;
   }
 
   // Recursively enumerate `<configDir>/` via adapter.list(). Only

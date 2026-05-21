@@ -2207,6 +2207,40 @@ export class Sync2Manager {
         ? (base64ToArrayBuffer(baseFetched.content) as ArrayBuffer)
         : null;
 
+      // Convergence short-circuit: if ours.bytes === theirs.bytes,
+      // any resolution path would degenerate into "no real change"
+      // (semver tied, mtime tied or not — doesn't matter, the disk
+      // state is already identical). Skip the whole attemptAutoMerge
+      // dance + the wasteful writeBinaryRemote-of-identical-bytes.
+      //
+      // Cheap-then-expensive: byte-length first (O(1)), then SHA
+      // (O(n)). theirsFetched.sha already came back from the GitHub
+      // round-trip; we just need to hash ours.
+      //
+      // Concrete trigger: same file landed on both devices via an
+      // out-of-band copy (adb push, manual download, IDE
+      // synchronizer) — mtime metadata differs but content matches.
+      // Previously this routed through "atomic theirs wins", spent
+      // an unnecessary writeBinaryRemote of identical bytes, and
+      // logged a misleading "theirs wins" line.
+      if (
+        theirsBytes !== null &&
+        theirsFetched !== null &&
+        oursBytes.byteLength === theirsBytes.byteLength
+      ) {
+        const oursSha = await calculateGitBlobSHA(oursBytes);
+        if (oursSha === theirsFetched.sha) {
+          await this.detector.recordSync(path, theirsFetched.sha);
+          await this.queue.removeFile(batchId, path);
+          dropFromBatchInMemory(path);
+          await this.logger.info(
+            "Sync2 reconcile no-op: ours bytes already match theirs (mtime ignored)",
+            { path },
+          );
+          continue;
+        }
+      }
+
       let pluginJs: PluginJsContext | undefined;
       if (
         theirsFetched !== null &&
