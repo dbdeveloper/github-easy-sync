@@ -24,7 +24,10 @@ import { ConflictKind } from "./conflict-store";
 export type Side = "modified" | "deleted";
 
 // Map (oursSide, theirsSide) → ConflictKind, or null when the pair
-// is not a real conflict (delete-vs-delete: both sides agree).
+// is not a real registered conflict — either both sides agree
+// (delete-vs-delete) or the resolution is automatic (modify-vs-
+// delete: local-modify always wins, file resurrects on remote;
+// see attemptAutoMerge's "modify-wins" outcome).
 export function classifyConflictKind(
   oursSide: Side,
   theirsSide: Side,
@@ -35,9 +38,9 @@ export function classifyConflictKind(
   if (oursSide === "deleted" && theirsSide === "modified") {
     return "delete-vs-modify";
   }
-  if (oursSide === "modified" && theirsSide === "deleted") {
-    return "modify-vs-delete";
-  }
+  // modify-vs-delete → null: caller does NOT register a record. The
+  // batch's "modified" entry passes through to push unchanged,
+  // resurrecting the file on remote.
   return null;
 }
 
@@ -46,11 +49,18 @@ export function classifyConflictKind(
 // Outcome of the auto-merge gate. Caller acts on each variant:
 //   - "clean": push merged content to main as if nothing happened
 //   - "atomic": push the winning side's existing content
+//   - "modify-wins": modify-vs-delete branch — remote deleted, ours
+//     modified, local-intent wins. Push ours, resurrecting the file
+//     on remote. Surfaced as a structured auto-merge outcome (not
+//     a silent `continue`) so it shows up in the log alongside the
+//     other auto-resolutions.
 //   - "register-conflict": call ConflictStore.create(kind:
-//     "modify-vs-modify", ...) and write a sibling
+//     "modify-vs-modify" | "delete-vs-modify", ...) and write a
+//     sibling for the user to resolve.
 export type AutoMergeResult =
   | { type: "clean"; content: ArrayBuffer }
   | { type: "atomic"; side: "ours" | "theirs" }
+  | { type: "modify-wins" }
   | { type: "register-conflict" };
 
 // Plugin-js context — caller pre-reads the matching manifest.json on
@@ -67,7 +77,10 @@ export interface PluginJsContext {
 export interface AttemptAutoMergeArgs {
   path: string;
   ours: ArrayBuffer;
-  theirs: ArrayBuffer;
+  // Bytes from the remote side. `null` ONLY when the remote deleted
+  // the file (modify-vs-delete branch); caller short-circuits to
+  // the "modify-wins" outcome.
+  theirs: ArrayBuffer | null;
   // Last-common-ancestor bytes for 3-way merge. `null` when no shared
   // ancestor exists (e.g., file added independently on both sides);
   // in that case text auto-merge bails to register-conflict.
@@ -78,16 +91,21 @@ export interface AttemptAutoMergeArgs {
   pluginJs?: PluginJsContext;
 }
 
-// Auto-merge gate. Modify-vs-modify only — caller (classifyConflict-
-// Kind first) is responsible for short-circuiting delete-vs-modify
-// and modify-vs-delete kinds before reaching here.
+// Auto-merge gate. Returns one of four outcomes for the caller to
+// apply. Caller (classifyConflictKind first) is responsible for
+// short-circuiting delete-vs-modify before reaching here.
 //
 // Strategy dispatch by path:
+//   - theirs === null     → modify-wins (modify-vs-delete: local-
+//                           modify always wins, file resurrects)
 //   - isAtomicPluginFile  → plugin-js semver, mtime tie-break
 //   - hasTextExtension    → 3-way merge via mergeText
 //   - else (binary)       → register-conflict unconditionally
 //                           (2.0.0-beta's silent atomic-mtime is gone)
 export function attemptAutoMerge(args: AttemptAutoMergeArgs): AutoMergeResult {
+  if (args.theirs === null) {
+    return { type: "modify-wins" };
+  }
   if (isAtomicPluginFile(args.path, args.configDir)) {
     return resolvePluginJs(args.pluginJs);
   }

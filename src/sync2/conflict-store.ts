@@ -25,19 +25,20 @@ import { calculateGitBlobSHA } from "../utils";
 // The sibling file itself lives in the vault next to the original:
 //
 //   <basename>.conflict-from-<deviceLabel>-<isoTs>.<ext>
-//
-// For kind=modify-vs-delete the sibling carries a `.deleted` suffix
-// and is 0 bytes, signalling "remote deleted this; do you confirm?"
 
 const CONFLICTS_DIRNAME = ".conflicts";
 const META_FILE = "meta.json";
 const META_TMP_FILE = "meta.json.tmp";
 const SIBLING_BACKUP_FILE = "sibling-content.bin";
 
-export type ConflictKind =
-  | "modify-vs-modify"
-  | "delete-vs-modify"
-  | "modify-vs-delete";
+// Two kinds: modify-vs-modify (both sides edited) and delete-vs-modify
+// (local deleted, remote modified). The third theoretical kind —
+// modify-vs-delete (local modified, remote deleted) — is NOT a
+// conflict per the plugin's design: the modified side always wins,
+// "resurrecting" the file on remote when push reaches it. The user's
+// reasoning: they had a reason to modify (rather than delete) the
+// file, so their decision overrides the other device's deletion.
+export type ConflictKind = "modify-vs-modify" | "delete-vs-modify";
 
 export interface ConflictRecord {
   // crypto.randomUUID() — unique enough that collision is impossible
@@ -49,10 +50,11 @@ export interface ConflictRecord {
   // ── Immutable identity (set at create; never updated) ──────────────
   // Used for dedup at create() — the same (vaultPath, theirsBlobSha)
   // pair returns the existing record instead of spawning a duplicate.
-  // `null` slots align to the kind: ours absent for delete-vs-modify,
-  // theirs absent for modify-vs-delete.
+  // `oursBlobSha` is null only for kind=delete-vs-modify (local
+  // deleted, so there's no "ours" blob to track). `theirsBlobSha` is
+  // always non-null; both remaining kinds carry a remote version.
   oursBlobSha: string | null;
-  theirsBlobSha: string | null;
+  theirsBlobSha: string;
   remoteDevice: string;
   createdAt: number;
 
@@ -94,10 +96,13 @@ export interface ConflictStoreDeps {
 export interface CreateArgs {
   vaultPath: string;
   kind: ConflictKind;
-  // Bytes that should land in the vault sibling. 0-byte ArrayBuffer
-  // for kind=modify-vs-delete.
+  // Bytes that should land in the vault sibling. Always non-empty
+  // — both remaining kinds (modify-vs-modify, delete-vs-modify)
+  // carry remote content the user needs to see.
   theirsContent: ArrayBuffer;
-  theirsBlobSha: string | null;
+  theirsBlobSha: string;
+  // `oursBlobSha` is null only for kind=delete-vs-modify (local was
+  // deleted, no "ours" blob to track).
   oursBlobSha: string | null;
   // Current base file's (mtime, size, sha) at create-time; all three
   // null if base does not exist.
@@ -249,9 +254,8 @@ export default class ConflictStore {
     const recordDir = `${this.conflictsRoot}/${id}`;
 
     // ── Step 1 ─────────────────────────────────────────────────────
-    // recordDir + sibling-content.bin. Always raw bytes — even a
-    // 0-byte modify-vs-delete placeholder gets a backup file so
-    // recovery code can branch purely on existence checks.
+    // recordDir + sibling-content.bin. Always raw bytes; recovery
+    // code can branch purely on existence checks.
     await this.ensureDir(this.conflictsRoot);
     await this.ensureDir(recordDir);
     await this.vault.adapter.writeBinary(
@@ -506,20 +510,18 @@ export function extensionOf(vaultPath: string): string {
   return basename.slice(dot);
 }
 
-// Build the sibling vault path:
-//   modify-vs-modify / delete-vs-modify
-//     → "<dir>/<base>.conflict-from-<label>-<isoTs>.<ext>"
-//   modify-vs-delete
-//     → "<dir>/<base>.conflict-from-<label>-<isoTs>.<ext>.deleted"
+// Build the sibling vault path. Same shape for both remaining
+// kinds:
+//   "<dir>/<base>.conflict-from-<label>-<isoTs>.<ext>"
 //
-// The `.deleted` suffix is visually unambiguous in the Obsidian file
-// explorer — a user sees a 0-byte file with `.deleted` and knows that
-// the remote side wants this file gone.
+// The `kind` parameter is accepted (rather than dropped) so that
+// future additions to ConflictKind can vary the shape without
+// breaking the call sites.
 export function buildSiblingPath(
   vaultPath: string,
   remoteDevice: string,
   ts: number,
-  kind: ConflictKind,
+  _kind: ConflictKind,
 ): string {
   const slash = vaultPath.lastIndexOf("/");
   const dir = slash === -1 ? "" : vaultPath.slice(0, slash + 1);
@@ -529,8 +531,7 @@ export function buildSiblingPath(
   // Filesystem-safe label: parens and colons replaced; whitespace OK.
   const safeLabel = remoteDevice.replace(/\(/g, "[").replace(/\)/g, "]");
   const iso = new Date(ts).toISOString().replace(/[:.]/g, "-").replace(/-\d{3}Z$/, "Z");
-  const tail = kind === "modify-vs-delete" ? `${ext}.deleted` : ext;
-  return `${dir}${stem}.conflict-from-${safeLabel}-${iso}${tail}`;
+  return `${dir}${stem}.conflict-from-${safeLabel}-${iso}${ext}`;
 }
 
 // ── Defensive load coercion ────────────────────────────────────────────
@@ -538,7 +539,6 @@ export function buildSiblingPath(
 const VALID_KINDS: ReadonlySet<ConflictKind> = new Set<ConflictKind>([
   "modify-vs-modify",
   "delete-vs-modify",
-  "modify-vs-delete",
 ]);
 
 // Sanitize a JSON-parsed record. Returns null when required identity
@@ -559,7 +559,13 @@ function coerceRecord(raw: Record<string, unknown>): ConflictRecord | null {
     vaultPath,
     kind,
     oursBlobSha: stringOrNull(raw.oursBlobSha),
-    theirsBlobSha: stringOrNull(raw.theirsBlobSha),
+    // Both remaining kinds always carry a non-null theirsBlobSha.
+    // If the persisted JSON is missing or non-string, reject the
+    // record (defensive coerce returns null, caller skips it).
+    theirsBlobSha: (() => {
+      const v = stringOrNull(raw.theirsBlobSha);
+      return v === null ? "" : v;
+    })(),
     remoteDevice: stringOrNull(raw.remoteDevice) ?? "unknown",
     createdAt: numberOr(raw.createdAt, 0),
     siblingPath,

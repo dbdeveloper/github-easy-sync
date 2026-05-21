@@ -125,11 +125,6 @@ describe("buildSiblingPath", () => {
       .toBe("a.conflict-from-Phone-2026-05-08T15-30-00Z.md");
   });
 
-  it("modify-vs-delete: trailing .deleted after the extension", () => {
-    expect(buildSiblingPath("a.md", "Phone", ts, "modify-vs-delete"))
-      .toBe("a.conflict-from-Phone-2026-05-08T15-30-00Z.md.deleted");
-  });
-
   it("file with no extension: snapshot file has no extension either", () => {
     expect(buildSiblingPath("README", "Phone", ts, "modify-vs-modify"))
       .toBe("README.conflict-from-Phone-2026-05-08T15-30-00Z");
@@ -206,22 +201,6 @@ describe("ConflictStore", () => {
       expect(meta.baseSize).toBeNull();
     });
 
-    it("modify-vs-delete: 0-byte sibling + .deleted suffix + null theirsBlobSha", async () => {
-      await f.store.load();
-      writeVaultFile(f.root, "a.md", "local content\n");
-      const rec = await f.store.create(baseArgs({
-        vaultPath: "a.md",
-        kind: "modify-vs-delete",
-        theirsContent: new ArrayBuffer(0),
-        theirsBlobSha: null,
-      }));
-      expect(rec.siblingPath).toMatch(/\.md\.deleted$/);
-      const siblingAbs = path.join(f.root, rec.siblingPath);
-      expect(fs.existsSync(siblingAbs)).toBe(true);
-      expect(fs.statSync(siblingAbs).size).toBe(0);
-      expect(rec.theirsBlobSha).toBeNull();
-    });
-
     it("populates siblingMtime/Size cache from final vault stat", async () => {
       await f.store.load();
       const rec = await f.store.create(baseArgs());
@@ -282,20 +261,6 @@ describe("ConflictStore", () => {
       expect(f.store.getAll().length).toBe(2);
     });
 
-    it("null theirsBlobSha (modify-vs-delete) still deduplicates same-path", async () => {
-      await f.store.load();
-      const a = await f.store.create(baseArgs({
-        kind: "modify-vs-delete",
-        theirsContent: new ArrayBuffer(0),
-        theirsBlobSha: null,
-      }));
-      const b = await f.store.create(baseArgs({
-        kind: "modify-vs-delete",
-        theirsContent: new ArrayBuffer(0),
-        theirsBlobSha: null,
-      }));
-      expect(b.id).toBe(a.id);
-    });
   });
 
   describe("crash recovery on load", () => {

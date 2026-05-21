@@ -84,17 +84,9 @@ describe("classify (pure)", () => {
     expect(d).toEqual({ type: "accept-ours" });
   });
 
-  it("Row 2: !sibling (.deleted placeholder), modify-vs-delete → accept-ours", () => {
-    const d = classify(
-      rec({ kind: "modify-vs-delete", oursBlobSha: "o", theirsBlobSha: null }),
-      true,
-      "o",
-      5,
-      false,
-      null,
-    );
-    expect(d).toEqual({ type: "accept-ours" });
-  });
+  // ─── modify-vs-delete is no longer a registered kind — auto-
+  // resolves at push time via attemptAutoMerge's "modify-wins"
+  // branch. Former rows 2, 4, 10, 11, 12 dropped with the kind.
 
   // ─── Row 3: sibling, !base, modify-vs-modify → cascade ──────────────
 
@@ -108,20 +100,6 @@ describe("classify (pure)", () => {
       "t",
     );
     expect(d).toEqual({ type: "delete-wins-cascade" });
-  });
-
-  // ─── Row 4: sibling, !base, modify-vs-delete → confirm-delete ──────
-
-  it("Row 4: sibling exists, base deleted, modify-vs-delete → confirm-remote-delete", () => {
-    const d = classify(
-      rec({ kind: "modify-vs-delete", oursBlobSha: "o", theirsBlobSha: null }),
-      false,
-      null,
-      null,
-      true,
-      null,
-    );
-    expect(d).toEqual({ type: "confirm-remote-delete" });
   });
 
   // ─── Row 5: sibling, !base, delete-vs-modify → initial state, noop ─
@@ -203,44 +181,6 @@ describe("classify (pure)", () => {
     expect(d).toEqual({ type: "noop" });
   });
 
-  // ─── Rows 10–12: modify-vs-delete branch ────────────────────────────
-
-  it("Row 10: modify-vs-delete, base === ours, .deleted present → noop (initial)", () => {
-    const d = classify(
-      rec({ kind: "modify-vs-delete", oursBlobSha: "o", theirsBlobSha: null }),
-      true,
-      "o",
-      5,
-      true,
-      null, // sibling is the .deleted placeholder (0 bytes); SHA value
-            // doesn't drive this row's decision.
-    );
-    expect(d).toEqual({ type: "noop" });
-  });
-
-  it("Row 11: modify-vs-delete, base size === 0 → intentional-delete", () => {
-    const d = classify(
-      rec({ kind: "modify-vs-delete", oursBlobSha: "o", theirsBlobSha: null }),
-      true,
-      "empty-sha",
-      0,
-      true,
-      null,
-    );
-    expect(d).toEqual({ type: "intentional-delete" });
-  });
-
-  it("Row 12: modify-vs-delete, base ≠ ours, base size > 0 → noop (user editing)", () => {
-    const d = classify(
-      rec({ kind: "modify-vs-delete", oursBlobSha: "o", theirsBlobSha: null }),
-      true,
-      "user-edit",
-      5,
-      true,
-      null,
-    );
-    expect(d).toEqual({ type: "noop" });
-  });
 });
 
 // ── Orchestrator tests with a real store + fixture vault ──────────────
@@ -396,48 +336,10 @@ describe("evaluateConflictState (orchestrator)", () => {
     expect(f.store.getAll().length).toBe(0);
   });
 
-  it("user deletes base on modify-vs-delete (case 4) → record + .deleted dropped, path resolved", async () => {
-    writeVaultFile(f.root, "a.md", "ours\n");
-    const rec = await f.store.create({
-      vaultPath: "a.md",
-      kind: "modify-vs-delete",
-      theirsContent: new ArrayBuffer(0),
-      theirsBlobSha: null,
-      oursBlobSha: "o",
-      baseMtime: null,
-      baseSize: null,
-      baseSha: null,
-      remoteDevice: "Phone",
-    });
-    fs.unlinkSync(path.join(f.root, "a.md"));
-
-    const result = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 100);
-
-    expect(result.recordsRemoved).toEqual([rec.id]);
-    expect([...result.pathsResolved]).toEqual(["a.md"]);
-    expect(fs.existsSync(path.join(f.root, rec.siblingPath))).toBe(false);
-  });
-
-  it("user blanks base on modify-vs-delete (case 11) → record + .deleted dropped", async () => {
-    writeVaultFile(f.root, "a.md", ""); // size 0
-    const rec = await f.store.create({
-      vaultPath: "a.md",
-      kind: "modify-vs-delete",
-      theirsContent: new ArrayBuffer(0),
-      theirsBlobSha: null,
-      oursBlobSha: "o",
-      baseMtime: null,
-      baseSize: null,
-      baseSha: null,
-      remoteDevice: "Phone",
-    });
-
-    const result = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 100);
-
-    expect(result.recordsRemoved).toEqual([rec.id]);
-    expect([...result.pathsResolved]).toEqual(["a.md"]);
-    expect(fs.existsSync(path.join(f.root, rec.siblingPath))).toBe(false);
-  });
+  // modify-vs-delete is no longer a registered conflict kind —
+  // attemptAutoMerge resolves it at push time via "modify-wins" so
+  // the classifier never sees this kind. Tests for former cases 4
+  // (confirm-remote-delete) and 11 (intentional-delete) dropped.
 
   // ─── No-op cases: cache refresh + cache hit ─────────────────────────
 

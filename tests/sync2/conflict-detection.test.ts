@@ -30,8 +30,12 @@ describe("classifyConflictKind", () => {
     expect(classifyConflictKind("deleted", "modified")).toBe("delete-vs-modify");
   });
 
-  it("modified + deleted → modify-vs-delete (ours modified, theirs deleted)", () => {
-    expect(classifyConflictKind("modified", "deleted")).toBe("modify-vs-delete");
+  it("modified + deleted → null (auto-resolves at push: local-modify wins, file resurrects)", () => {
+    // modify-vs-delete is no longer a registered conflict kind — it
+    // routes through attemptAutoMerge's "modify-wins" branch.
+    // classifyConflictKind returns null for this pair so the caller
+    // does NOT call ConflictStore.create.
+    expect(classifyConflictKind("modified", "deleted")).toBeNull();
   });
 
   it("deleted + deleted → null (both agree, not a conflict)", () => {
@@ -326,6 +330,7 @@ describe("AutoMergeResult type", () => {
     const cases: AutoMergeResult[] = [
       { type: "clean", content: arr("") },
       { type: "atomic", side: "ours" },
+      { type: "modify-wins" },
       { type: "register-conflict" },
     ];
     for (const c of cases) {
@@ -333,11 +338,24 @@ describe("AutoMergeResult type", () => {
         expect(c.content).toBeInstanceOf(ArrayBuffer);
       } else if (c.type === "atomic") {
         expect(["ours", "theirs"]).toContain(c.side);
+      } else if (c.type === "modify-wins") {
+        // no payload — its presence in the union is the assertion
       } else {
         // exhaustiveness
         const _exhaust: "register-conflict" = c.type;
         void _exhaust;
       }
     }
+  });
+
+  it("theirs === null → modify-wins (modify-vs-delete branch)", () => {
+    const r = attemptAutoMerge({
+      path: "Notes/note.md",
+      ours: arr("local edit\n"),
+      theirs: null,
+      base: arr("shared\n"),
+      configDir: ".obsidian",
+    });
+    expect(r).toEqual({ type: "modify-wins" });
   });
 });

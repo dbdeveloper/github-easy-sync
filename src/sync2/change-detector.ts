@@ -69,6 +69,8 @@ export async function isSyncable(
 // with a real user filename.
 const CONFLICT_SIBLING_PATTERN =
   /\.conflict-from-[A-Za-z0-9_-]+-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z(\.[^./]+)?$/;
+// (The trailing-extension group stays optional — files without a
+// dotted extension produce no .ext segment, see buildSiblingPath.)
 
 export interface ChangeDetectorDeps {
   vault: Vault;

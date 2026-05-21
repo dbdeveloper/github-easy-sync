@@ -8,10 +8,13 @@ import ConflictStore, { ConflictRecord } from "./conflict-store";
 
 // Pseudo-merge ConflictState classifier (PSEUDO-MERGE-MODE.md, stage 3).
 //
-// Single algorithm, 11-row classification per ConflictRecord. Reads
-// the live vault + ConflictStore record cache to derive (baseExists,
-// siblingExists, baseSha, siblingSha) and decides one of six
-// resolution outcomes (Decision below) or no-op.
+// Single algorithm, per-ConflictRecord classification. Reads the live
+// vault + ConflictStore record cache to derive (baseExists,
+// siblingExists, baseSha, siblingSha) and decides one of four
+// outcomes (Decision below) or no-op. modify-vs-delete is NOT a
+// conflict kind — it auto-resolves at push-time in favor of local
+// modify (see conflict-detection.ts → attemptAutoMerge's "modify-
+// wins" outcome); the classifier never sees it.
 //
 // Per spec §"Trigger points" this is invoked from 4 places:
 //   - drain-start sweep (Sync2Manager.drain)
@@ -25,52 +28,37 @@ export type Decision =
   // No state change yet — record stays, classifier just bumps
   // lastEvaluated.
   | { type: "noop" }
-  // Cases 1 + 2 of the spec: !siblingExists.
-  // User deleted the sibling file → accept ours. Drop the record;
-  // vault sibling already gone so no removal needed.
+  // !siblingExists: user deleted the sibling file → accept ours.
+  // Drop the record; vault sibling already gone so no removal
+  // needed.
   | { type: "accept-ours" }
-  // Case 6: siblingExists, baseExists, baseSha === siblingSha
-  // (modify-vs-modify OR delete-vs-modify).
-  // User copied sibling content onto the base. Drop the record AND
-  // the vault sibling. Drain will propagate baseSha content to main
-  // on path-close.
+  // siblingExists, baseExists, baseSha === siblingSha (both
+  // remaining kinds). User copied sibling content onto the base.
+  // Drop the record AND the vault sibling. Drain will propagate
+  // baseSha content to main on path-close.
   | { type: "accept-theirs" }
-  // Case 3: siblingExists, !baseExists, kind=modify-vs-modify.
+  // siblingExists, !baseExists, kind=modify-vs-modify.
   // User deleted the base → delete-wins. SPECIAL: this is a
   // path-level cascade — every record for the path gets dropped, every
   // sibling file removed. Drain propagates "delete from main".
-  | { type: "delete-wins-cascade" }
-  // Case 4: siblingExists, !baseExists, kind=modify-vs-delete.
-  // User deleted the base → accept theirs (confirm the remote delete).
-  // Drop record + .deleted sibling. Drain propagates delete on
-  // path-close.
-  | { type: "confirm-remote-delete" }
-  // Case 11: siblingExists (.deleted placeholder), baseExists,
-  // baseSize === 0, kind=modify-vs-delete.
-  // User stared at the .deleted sibling, blanked the base file
-  // entirely — "fine, delete it". Drop record + .deleted sibling.
-  // Drain propagates delete on path-close.
-  | { type: "intentional-delete" };
+  | { type: "delete-wins-cascade" };
 
 // Pure classifier. No I/O. All inputs are already-fetched stat/hash
-// values. Spec table rows are commented inline so a future reader can
-// cross-reference.
+// values.
 export function classify(
   record: ConflictRecord,
   baseExists: boolean,
   baseSha: string | null,
-  baseSize: number | null,
+  _baseSize: number | null,
   siblingExists: boolean,
   siblingSha: string | null,
 ): Decision {
   const { kind } = record;
 
-  // Row 1 + 2: !siblingExists → accept ours regardless of kind.
-  // The merge of the two rows (modify-vs-modify + delete-vs-modify
-  // collapse into the same "accept ours" action) and the
-  // modify-vs-delete twin row both reduce to "drop record". Only
-  // path-level direction (push-content vs push-delete) differs and
-  // that's a drain-side concern.
+  // !siblingExists → accept ours regardless of kind. Both
+  // modify-vs-modify and delete-vs-modify collapse to "drop record;
+  // push live local state". Direction (push-content vs push-delete)
+  // is the drain's job.
   if (!siblingExists) {
     return { type: "accept-ours" };
   }
@@ -78,47 +66,28 @@ export function classify(
   // siblingExists from here on.
 
   if (!baseExists) {
-    // Row 3: modify-vs-modify, base deleted → cascade delete-wins.
+    // modify-vs-modify, base deleted → cascade delete-wins.
     if (kind === "modify-vs-modify") {
       return { type: "delete-wins-cascade" };
     }
-    // Row 4: modify-vs-delete, base deleted → confirm remote delete.
-    if (kind === "modify-vs-delete") {
-      return { type: "confirm-remote-delete" };
-    }
-    // Row 5: delete-vs-modify, base absent → initial state, no-op.
+    // delete-vs-modify, base absent → initial state, no-op.
     return { type: "noop" };
   }
 
   // siblingExists AND baseExists from here on.
 
-  // Row 6: SHA match between base and sibling. User converged the two
-  // — accept that variant. Applies to modify-vs-modify AND
-  // delete-vs-modify (for delete-vs-modify, ours was "delete" but
-  // user reified base from sibling content; same outcome).
+  // SHA match between base and sibling — user converged the two.
+  // Drop record + sweep sibling; base already holds theirs.
   if (
     baseSha !== null &&
     siblingSha !== null &&
-    baseSha === siblingSha &&
-    (kind === "modify-vs-modify" || kind === "delete-vs-modify")
+    baseSha === siblingSha
   ) {
     return { type: "accept-theirs" };
   }
 
-  // modify-vs-delete branch (sibling = 0-byte .deleted placeholder).
-  if (kind === "modify-vs-delete") {
-    // Row 11: base emptied → user signal "yes, delete this".
-    if (baseSize === 0) {
-      return { type: "intentional-delete" };
-    }
-    // Rows 10, 12: base unchanged from ours OR user editing base ≠ ours
-    // — both no-ops (the user is still deliberating).
-    return { type: "noop" };
-  }
-
-  // Rows 7, 8, 9 (and any leftover modify-vs-modify / delete-vs-modify
-  // state where the SHAs don't line up): the user is in the middle of
-  // resolving but hasn't converged yet. Wait.
+  // Base exists, SHAs don't line up — user is in the middle of
+  // resolving but hasn't converged yet. Wait for the next sweep.
   return { type: "noop" };
 }
 
@@ -280,16 +249,11 @@ export async function evaluateConflictState(
       }
 
       // Resolution: figure out whether the vault sibling should be
-      // removed as part of this resolution.
-      const siblingShouldBeRemoved =
-        // Case 6: user copied sibling onto base, sibling is dead weight.
-        decision.type === "accept-theirs" ||
-        // Case 4 + 11: modify-vs-delete resolution sweeps the
-        // .deleted placeholder along with the record.
-        decision.type === "confirm-remote-delete" ||
-        decision.type === "intentional-delete";
-      // (delete-wins-cascade is handled at path level above, never
-      // reaches here.)
+      // removed as part of this resolution. Only accept-theirs
+      // sweeps the sibling here — accept-ours fires only when the
+      // sibling is already gone, and delete-wins-cascade is handled
+      // at path level above.
+      const siblingShouldBeRemoved = decision.type === "accept-theirs";
 
       if (siblingShouldBeRemoved && siblingExists) {
         await vault.adapter.remove(record.siblingPath);

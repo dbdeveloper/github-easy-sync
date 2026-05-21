@@ -127,7 +127,7 @@ export default class GithubClient {
             headers: this.headers(),
             throw: false,
           },
-          "GET tree?recursive=1",
+          "tree?recursive=1",
         );
       },
       (res) => !isRetriableStatus(res.status),
@@ -193,7 +193,7 @@ export default class GithubClient {
             body: JSON.stringify(tree),
             throw: false,
           },
-          `POST tree (entries=${tree.tree.length})`,
+          `tree (entries=${tree.tree.length})`,
         );
       },
       (res) => !isWriteRetriableStatus(res.status),
@@ -257,7 +257,7 @@ export default class GithubClient {
             }),
             throw: false,
           },
-          "POST commit",
+          "commit",
         );
       },
       (res) => !isWriteRetriableStatus(res.status),
@@ -306,7 +306,7 @@ export default class GithubClient {
             headers: this.headers(),
             throw: false,
           },
-          "GET commit",
+          "commit",
         );
       },
       (res) => !isRetriableStatus(res.status),
@@ -360,7 +360,7 @@ export default class GithubClient {
             headers: this.headers(),
             throw: false,
           },
-          `GET contents/${filePath}@${ref.slice(0, 7)}`,
+          `contents/${filePath}@${ref.slice(0, 7)}`,
         );
       },
       (res) => !isRetriableStatus(res.status),
@@ -421,7 +421,7 @@ export default class GithubClient {
             headers: this.headers(),
             throw: false,
           },
-          `GET compare ${base.slice(0, 7)}...${head.slice(0, 7)}`,
+          `compare ${base.slice(0, 7)}...${head.slice(0, 7)}`,
         );
       },
       (res) => !isRetriableStatus(res.status),
@@ -479,7 +479,7 @@ export default class GithubClient {
             body: JSON.stringify({ ref, sha }),
             throw: false,
           },
-          "POST refs (create)",
+          "refs (create)",
         );
       },
       (res) => !isWriteRetriableStatus(res.status),
@@ -527,7 +527,7 @@ export default class GithubClient {
             body: JSON.stringify({ sha, force }),
             throw: false,
           },
-          `PATCH ref ${ref}${force ? " (force)" : ""}`,
+          `ref ${ref}${force ? " (force)" : ""}`,
         );
       },
       (res) => !isWriteRetriableStatus(res.status),
@@ -566,7 +566,7 @@ export default class GithubClient {
             method: "DELETE",
             throw: false,
           },
-          `DELETE ref ${ref}`,
+          `ref ${ref}`,
         );
       },
       (res) => !isWriteRetriableStatus(res.status),
@@ -605,7 +605,7 @@ export default class GithubClient {
             headers: this.headers(),
             throw: false,
           },
-          `GET matching-refs ${prefix}`,
+          `matching-refs ${prefix}`,
         );
       },
       (res) => !isRetriableStatus(res.status),
@@ -646,7 +646,7 @@ export default class GithubClient {
             headers: this.headers(),
             throw: false,
           },
-          "GET branch head",
+          "branch head",
         );
       },
       (res) => !isRetriableStatus(res.status),
@@ -698,7 +698,7 @@ export default class GithubClient {
             }),
             throw: false,
           },
-          `PATCH branch head${force ? " (force)" : ""}`,
+          `branch head${force ? " (force)" : ""}`,
         );
       },
       (res) => !isWriteRetriableStatus(res.status),
@@ -744,7 +744,7 @@ export default class GithubClient {
             body: JSON.stringify({ content, encoding }),
             throw: false,
           },
-          `POST blob (${encoding})`,
+          `blob (${encoding})`,
         );
       },
       (res) => !isWriteRetriableStatus(res.status),
@@ -788,7 +788,7 @@ export default class GithubClient {
             headers: this.headers(),
             throw: false,
           },
-          `GET blob ${sha.slice(0, 7)}`,
+          `blob ${sha.slice(0, 7)}`,
         );
       },
       (res) => !isRetriableStatus(res.status),
@@ -852,7 +852,7 @@ export default class GithubClient {
             }),
             throw: false,
           },
-          `PUT contents/${path}`,
+          `contents/${path}`,
         );
       },
       (res) => !isWriteRetriableStatus(res.status),

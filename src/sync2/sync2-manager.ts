@@ -1168,7 +1168,7 @@ export class Sync2Manager {
   private async applyRemoteDeletion(
     path: string,
     _baseRef: string,
-    currentHead: string,
+    _currentHead: string,
   ): Promise<void> {
     const exists = await this.vault.adapter.exists(path);
     if (!exists) {
@@ -1184,20 +1184,19 @@ export class Sync2Manager {
       return;
     }
 
-    // Local has its own changes. Pseudo-merge: modify-vs-delete →
-    // register a conflict with a 0-byte `.deleted` sibling so the user
-    // can decide between "confirm remote delete" (delete base) and
-    // "keep my version" (delete the .deleted sibling).
-    const oursBytes = await this.vault.adapter.readBinary(path);
-    await this.registerConflictAndDropPath({
-      vaultPath: path,
-      kind: "modify-vs-delete",
-      theirsContent: new ArrayBuffer(0),
-      theirsBlobSha: null,
-      oursBlobSha: await calculateGitBlobSHA(oursBytes),
-      remoteDevice: await this.fetchRemoteDevice(currentHead),
-      fromBatchId: null,
-    });
+    // Local has its own changes — modify-vs-delete. Auto-resolves in
+    // favour of local: leave the file alone, no recordSync (so the
+    // pending batch's "modified" entry stays in the queue and pushes
+    // the local content back to remote on the next pass, resurrecting
+    // the file). In practice this branch is unreachable because
+    // pullIfNeeded skips applyRemoteDeletion for paths in queuedPaths
+    // (those route through reconcileBatchAgainstHead instead, which
+    // surfaces the same outcome as AutoMergeResult.type ===
+    // "modify-wins"). Kept as a defensive no-op for symmetry.
+    await this.logger.info(
+      "Sync2 applyRemoteDeletion: modify-wins (local-modify resurrects file)",
+      { path },
+    );
   }
 
   // ── pseudo-merge detection helpers (stage 5c) ──────────────────────
@@ -1300,7 +1299,7 @@ export class Sync2Manager {
     vaultPath: string;
     kind: ConflictKind;
     theirsContent: ArrayBuffer;
-    theirsBlobSha: string | null;
+    theirsBlobSha: string;
     oursBlobSha: string | null;
     remoteDevice: string;
     fromBatchId: string | null;
@@ -2164,8 +2163,7 @@ export class Sync2Manager {
       const baseFetched = await this.safeFetchContents(path, expectedHead);
       const theirsFetched = await this.safeFetchContents(path, currentHead);
 
-      // No remote-side change OR remote no longer has the path → no
-      // overlap to resolve; batch pushes through unchanged.
+      // No remote-side change → batch pushes through unchanged.
       if (
         baseFetched !== null &&
         theirsFetched !== null &&
@@ -2173,18 +2171,21 @@ export class Sync2Manager {
       ) {
         continue;
       }
-      if (theirsFetched === null) continue;
 
       const oursBytes = await this.queue.readFile(batchId, path);
-      const theirsBytes = base64ToArrayBuffer(
-        theirsFetched.content,
-      ) as ArrayBuffer;
+      const theirsBytes =
+        theirsFetched === null
+          ? null
+          : (base64ToArrayBuffer(theirsFetched.content) as ArrayBuffer);
       const baseBytes = baseFetched
         ? (base64ToArrayBuffer(baseFetched.content) as ArrayBuffer)
         : null;
 
       let pluginJs: PluginJsContext | undefined;
-      if (isAtomicPluginFile(path, this.configDir)) {
+      if (
+        theirsFetched !== null &&
+        isAtomicPluginFile(path, this.configDir)
+      ) {
         pluginJs = await this.readReconcilePluginJsContext(
           batchId,
           batch.files,
@@ -2204,6 +2205,17 @@ export class Sync2Manager {
         pluginJs,
       });
 
+      if (auto.type === "modify-wins") {
+        // Remote deleted the file but the batch still carries our
+        // modification. Local-intent wins automatically — leave the
+        // batch entry intact; push will resurrect the file on remote.
+        await this.logger.info(
+          "Sync2 reconcile modify-wins: remote deleted, local modify resurrects",
+          { path },
+        );
+        continue;
+      }
+
       if (auto.type === "clean") {
         // Write merged bytes to BOTH the batch snapshot (what gets
         // pushed) and the live vault (what the user sees).
@@ -2221,8 +2233,10 @@ export class Sync2Manager {
         if (auto.side === "theirs") {
           // Remote wins → apply remote bytes to live vault, drop the
           // path from this batch so push doesn't upload stale "ours".
-          await this.writeBinaryRemote(path, theirsFetched.content);
-          await this.detector.recordSync(path, theirsFetched.sha);
+          // theirsFetched is non-null here: modify-wins already
+          // handled the theirs===null case above.
+          await this.writeBinaryRemote(path, theirsFetched!.content);
+          await this.detector.recordSync(path, theirsFetched!.sha);
           await this.queue.removeFile(batchId, path);
           await this.logger.info(
             "Sync2 reconcile atomic: theirs wins, dropped from batch",
@@ -2238,8 +2252,8 @@ export class Sync2Manager {
       await this.registerConflictAndDropPath({
         vaultPath: path,
         kind: "modify-vs-modify",
-        theirsContent: theirsBytes,
-        theirsBlobSha: theirsFetched.sha,
+        theirsContent: theirsBytes!,
+        theirsBlobSha: theirsFetched!.sha,
         oursBlobSha: await calculateGitBlobSHA(oursBytes),
         remoteDevice: await this.fetchRemoteDevice(currentHead),
         fromBatchId: batchId,
