@@ -398,6 +398,145 @@ describe("PushQueue", () => {
     });
   });
 
+  // ─── Stage 13 Phase 3 RED tests (Group 1: synthetic-batch foundation) ──
+  //
+  // These tests target the Phase 4 API surface locked in Phase 1.7
+  // (`PushQueue.enqueueSynthetic` stub at push-queue.ts). They currently
+  // FAIL with "Not implemented" (proper RED state). Phase 4 Group 1
+  // implementation fills in the bodies and turns these GREEN.
+  //
+  // Contract under test (PSEUDO-MERGE-MODE.md §"PushQueue.enqueueSynthetic
+  // — API contract" + §"EnqueueMeta schema (Stage 13)"):
+  //   - Single path per synthetic batch.
+  //   - `synthetic: true` in meta.json so mergeIntoLatestPending skips it.
+  //   - Never folds with subsequent user mergeIntoLatestPending calls.
+  //   - Returns batch id (timestamp-based, same format as enqueue()).
+  describe("enqueueSynthetic (Stage 13)", () => {
+    it("N5: creates batch with synthetic=true and returns id (content variant)", async () => {
+      const content = new TextEncoder().encode("resolved theirs\n");
+      const id = await f.queue.enqueueSynthetic({
+        path: "Notes/note.md",
+        content: new Uint8Array(content),
+        contentSha: "fakesha-1234",
+        parentCommitSha: "parent-commit-sha",
+        parentTreeSha: "parent-tree-sha",
+      });
+
+      // Same id shape as regular batches.
+      expect(id).toMatch(/^\d{17}$/);
+
+      const batchDir = path.join(f.queueRoot, id);
+      expect(fs.existsSync(batchDir)).toBe(true);
+
+      // Vault content landed under batch/vault/.
+      const stored = fs.readFileSync(
+        path.join(batchDir, "vault", "Notes", "note.md"),
+        "utf8",
+      );
+      expect(stored).toBe("resolved theirs\n");
+
+      // Meta carries synthetic=true and parent SHAs.
+      const meta = JSON.parse(
+        fs.readFileSync(path.join(batchDir, ".meta.json"), "utf8"),
+      ) as { synthetic?: boolean; parentCommitSha?: string; parentTreeSha?: string };
+      expect(meta.synthetic).toBe(true);
+      expect(meta.parentCommitSha).toBe("parent-commit-sha");
+      expect(meta.parentTreeSha).toBe("parent-tree-sha");
+    });
+
+    it("N5b: content=null variant records a deletion in deleted-paths.txt", async () => {
+      const id = await f.queue.enqueueSynthetic({
+        path: "Notes/gone.md",
+        content: null,
+        contentSha: null,
+        parentCommitSha: "p1",
+        parentTreeSha: "t1",
+      });
+
+      const batchDir = path.join(f.queueRoot, id);
+      expect(fs.existsSync(batchDir)).toBe(true);
+
+      // Vault file absent — this is a deletion synthetic batch.
+      expect(
+        fs.existsSync(path.join(batchDir, "vault", "Notes", "gone.md")),
+      ).toBe(false);
+
+      // Deletion recorded.
+      const deletions = fs
+        .readFileSync(path.join(batchDir, "deleted-paths.txt"), "utf8")
+        .split("\n")
+        .filter(Boolean);
+      expect(deletions).toEqual(["Notes/gone.md"]);
+
+      // Meta still marks it synthetic.
+      const meta = JSON.parse(
+        fs.readFileSync(path.join(batchDir, ".meta.json"), "utf8"),
+      ) as { synthetic?: boolean };
+      expect(meta.synthetic).toBe(true);
+    });
+
+    it("N6: mergeIntoLatestPending returns null when only pending batch is synthetic", async () => {
+      // Phase B-style: synthetic batch sits in queue, drain hasn't
+      // processed it yet (e.g., offline). User changes nothing; calls
+      // sync again. enqueueOrMerge → mergeIntoLatestPending must NOT
+      // fold into the synthetic batch.
+      const buf = new TextEncoder().encode("resolved\n");
+      await f.queue.enqueueSynthetic({
+        path: "Notes/note.md",
+        content: new Uint8Array(buf),
+        contentSha: "sha-syn",
+        parentCommitSha: "p1",
+        parentTreeSha: "t1",
+      });
+
+      writeVaultFile(f.root, "Other/edit.md", "user later\n");
+      const target = await f.queue.mergeIntoLatestPending([ADD("Other/edit.md")]);
+
+      expect(target).toBeNull();
+    });
+
+    it("N7: mergeIntoLatestPending picks the user batch, skipping the synthetic batch", async () => {
+      // Two batches sit in queue: a user batch (older) and a synthetic
+      // batch (younger). enqueueOrMerge should fold subsequent user
+      // changes into the USER batch, even though the synthetic one is
+      // the youngest pending non-attempted entry.
+      writeVaultFile(f.root, "a.md", "v1\n");
+      const userId = await f.queue.enqueue([ADD("a.md")], {
+        commitMessage: "user 1",
+        parentCommitSha: "p0",
+        parentTreeSha: "t0",
+      });
+
+      // Synthetic batch lands AFTER user batch (drain Phase B during
+      // the same drain).
+      const synBuf = new TextEncoder().encode("resolved\n");
+      const synId = await f.queue.enqueueSynthetic({
+        path: "Notes/note.md",
+        content: new Uint8Array(synBuf),
+        contentSha: "sha-syn",
+        parentCommitSha: "p1",
+        parentTreeSha: "t1",
+      });
+
+      // Sanity: synId is lexicographically greater than userId.
+      expect(synId > userId).toBe(true);
+
+      writeVaultFile(f.root, "b.md", "v2\n");
+      const target = await f.queue.mergeIntoLatestPending([ADD("b.md")]);
+
+      // Folds into USER batch (skips synthetic).
+      expect(target).toBe(userId);
+
+      // User batch now has both files.
+      const userBatch = await f.queue.read(userId);
+      expect(userBatch.files.sort()).toEqual(["a.md", "b.md"]);
+
+      // Synthetic batch is unchanged (still single path).
+      const synBatch = await f.queue.read(synId);
+      expect(synBatch.files).toEqual(["Notes/note.md"]);
+    });
+  });
+
   describe("overwriteFile", () => {
     it("replaces a file's content inside an existing batch", async () => {
       writeVaultFile(f.root, "a.md", "v1\n");
