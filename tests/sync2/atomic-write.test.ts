@@ -16,6 +16,7 @@ import {
   AtomicWriteRecovery,
   SYNC_TMP_SUFFIX,
   SYNC_BAK_SUFFIX,
+  stagingPathFor,
 } from "../../src/sync2/atomic-write";
 import { calculateGitBlobSHA } from "../../src/utils";
 
@@ -297,4 +298,82 @@ describe("AtomicWriteRecovery.sweep", () => {
     expect(SYNC_TMP_SUFFIX).toBe(".sync-tmp");
     expect(SYNC_BAK_SUFFIX).toBe(".sync-bak");
   });
+});
+
+// ─── Stage 13 Phase 3 RED tests (Group 4: .sync-bak migration) ─────────
+//
+// stagingPathFor() — pre-suffix insertion algorithm (PSEUDO-MERGE-MODE.md
+// §"Naming convention для staging файлів — `.sync-bak` як pre-suffix").
+//
+// All currently FAIL with "Not implemented" — proper RED state from
+// Phase 1.7 stub. Phase 4 Group 4 implementation fills in the body.
+describe("stagingPathFor (Stage 13)", () => {
+  it("N8: normal file → inserts .sync-bak before the extension", () => {
+    expect(stagingPathFor("Folder/note.md")).toBe("Folder/note.sync-bak.md");
+    expect(stagingPathFor("Plugins/foo/manifest.json")).toBe(
+      "Plugins/foo/manifest.sync-bak.json",
+    );
+    expect(stagingPathFor("Folder/image.png")).toBe(
+      "Folder/image.sync-bak.png",
+    );
+  });
+
+  it("N8b: hidden file with no extension → appends .sync-bak (no insertion)", () => {
+    expect(stagingPathFor(".gitignore")).toBe(".gitignore.sync-bak");
+    expect(stagingPathFor(".obsidian/.gitignore")).toBe(
+      ".obsidian/.gitignore.sync-bak",
+    );
+    expect(stagingPathFor(".editorconfig")).toBe(".editorconfig.sync-bak");
+  });
+
+  it("N8c: extensionless file → appends .sync-bak (no insertion)", () => {
+    expect(stagingPathFor("README")).toBe("README.sync-bak");
+    expect(stagingPathFor("Folder/Makefile")).toBe("Folder/Makefile.sync-bak");
+  });
+
+  it("N8d: file with multiple dots in name → insertion uses LAST extension", () => {
+    expect(stagingPathFor("Folder/file.tar.gz")).toBe(
+      "Folder/file.tar.sync-bak.gz",
+    );
+    // Conflict-from sibling shape from ConflictStore — Phase 4 ConflictStore
+    // staging calls this with sibling paths exactly like this.
+    expect(
+      stagingPathFor("Folder/note.conflict-from-Phone-2026-05-22T15-30-00Z.md"),
+    ).toBe(
+      "Folder/note.conflict-from-Phone-2026-05-22T15-30-00Z.sync-bak.md",
+    );
+  });
+
+  it("N8e: `which='tmp'` variant uses .sync-tmp pre-suffix", () => {
+    expect(stagingPathFor("Folder/note.md", "tmp")).toBe(
+      "Folder/note.sync-tmp.md",
+    );
+    expect(stagingPathFor(".gitignore", "tmp")).toBe(".gitignore.sync-tmp");
+  });
+});
+
+// ─── Stage 13 Phase 3 RED tests (Group 4: SHA-verify on recovery) ──────
+//
+// AtomicWriteRecovery.sweep must validate `.sync-bak` content SHA against
+// the ConflictStore record's `theirsBlobSha` (when one exists) before
+// promoting it to finalPath. Corrupted / mismatched staging is dropped
+// + logged; record is left for next drain Phase B to clean up. See
+// PSEUDO-MERGE-MODE.md §"Recovery sweep на onload — vault-level
+// `.sync-bak` sweep" → matrix row "SHA(`.sync-bak`) ≠ theirsBlobSha".
+//
+// Phase 4 Group 4 wires sweep against ConflictStore. For now the sweep
+// only consults SnapshotStore; the integration with ConflictStore +
+// SHA-verify is new behavior.
+//
+// Skipped here — N9 requires the full Phase 4 wiring of sweep
+// against ConflictStore. RED-test ergonomics dictate: file an it.todo
+// placeholder so Phase 4 implementer doesn't miss this. Active
+// assertion lives in the Group 4 implementation commit.
+describe.skip("AtomicWriteRecovery SHA-verify (Stage 13) — Phase 4 wires sweep against ConflictStore", () => {
+  it.todo(
+    "N9: sweep finds .sync-bak with SHA matching record.theirsBlobSha → rename to finalPath",
+  );
+  it.todo(
+    "N9b: sweep finds .sync-bak with SHA NOT matching record.theirsBlobSha → drop, leave record for drain Phase B",
+  );
 });

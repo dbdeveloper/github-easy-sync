@@ -28,6 +28,34 @@ import type SnapshotStore from "./snapshot-store";
 export const SYNC_TMP_SUFFIX = ".sync-tmp";
 export const SYNC_BAK_SUFFIX = ".sync-bak";
 
+// Stage 13 (Phase 1.7 stub — Phase 4 fills in).
+//
+// Computes the staging path for a target file by inserting `.sync-bak`
+// (or `.sync-tmp` if `which="tmp"`) BEFORE the file extension instead
+// of appending after it. This preserves the original extension's
+// visibility in Obsidian's file explorer (a `.md.sync-bak` file is
+// hidden under "Show all file types: false" but a `note.sync-bak.md`
+// is still indexed as markdown).
+//
+// Examples (from PSEUDO-MERGE-MODE.md §"Naming convention для staging
+// файлів — `.sync-bak` як pre-suffix"):
+//   - "Folder/note.md"                  → "Folder/note.sync-bak.md"
+//   - "Plugins/foo/manifest.json"       → "Plugins/foo/manifest.sync-bak.json"
+//   - ".gitignore"                      → ".gitignore.sync-bak"
+//   - "README" (no ext)                 → "README.sync-bak"
+//   - ".obsidian/.gitignore"            → ".obsidian/.gitignore.sync-bak"
+//   - "note.conflict-from-Phone-X.md"   → "note.conflict-from-Phone-X.sync-bak.md"
+//
+// Phase 3 RED tests exercise the algorithm; Phase 4 fills in.
+export function stagingPathFor(
+  _finalPath: string,
+  _which: "bak" | "tmp" = "bak",
+): string {
+  throw new Error(
+    "stagingPathFor: not implemented (Stage 13 Phase 4 — see PSEUDO-MERGE-MODE.md)",
+  );
+}
+
 export async function atomicWriteFile(
   vault: Vault,
   path: string,
