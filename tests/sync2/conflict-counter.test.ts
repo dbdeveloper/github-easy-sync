@@ -128,7 +128,7 @@ describe("ConflictCounter (Stage 13)", () => {
     expect(f.scheduler.pending()).toBeLessThanOrEqual(1);
   });
 
-  it("N1b: getValue while dirty triggers an immediate sync recompute and clears dirty", async () => {
+  it("N1b: flush makes getValue reflect the live recomputed count", async () => {
     await f.store.load();
     writeVaultFile(f.root, "Notes/note.md", "local\n");
     const rec = await f.store.create(baseArgs());
@@ -138,11 +138,13 @@ describe("ConflictCounter (Stage 13)", () => {
     void rec;
 
     f.counter.markDirty();
+    await f.counter.flush();
     expect(f.counter.getValue()).toBe(1);
 
-    // Subsequent markDirty without any state change → getValue still
-    // returns 1 (idempotent recompute).
+    // Subsequent markDirty without any state change → flush is a
+    // cheap no-change recompute, getValue still returns 1.
     f.counter.markDirty();
+    await f.counter.flush();
     expect(f.counter.getValue()).toBe(1);
   });
 
@@ -160,12 +162,12 @@ describe("ConflictCounter (Stage 13)", () => {
 
     // First dirty round: count was 0 (initial), now 1 → callback fires.
     f.counter.markDirty();
-    f.scheduler.flush();
+    await f.counter.flush();
 
     // Second dirty round: nothing changed, count is still 1 → callback
     // does NOT fire.
     f.counter.markDirty();
-    f.scheduler.flush();
+    await f.counter.flush();
 
     expect(calls).toEqual([1]);
     unsubscribe();
@@ -182,7 +184,7 @@ describe("ConflictCounter (Stage 13)", () => {
     });
 
     f.counter.markDirty();
-    f.scheduler.flush();
+    await f.counter.flush();
     expect(calls).toEqual([1]);
 
     unsubscribe();
@@ -194,7 +196,7 @@ describe("ConflictCounter (Stage 13)", () => {
     );
     writeVaultFile(f.root, "Other/note.md", "local2\n");
     f.counter.markDirty();
-    f.scheduler.flush();
+    await f.counter.flush();
     expect(calls).toEqual([1]);
   });
 
@@ -218,6 +220,7 @@ describe("ConflictCounter (Stage 13)", () => {
   it("N4: empty store → count is 0", async () => {
     await f.store.load();
     f.counter.markDirty();
+    await f.counter.flush();
     expect(f.counter.getValue()).toBe(0);
   });
 
@@ -231,6 +234,7 @@ describe("ConflictCounter (Stage 13)", () => {
     fs.unlinkSync(path.join(f.root, rec.siblingPath));
 
     f.counter.markDirty();
+    await f.counter.flush();
     expect(f.counter.getValue()).toBe(0);
   });
 
@@ -243,6 +247,7 @@ describe("ConflictCounter (Stage 13)", () => {
     fs.unlinkSync(path.join(f.root, "Notes/note.md"));
 
     f.counter.markDirty();
+    await f.counter.flush();
     expect(f.counter.getValue()).toBe(1);
   });
 
@@ -262,6 +267,7 @@ describe("ConflictCounter (Stage 13)", () => {
     });
 
     f.counter.markDirty();
+    await f.counter.flush();
     expect(f.counter.getValue()).toBe(0);
   });
 
@@ -284,6 +290,7 @@ describe("ConflictCounter (Stage 13)", () => {
     await f.store.create(baseArgs({ vaultPath: "c.md", theirsBlobSha: "sha-c" }));
 
     f.counter.markDirty();
+    await f.counter.flush();
     expect(f.counter.getValue()).toBe(2);
   });
 
@@ -314,7 +321,7 @@ describe("ConflictCounter (Stage 13)", () => {
       calls.push(n);
     });
 
-    f.scheduler.flush();
+    await f.counter.flush();
     expect(calls.length).toBeLessThanOrEqual(1);
     if (calls.length === 1) expect(calls[0]).toBe(1);
   });
