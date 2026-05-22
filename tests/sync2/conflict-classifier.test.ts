@@ -181,6 +181,32 @@ describe("classify (pure)", () => {
     expect(d).toEqual({ type: "noop" });
   });
 
+  // ─── Stage 13 Phase 3 RED test (Group 2: row 3 noop) ──────────────
+  //
+  // PSEUDO-MERGE-MODE.md Decision #30: classifier row 3
+  // (`!baseExists + modify-vs-modify`) → `noop` (was `delete-wins-cascade`).
+  // The cascade-delete that engine used to do when the user
+  // deleted base is gone — under Stage 13 deletion requires the
+  // user to remove EVERY sibling for the path too.
+  //
+  // This unblocks the mobile delete-then-rename workflow that the
+  // cascade was breaking (2026-05-21 incident).
+  //
+  // Currently FAILS against the existing classifier (returns
+  // delete-wins-cascade). Phase 4 Group 2 swaps row 3 to noop and
+  // deletes the old `Row 3: delete-wins-cascade` test above.
+  it("N12 (Stage 13): Row 3 sibling exists, !base, modify-vs-modify → noop (NOT delete-wins-cascade)", () => {
+    const d = classify(
+      rec({ kind: "modify-vs-modify", oursBlobSha: "o", theirsBlobSha: "t" }),
+      false, // baseExists
+      null,  // baseSha
+      null,  // baseSize
+      true,  // siblingExists
+      "t",   // siblingSha
+    );
+    expect(d).toEqual({ type: "noop" });
+  });
+
 });
 
 // ── Orchestrator tests with a real store + fixture vault ──────────────
