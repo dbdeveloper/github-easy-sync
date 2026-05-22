@@ -51,6 +51,16 @@ export type EnqueueMeta = {
   commitMessage: string;
   parentCommitSha: string | null;
   parentTreeSha: string | null;
+  // Stage 13 (Phase 4 implementation): marks Phase B-synthesized
+  // resolution side-batches. mergeIntoLatestPending must skip these
+  // so user edits never fold into resolution commits. Default false
+  // (user-driven batches). See PSEUDO-MERGE-MODE.md §"Commit message
+  // formats (Stage 13 — hardcoded)" + §"EnqueueMeta schema".
+  //
+  // Optional during the Stage 13 migration: existing callsites and
+  // batches without the field default to `false` via defensive
+  // coercion in readMeta (added in Phase 4 alongside actual wiring).
+  synthetic?: boolean;
 };
 
 export interface PushQueueDeps {
@@ -125,6 +135,35 @@ export default class PushQueue {
       );
     }
     return id;
+  }
+
+  // Stage 13 stub (Phase 1.7) — full implementation lands in Phase 4
+  // alongside the classifier 2-phase rewrite. See PSEUDO-MERGE-MODE.md
+  // §"PushQueue.enqueueSynthetic — API contract" for the binding spec.
+  //
+  // Contract (from doc):
+  //   - Single path per synthetic batch (Phase B creates one per
+  //     closed path; preserve-all-commits principle).
+  //   - synthetic: true in meta.json (mergeIntoLatestPending must
+  //     skip these — user edits never fold into resolution commits).
+  //   - content: Uint8Array = push file content; null = push delete.
+  //   - Returns batch id (timestamp-based, same format as enqueue()).
+  //   - Throws on I/O error or invalid path. Does NOT throw on
+  //     existing batch for same path (multiple resolutions allowed).
+  //
+  // Phase 3 RED tests will exercise this method and observe
+  // "Not implemented" — that's the proper RED state. Phase 4 swaps
+  // the body for the real implementation.
+  async enqueueSynthetic(_args: {
+    path: string;
+    content: Uint8Array | null;
+    contentSha: string | null;
+    parentCommitSha: string;
+    parentTreeSha: string;
+  }): Promise<string> {
+    throw new Error(
+      "PushQueue.enqueueSynthetic: not implemented (Stage 13 Phase 4 — see PSEUDO-MERGE-MODE.md)",
+    );
   }
 
   // Return batch IDs oldest-first. Filters out non-batch entries so
