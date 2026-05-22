@@ -1844,6 +1844,206 @@ These tests merit a closer look during Phase 3-4 (questions to ask before assumi
 - **`conflict-store.test.ts:310`** (`external delete of vault sibling AND backup → record stays`) — under Stage 13 record drops on next drain. But the test currently asserts record SURVIVES; if there's a reason for that (e.g., delaying drop to avoid data loss when user wipes everything), surface it before REWRITE.
 - **`branch-lifecycle.test.ts`** — calls `evaluateConflictState` directly. Phase 4 may route via drain instead. Decide whether the test should assert on drain-mediated flow or keep a direct classifier call as a sanity check.
 
+---
+
+## Phase 3 RED test plan (2026-05-23)
+
+Synthesis of Phase 2 audit findings into actionable test-writing
+order. Phase 3 produces RED tests; Phase 4 GREEN flips them
+in-order. Each subsection below corresponds to one Phase 4
+implementation group (per "Phase 4 — dependency-ordered sequence"
+in the Stage 13 pivot notice).
+
+**Discipline:**
+- Write tests against the **Phase 4 API surface** (locked via stubs in
+  Phase 1.7), not the current implementation. The stubs throw "Not
+  implemented" — that IS the RED state.
+- Each Phase 4 commit ships a code change AND turns a specific group
+  of RED tests GREEN. Don't bundle.
+- Tests in the same group are written together as one Phase 3 commit
+  (or a small number of grouped commits if the group is large).
+
+### Phase 4 Group 1 — Foundation (synthetic field + enqueueSynthetic)
+
+**RED tests to land:**
+- N5: `PushQueue.enqueueSynthetic: creates batch with synthetic=true, returns id`
+- N6: `PushQueue.enqueueSynthetic: never folds into next user enqueueOrMerge call`
+- N7: `mergeIntoLatestPending skips synthetic batches even when fresh and non-attempted`
+
+**Existing tests to keep watching during this group:**
+- `push-queue.test.ts` existing dedup + merge tests — confirm no regression
+
+**Critical-path callout:** This group MUST land FIRST. Many subsequent
+groups (especially #6 Drain wiring) call `enqueueSynthetic` directly
+from Phase B side-batch synthesis. Without #1 GREEN, #6 has nothing to
+exercise.
+
+### Phase 4 Group 2 — Classifier rewrite (2-phase + row 3 noop)
+
+**RED tests to land:**
+- N12: `classifier !base + sibling → noop (NOT delete-wins-cascade) — confirms Decision #30`
+
+**Existing tests to REWRITE in same commit:**
+- `conflict-classifier.test.ts:63, 75` (Row 1 returns updated decision shape)
+- `conflict-classifier.test.ts:121, 133` (Row 6 → Phase A SHA-match cleanup name)
+- `conflict-classifier.test.ts:296` (case 6 evaluator — same outcome, new shape)
+- `conflict-classifier.test.ts:346` (initial state — `lastEvaluated` shape may move)
+- `conflict-classifier.test.ts:369, 379` (cache hit/miss — `recordsRefreshed` field rename)
+
+**Existing tests to DELETE in same commit:**
+- `conflict-classifier.test.ts:93` (Row 3 cascade — superseded by N12)
+- `conflict-classifier.test.ts:318` (case 3 cascade evaluator)
+
+### Phase 4 Group 3 — ConflictStore.load — drop auto-restore
+
+**RED test to land:**
+- N10: `ConflictStore.load: missing sibling does NOT restore from backup (fix 2026-05-21 bug)`
+
+**Existing tests to DELETE in same commit:**
+- `conflict-store.test.ts:280` (step-3 crash re-emits sibling from backup — directly contradicts Stage 13)
+
+**Existing tests to REWRITE:**
+- `conflict-store.test.ts:310` (post-bail-out-flag review needed first — see flags above)
+
+### Phase 4 Group 4 — `.sync-bak` migration
+
+**RED tests to land:**
+- N8: `.sync-bak naming algorithm: stem.ext, hidden files, extensionless, multi-dot names`
+- N9: `AtomicWriteRecovery.sweep SHA-verify: matches → finalize Step 3; mismatch → drop`
+- N17: extend `tests/mock-obsidian-platform.test.ts` to exercise `.sync-bak` flow through ConflictStore.create
+
+**Existing tests to REWRITE in same commit:**
+- `conflict-store.test.ts:173` (sibling-content.bin → `.sync-bak` flow)
+
+### Phase 4 Group 5 — ConflictWatcher → counter-only
+
+**RED tests to land (new file `tests/sync2/conflict-counter.test.ts`):**
+- N1: `ConflictCounter.markDirty + getValue: recompute happens once per dirty window`
+- N2: `ConflictCounter.subscribe: callback fires only on changed value, debounced`
+- N3: `ConflictCounter.flush: forces immediate recompute, bypasses microtask`
+- N4: `Counter formula edge cases: missing base, !exists sibling, SHA cache stale`
+- N18: `Counter live-recomputes on bulk vault.on events (5 events → 1 recompute)`
+
+**Existing tests to DELETE in same commit (all in `conflict-watcher.test.ts`):**
+- Lines 104, 121, 146 (`handle()` evaluation triggers)
+- Lines 171, 205 (`pause`/`resume`/`isPaused`)
+- Lines 219, 252 (chain serialization, re-check relevance)
+- Line 329 (end-to-end record resolution from listener)
+- Line 373 (onError chain — pending bail-out-flag review)
+
+**Existing tests to REWRITE:**
+- Lines 279, 301, 314 (`start`/`stop` listener registration — same shape, callback target changes)
+- Line 346 (rename event dual-path check — markDirty target)
+
+**Bail-out flag resolved here:** `conflict-watcher.test.ts:373` (onError) decided before delete. If counter recompute can throw, add a small replacement test for that.
+
+### Phase 4 Group 6 — Drain wiring (drop drain-end sweep, add guard)
+
+**RED tests to land:**
+- (Mostly integration coverage — many existing tests already exercise drain implicitly)
+
+**Existing integration tests to REWRITE:**
+- `conflicts/branch-lifecycle.test.ts:71` (per bail-out flag — drain-mediated vs direct classifier)
+- `conflicts/edit-while-in-conflict.test.ts:70` (synthetic batch routing under Stage 13)
+
+**Existing tests to DELETE:**
+- `conflicts/watcher-realtime.test.ts:73, 145` (both — listener no longer mutates store, no pause/resume)
+
+### Phase 4 Group 7 — Filesystem-orphan dedup at create()
+
+**RED test to land:**
+- N11: `ConflictStore.create: filesystem-orphan adoption — scan parent dir, adopt matching SHA orphan`
+
+No existing tests touched.
+
+### Phase 4 Group 8 — GitignoreInvariants always-write
+
+**RED test to land:**
+- N15: `GitignoreInvariants.enforce: drops mtime/hash short-circuit, always reads+splices+compares`
+
+Existing `gitignore-invariants.test.ts` likely needs minor REWRITE if it asserted on short-circuit behavior — check during Phase 3.
+
+### Phase 4 Group 9 — Commit-template removal (biggest scope)
+
+**RED test to land:**
+- N16: `Commit messages: hardcoded "sync ({deviceLabel})" / "resolve conflict ({deviceLabel})" — no template substitution`
+
+**Existing tests to DELETE:**
+- All `tests/sync2/commit-templates.test.ts` content (the entire file)
+
+**Existing tests to REWRITE:**
+- `push-queue.test.ts` parts that assert on commit message format
+- Integration tests that check commit messages on GitHub (L1, L4 — may need REWRITE per `accumulateOfflineSyncs` audit)
+
+### Phase 4 Group 10 — Visibility 4→3 point
+
+**RED test to land:**
+- (No new test — UI change, settings tab badge removed)
+
+**Existing tests to DELETE/REWRITE:**
+- Any `tests/sync2/conflict-status-bar.test.ts` parts asserting on settings-tab badge
+- Settings UI tests
+
+### Workflow + lifecycle tests (cross-cutting)
+
+These NEW tests aren't tied to a single Phase 4 group — they exercise
+the integrated behavior after multiple groups land. Best landed near
+the end of Phase 4 (after groups 1-6):
+
+- N13: `delete-base-then-rename-sibling workflow under MOCK_PLATFORM=mobile` (Category B+E)
+- N14: `pull-side new-sibling that matches base coincidentally → next drain Phase A auto-cleans` (Category C)
+
+### Priority + sequencing summary
+
+**Critical path** (must land first, blocks the rest):
+1. Group 1 (Foundation: enqueueSynthetic + synthetic field) — block #6
+2. Group 5 (ConflictCounter) — block #6 status-bar wiring
+3. Group 2 (Classifier 2-phase) — block #6 drain Phase B synthesis
+
+**Independent** (can land in parallel with critical path):
+- Group 3 (load drop auto-restore)
+- Group 7 (filesystem-orphan dedup)
+- Group 8 (GitignoreInvariants)
+
+**Final** (require multiple predecessors):
+- Group 4 (`.sync-bak` migration) — touches recovery + create() flows
+- Group 6 (Drain wiring) — needs Groups 1, 2, 5 GREEN first
+- Group 9 (Commit-template removal) — biggest scope, save for last
+- Group 10 (visibility 4→3) — UI cleanup, last
+
+**Workflow tests** N13, N14 — written during Phase 3 but only land
+GREEN after Groups 1-6 complete.
+
+### Expected Phase 3 commit shape
+
+~7-10 commits, one per Phase 4 group, each shipping just the RED
+tests (failing) for that group. Order:
+
+1. **commit: RED tests for Group 1** — N5, N6, N7
+2. **commit: RED tests for Group 5** (counter) — N1, N2, N3, N4, N18 + ConflictCounter test file
+3. **commit: RED tests for Group 2** (classifier) — N12 + planned rewrites scaffolded
+4. **commit: RED tests for Group 3** — N10
+5. **commit: RED tests for Group 4** (`.sync-bak`) — N8, N9, N17
+6. **commit: RED tests for Groups 6+ + workflow/lifecycle** — N13, N14, branch-lifecycle scaffold
+7. **commit: RED tests for Groups 7, 8** — N11, N15
+8. **commit: RED tests for Groups 9, 10** — N16 + delete-template-tests scaffold
+
+Each commit's tests fail with "Not implemented" against Phase 1.7
+stubs OR fail with assertion mismatch against current 2.0.0-beta code.
+
+### Effort estimate
+
+- Total RED test writing: ~18 NEW tests + ~15 REWRITE existing
+- Estimated wall-clock: 6-8 hours focused work
+- Expected test count after Phase 3: ~104 RED + ~75 KEEP (passing) +
+  ~17 DELETED = ~196 tests total (vs current 510 — note the count
+  reflects only conflict-related; existing 510 includes unit suite
+  for other modules)
+
+---
+
+## Future enhancements (out of scope for stage 1)
+
 Ідеї, що з'явилися під час обговорення pseudo-merge mode, **але не
 включені у stage 1**. Зафіксовані тут, щоб не загубились. Можна
 імплементувати окремими PR'ами після того, як pseudo-merge приземлиться.
