@@ -137,33 +137,71 @@ export default class PushQueue {
     return id;
   }
 
-  // Stage 13 stub (Phase 1.7) — full implementation lands in Phase 4
-  // alongside the classifier 2-phase rewrite. See PSEUDO-MERGE-MODE.md
-  // §"PushQueue.enqueueSynthetic — API contract" for the binding spec.
+  // Stage 13 — Phase B side-batch synthesis. Phase 4 Group 1
+  // implementation of the contract documented in PSEUDO-MERGE-MODE.md
+  // §"PushQueue.enqueueSynthetic — API contract":
   //
-  // Contract (from doc):
-  //   - Single path per synthetic batch (Phase B creates one per
-  //     closed path; preserve-all-commits principle).
-  //   - synthetic: true in meta.json (mergeIntoLatestPending must
-  //     skip these — user edits never fold into resolution commits).
-  //   - content: Uint8Array = push file content; null = push delete.
-  //   - Returns batch id (timestamp-based, same format as enqueue()).
-  //   - Throws on I/O error or invalid path. Does NOT throw on
-  //     existing batch for same path (multiple resolutions allowed).
-  //
-  // Phase 3 RED tests will exercise this method and observe
-  // "Not implemented" — that's the proper RED state. Phase 4 swaps
-  // the body for the real implementation.
-  async enqueueSynthetic(_args: {
+  //   - Single path per synthetic batch. Phase B creates one per
+  //     closed path so each resolution is a discrete commit on main
+  //     (preserve-all-commits principle).
+  //   - synthetic: true persisted in meta.json. mergeIntoLatestPending
+  //     skips these so user edits never fold into a resolution batch.
+  //   - content: Uint8Array → push file content. null → push deletion.
+  //   - Returns the batch id (timestamp-based, same format as
+  //     enqueue()).
+  //   - Does NOT merge with existing pending batches — each Phase B
+  //     closure is its own batch even if a synthetic one already
+  //     exists for the same path.
+  //   - commitMessage is left empty; processBatch derives the actual
+  //     message inline from `meta.synthetic` + deviceLabel (Decision
+  //     #36 in PSEUDO-MERGE-MODE.md). Group 9 removes the
+  //     commitMessage field from the schema entirely.
+  async enqueueSynthetic(args: {
     path: string;
     content: Uint8Array | null;
     contentSha: string | null;
     parentCommitSha: string;
     parentTreeSha: string;
   }): Promise<string> {
-    throw new Error(
-      "PushQueue.enqueueSynthetic: not implemented (Stage 13 Phase 4 — see PSEUDO-MERGE-MODE.md)",
-    );
+    const id = await this.allocateUniqueId();
+    await this.ensureDir(this.queueRoot);
+    const batchDir = `${this.queueRoot}/${id}`;
+    await this.ensureDir(batchDir);
+    await this.ensureDir(`${batchDir}/${VAULT_SUBDIR}`);
+
+    if (args.content !== null) {
+      // Content variant: stage the resolution bytes under the batch's
+      // vault/ snapshot. tree-builder picks them up like any other
+      // batch file at push time.
+      const target = `${batchDir}/${VAULT_SUBDIR}/${args.path}`;
+      await this.ensureParentDir(target);
+      const bytes = args.content;
+      // Slice the underlying ArrayBuffer to drop any byteOffset/length
+      // shenanigans so writeBinary always sees a tight, single-owner
+      // buffer.
+      const buf = bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      ) as ArrayBuffer;
+      await this.vault.adapter.writeBinary(target, buf);
+    } else {
+      // Deletion variant: write the path into deleted-paths.txt. No
+      // vault/ file. tree-builder removes the path from main's tree.
+      await this.vault.adapter.write(
+        `${batchDir}/${DELETIONS_FILE}`,
+        args.path + "\n",
+      );
+    }
+
+    await this.writeMeta(batchDir, {
+      commitMessage: "",
+      parentCommitSha: args.parentCommitSha,
+      parentTreeSha: args.parentTreeSha,
+      createdAt: Date.now(),
+      synthetic: true,
+    });
+
+    return id;
   }
 
   // Return batch IDs oldest-first. Filters out non-batch entries so
@@ -348,6 +386,13 @@ export default class PushQueue {
         `${batchDir}/${ATTEMPTED_FILE}`,
       );
       if (attempted) continue;
+      // Stage 13: synthetic batches (Phase B resolution side-batches)
+      // never fold with user edits. Provenance stays clean — user
+      // changes go into their own batch, even if a synthetic one is
+      // the youngest pending entry. See Decision #36 in
+      // PSEUDO-MERGE-MODE.md.
+      const meta = await this.readMeta(batchDir);
+      if (meta.synthetic) continue;
       target = ids[i];
       break;
     }
@@ -576,12 +621,17 @@ export default class PushQueue {
       createdAt: number;
       uploadedBlobs?: Record<string, string>;
       fileMtimes?: Record<string, number>;
+      synthetic?: boolean;
     },
   ): Promise<void> {
     const out = {
       ...meta,
       uploadedBlobs: meta.uploadedBlobs ?? {},
       fileMtimes: meta.fileMtimes ?? {},
+      // Persist explicit boolean. Pre-Stage-13 batches without this
+      // field deserialize as `false` via the readMeta default — see
+      // §"EnqueueMeta schema (Stage 13)" in PSEUDO-MERGE-MODE.md.
+      synthetic: meta.synthetic === true,
     };
     await this.vault.adapter.write(
       `${batchDir}/${META_FILE}`,
@@ -596,6 +646,7 @@ export default class PushQueue {
     createdAt: number;
     uploadedBlobs: Record<string, string>;
     fileMtimes: Record<string, number>;
+    synthetic: boolean;
   }> {
     const text = await this.vault.adapter.read(`${batchDir}/${META_FILE}`);
     const raw = JSON.parse(text) as Record<string, unknown>;
@@ -626,6 +677,7 @@ export default class PushQueue {
       createdAt: typeof raw.createdAt === "number" ? raw.createdAt : 0,
       uploadedBlobs,
       fileMtimes,
+      synthetic: typeof raw.synthetic === "boolean" ? raw.synthetic : false,
     };
   }
 
