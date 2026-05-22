@@ -275,16 +275,25 @@ export default class GitignoreInvariants {
       return;
     }
 
-    if (recorded && recorded.mtime === stat.mtime) return;
-
-    // mtime moved (or no record yet) — read and inspect.
+    // Stage 13 (PSEUDO-MERGE-MODE.md §"Що змінюється в коді"): always
+    // read+splice+compare. Pre-Stage-13 short-circuits on `mtime`
+    // and `recorded.hash` skipped the splice when the on-disk file
+    // hadn't changed since the last enforce. That broke plugin
+    // upgrades — when the canonical block CONSTANT changed but the
+    // on-disk file didn't (still pinned to the previous plugin's
+    // block), the recorded hash matched the file's current hash and
+    // enforce() returned without applying the new canonical lines.
+    // The 2026-05-21 mobile incident report mentioned a stale
+    // root .gitignore on mobile that the desktop had already
+    // updated — this was the root cause.
+    //
+    // The post-splice `fixed === content` check below is the
+    // remaining short-circuit. It's safe — it compares the spliced
+    // output to the actual on-disk content, so it can't lie about
+    // canonical-block changes.
     const content = await this.vault.adapter.read(path);
+    void recorded; // hash/mtime short-circuits dropped — see comment above
     const hash = await sha1Of(content);
-    if (recorded && recorded.hash === hash) {
-      // Touched-but-unchanged: refresh mtime only, no rewrite.
-      this.store.setInvariantState(slot, { mtime: stat.mtime, hash });
-      return;
-    }
 
     // The block's "push plugins data.json" toggle survives this
     // rewrite. If the caller asked for a specific state, use it;
@@ -333,14 +342,13 @@ export default class GitignoreInvariants {
       return;
     }
 
-    if (recorded && recorded.mtime === stat.mtime) return;
-
+    // Stage 13: always read+splice+compare. See the matching comment
+    // in `enforceConfigDirGitignoreWith` for the rationale (plugin
+    // upgrades that change ROOT_INVARIANT_BLOCK must reach disk even
+    // when the user's file mtime hasn't moved).
     const content = await this.vault.adapter.read(path);
+    void recorded;
     const hash = await sha1Of(content);
-    if (recorded && recorded.hash === hash) {
-      this.store.setInvariantState(slot, { mtime: stat.mtime, hash });
-      return;
-    }
 
     const fixed = spliceInvariantBlock(content, ROOT_INVARIANT_BLOCK);
     if (fixed === content) {
@@ -363,12 +371,15 @@ export default class GitignoreInvariants {
       return;
     }
 
-    if (recorded && recorded.mtime === stat.mtime) return;
-
+    // Stage 13: always read+compare against the canonical constant.
+    // mtime short-circuit dropped so plugin upgrades that change
+    // SELF_PLUGIN_GITIGNORE reach disk even when the file mtime
+    // hasn't moved.
     const content = await this.vault.adapter.read(path);
+    void recorded;
     const hash = await sha1Of(content);
     if (content === SELF_PLUGIN_GITIGNORE) {
-      // Already canonical, just touched.
+      // Already canonical — refresh cache only.
       this.store.setInvariantState(slot, { mtime: stat.mtime, hash });
       return;
     }

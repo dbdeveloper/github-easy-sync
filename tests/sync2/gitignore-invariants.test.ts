@@ -221,11 +221,11 @@ describe("GitignoreInvariants.enforce", () => {
     await f.inv.enforce();
     const cdPath = cdGitignore(f.root);
 
-    // Simulate sync2's push ending in a re-write of the file.
-    fs.writeFileSync(
-      cdPath,
-      `${INVARIANT_BEGIN}\n# Per-device state — never propagate between machines.\ngithub-easy-sync-metadata.json\nworkspace.json\nworkspace-mobile.json\ncommunity-plugins.json\n${INVARIANT_END}\n# user added later\n`,
-    );
+    // Simulate sync2 receiving a pulled .gitignore that's already
+    // canonical — the same bytes enforce() would produce. Re-stat to
+    // mimic the post-write mtime bump.
+    const canonical = fs.readFileSync(cdPath, "utf8");
+    fs.writeFileSync(cdPath, canonical + "# user added later\n");
     fs.utimesSync(cdPath, new Date(), new Date(Date.now() + 5_000));
 
     await f.inv.notePathSelfWritten(`${CONFIG_DIR}/.gitignore`);
@@ -234,7 +234,10 @@ describe("GitignoreInvariants.enforce", () => {
       stat.mtimeMs,
     );
 
-    // Next enforce() short-circuits — no rewrite.
+    // Next enforce() reads + splices + compares (Stage 13 no longer
+    // short-circuits on mtime/hash). Splice produces the same content
+    // → no rewrite. Test verifies the post-splice equality short-
+    // circuit holds for canonical content.
     const before = fs.readFileSync(cdPath, "utf8");
     await f.inv.enforce();
     expect(fs.readFileSync(cdPath, "utf8")).toBe(before);

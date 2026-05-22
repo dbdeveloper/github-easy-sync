@@ -1865,14 +1865,15 @@ in the Stage 13 pivot notice).
 | 5 | ConflictCounter (dirty-flag + subscribers) | `6b3c4ee` | `2da64ff` | ✅ GREEN |
 | 6 | Drain wiring (drop drain-end sweep, guard) | (no NEW tests) | — | ⏸ pending |
 | 7 | Filesystem-orphan adoption at create | `dc5d0e2` | `d1af154` | ✅ GREEN |
-| 8 | GitignoreInvariants always-write | `dc5d0e2` | — | ⏸ pending |
+| 8 | GitignoreInvariants always-write | `dc5d0e2` | (this commit) | ✅ GREEN |
 | 9 | Commit-template removal (Decision #36) | (deferred) | — | ⏸ pending |
 | 10 | Visibility 4→3 point (settings-tab badge) | (deferred) | — | ⏸ pending |
 
-**Status snapshot (last update: 2026-05-23):** 5/10 groups GREEN.
-Test suite state: 527 GREEN + 6 RED + 2 todo. The critical-path
-trio (Groups 1, 5, 2) all landed first; remaining work is mostly
-independent groups + the larger cleanup of Groups 4, 6, 9, 10.
+**Status snapshot (last update: 2026-05-23):** 6/10 groups GREEN.
+Test suite state: 528 GREEN + 5 RED + 2 todo. The critical-path
+trio (Groups 1, 5, 2) landed first; the independent groups (3, 7,
+8) followed. Remaining: Group 4 (`.sync-bak` migration — touches
+recovery + create flows) and the larger cleanup of Groups 6, 9, 10.
 
 **Discipline:**
 - Write tests against the **Phase 4 API surface** (locked via stubs in
@@ -1976,7 +1977,7 @@ exercise.
 
 No existing tests touched.
 
-### Phase 4 Group 8 — GitignoreInvariants always-write
+### Phase 4 Group 8 — GitignoreInvariants always-write ✅
 
 **RED test to land:**
 - N15: `GitignoreInvariants.enforce: drops mtime/hash short-circuit, always reads+splices+compares`
