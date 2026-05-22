@@ -227,20 +227,28 @@ export default class ConflictStore {
     const existing = this.findDuplicate(args.vaultPath, args.theirsBlobSha);
     if (existing) return existing;
 
-    const id = this.idFactory();
-    const ts = this.nowFn();
-    const siblingPath = buildSiblingPath(
+    // Stage 13 (Decision #33): filesystem-orphan adoption. Scan the
+    // parent directory of vaultPath for `<stem>.conflict-from-*<ext>`
+    // files whose content SHA matches theirsBlobSha. Match → adopt
+    // the orphan: build the record pointing at the existing file and
+    // skip the vault writeBinary in step 3 below. Closes the
+    // 2026-05-21 mobile incident root cause #2 (4 phantom duplicate
+    // `.gitignore.conflict-from-*` siblings spawned across retries).
+    const orphan = await this.findOrphanSibling(
       args.vaultPath,
-      args.remoteDevice,
-      ts,
-      args.kind,
+      args.theirsBlobSha,
     );
 
-    // Sibling SHA is the git-blob hash of the bytes we're about to
-    // write. For kinds with a non-null theirsBlobSha that pair MUST
-    // be the same; if a caller passes mismatched arguments we trust
-    // the bytes (theirsContent is what actually lands in the vault).
-    const siblingSha = await calculateGitBlobSHA(args.theirsContent);
+    const id = this.idFactory();
+    const ts = this.nowFn();
+    const siblingPath =
+      orphan?.path ??
+      buildSiblingPath(args.vaultPath, args.remoteDevice, ts, args.kind);
+
+    // Sibling SHA is the git-blob hash of the content. Fresh create:
+    // hash the incoming bytes (== args.theirsBlobSha per contract).
+    // Adoption: reuse the orphan's already-computed SHA (== theirsBlobSha).
+    const siblingSha = orphan?.sha ?? (await calculateGitBlobSHA(args.theirsContent));
 
     const recordDir = `${this.conflictsRoot}/${id}`;
 
@@ -280,8 +288,12 @@ export default class ConflictStore {
     // ── Step 3 ─────────────────────────────────────────────────────
     // Vault sibling. Raw bytes — no canonicalization (sibling is not
     // user-authored content; user resolves manually).
-    await this.ensureParentDir(siblingPath);
-    await this.vault.adapter.writeBinary(siblingPath, args.theirsContent);
+    // Adopted orphan: file is already on disk; SHA already matched
+    // theirsBlobSha so the bytes are correct. Skip the write.
+    if (!orphan) {
+      await this.ensureParentDir(siblingPath);
+      await this.vault.adapter.writeBinary(siblingPath, args.theirsContent);
+    }
 
     // Index the record NOW, before the optional stat refresh. If the
     // refresh throws (it's best-effort cache hygiene, not a
@@ -306,6 +318,57 @@ export default class ConflictStore {
       // strictly an optimisation.
     }
     return record;
+  }
+
+  // Scan the parent directory of vaultPath for orphan sibling files
+  // — entries named `<stem>.conflict-from-*<ext>` with no
+  // corresponding ConflictStore record pointing at them. Returns the
+  // first one whose content SHA matches `theirsBlobSha`, or null.
+  //
+  // The "no corresponding record" check skips siblings already
+  // adopted via a record in this store (`this.bySibling`). That
+  // way an in-flight conflict's own sibling can't be re-adopted as
+  // its own orphan.
+  private async findOrphanSibling(
+    vaultPath: string,
+    theirsBlobSha: string,
+  ): Promise<{ path: string; sha: string } | null> {
+    const slash = vaultPath.lastIndexOf("/");
+    const parent = slash > 0 ? vaultPath.substring(0, slash) : "";
+    const basename = slash > 0 ? vaultPath.substring(slash + 1) : vaultPath;
+    const ext = extensionOf(vaultPath);
+    const stem =
+      ext === "" ? basename : basename.substring(0, basename.length - ext.length);
+    const namePrefix = `${stem}.conflict-from-`;
+
+    let listing: { files: string[]; folders: string[] };
+    try {
+      listing = await this.vault.adapter.list(parent === "" ? "/" : parent);
+    } catch {
+      return null;
+    }
+
+    for (const filePath of listing.files) {
+      const fileName =
+        filePath.lastIndexOf("/") >= 0
+          ? filePath.substring(filePath.lastIndexOf("/") + 1)
+          : filePath;
+      if (!fileName.startsWith(namePrefix)) continue;
+      if (ext !== "" && !fileName.endsWith(ext)) continue;
+      if (this.bySibling.has(filePath)) continue;
+
+      let candidate: ArrayBuffer;
+      try {
+        candidate = await this.vault.adapter.readBinary(filePath);
+      } catch {
+        continue;
+      }
+      const sha = await calculateGitBlobSHA(candidate);
+      if (sha === theirsBlobSha) {
+        return { path: filePath, sha };
+      }
+    }
+    return null;
   }
 
   // Patch cache fields and re-persist. Routed through metaWriteQueue
