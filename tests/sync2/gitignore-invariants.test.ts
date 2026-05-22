@@ -252,6 +252,75 @@ describe("GitignoreInvariants.enforce", () => {
     expect(store2.getInvariantState().configDirGitignore).toBeDefined();
     expect(store2.getInvariantState().selfPluginGitignore).toBeDefined();
   });
+
+  // ─── Stage 13 Phase 3 RED test (Group 8: gitignore always-write) ────
+  //
+  // Bug observed on mobile 2026-05-21: after plugin upgrade introduced
+  // new canonical block lines (e.g., `*.sync-bak*` / `*.sync-tmp*`),
+  // the on-disk gitignore stayed pinned to the previous canonical
+  // because enforce() short-circuited on mtime cache hit (file
+  // unchanged externally → mtime matched recorded → enforce returned
+  // without comparing content against the CURRENT canonical block).
+  //
+  // Decision in PSEUDO-MERGE-MODE.md §"Що змінюється в коді (Phase 4,
+  // окремо від цього доку)": GitignoreInvariants.enforce drops the
+  // mtime / hash short-circuits — always reads, always splices,
+  // always compares spliced output to current content. Writes only
+  // when output differs.
+  //
+  // Currently FAILS: short-circuit at line 278 in
+  // src/sync2/gitignore-invariants.ts returns early, never reads
+  // content, never re-splices. The new canonical block never lands.
+  it("N15 (Stage 13): enforce applies a new canonical block even when mtime matches recorded", async () => {
+    const cdPath = cdGitignore(f.root);
+
+    // Plant a STALE on-disk gitignore: structured like a canonical
+    // block but missing a hypothetical "future-canonical-rule"
+    // (stand-in for `*.sync-bak*` after a plugin upgrade — any line
+    // a future canonical adds that the recorded snapshot was unaware
+    // of).
+    const staleBody = [
+      INVARIANT_BEGIN,
+      "# old block",
+      "github-easy-sync-metadata.json",
+      "plugins/*/data.json",
+      INVARIANT_END,
+    ].join("\n");
+    fs.writeFileSync(cdPath, staleBody + "\n");
+    const staleStat = fs.statSync(cdPath);
+    // Recompute the hash the same way GitignoreInvariants does
+    // internally (SHA-1 hex of the file content). The exact algorithm
+    // is private to gitignore-invariants.ts; the store's cache just
+    // needs SOME value that, paired with the file's current mtime,
+    // claims "this state was recorded".
+    const staleHash = crypto
+      .createHash("sha1")
+      .update(fs.readFileSync(cdPath, "utf8"))
+      .digest("hex");
+
+    // Seed the store's invariant state to claim this exact stale
+    // content was recorded last enforce.
+    f.store.setInvariantState("configDirGitignore", {
+      mtime: staleStat.mtimeMs,
+      hash: staleHash,
+    });
+
+    // Call enforce(). Under Stage 13 it must re-splice the file
+    // and rewrite to current canonical (which is wider than
+    // staleBody — contains workspace.json + workspace-mobile.json
+    // + community-plugins.json invariants that staleBody omits).
+    await f.inv.enforce();
+
+    const after = fs.readFileSync(cdPath, "utf8");
+
+    // The current canonical block carries lines staleBody didn't.
+    // Pick any line known to be in the current block but missing
+    // from our stale stand-in.
+    expect(after).toContain("workspace.json");
+    expect(after).toContain("plugins/*/data.json");
+    // Stale marker line removed (canonical block fully rewritten).
+    expect(after).not.toContain("# old block");
+  });
 });
 
 describe("extractInvariantBlock / blockHasAllowLine (pure)", () => {

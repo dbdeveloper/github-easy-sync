@@ -15,6 +15,7 @@ import ConflictStore, {
   type ConflictRecord,
   type CreateArgs,
 } from "../../src/sync2/conflict-store";
+import { calculateGitBlobSHA } from "../../src/utils";
 import { Vault } from "../../mock-obsidian";
 
 // Pseudo-merge ConflictStore tests (PSEUDO-MERGE-MODE.md, stage 2).
@@ -261,6 +262,71 @@ describe("ConflictStore", () => {
       expect(f.store.getAll().length).toBe(2);
     });
 
+    // ─── Stage 13 Phase 3 RED test (Group 7: filesystem-orphan adoption) ─
+    //
+    // 2026-05-21 mobile incident root cause #2: ConflictStore.create
+    // only de-duplicated against IN-MEMORY records. Orphan sibling
+    // files in the vault (left over from a previous plugin version,
+    // manual cleanup of `.conflicts/`, or any other path that left a
+    // sibling without a record) were ignored — create() spawned a
+    // FRESH sibling with timestamp, so the user saw 4 phantom
+    // duplicate `.gitignore.conflict-from-MacBook-*` files.
+    //
+    // Decision #33 in PSEUDO-MERGE-MODE.md: create() scans the
+    // parent directory of vaultPath for `<stem>.conflict-from-*<ext>`
+    // matching theirsBlobSha. Match → adopt the orphan: create a
+    // record that points at the EXISTING file; no new write.
+    //
+    // Currently FAILS: store.create() unconditionally writes a new
+    // sibling with a fresh timestamped name. The orphan remains
+    // alongside, and the new record points at the new file.
+    // Phase 4 Group 7 adds the directory scan + adoption path.
+    it("N11 (Stage 13): create() adopts an existing orphan sibling matching theirsBlobSha", async () => {
+      await f.store.load();
+      writeVaultFile(f.root, "Notes/note.md", "local content\n");
+
+      // Plant an orphan sibling — content matches what create() will
+      // be asked to register. Mimics: previous plugin install left a
+      // sibling; user wiped `.conflicts/`; same conflict re-detected.
+      const orphanPath = "Notes/note.conflict-from-OldDevice-2026-01-01T00-00-00Z.md";
+      writeVaultFile(f.root, orphanPath, "theirs content\n");
+
+      // Compute the SHA of the orphan's content. Phase 4 spec calls
+      // calculateGitBlobSHA on each candidate orphan; we precompute
+      // the expected match key here.
+      const orphanContent = new TextEncoder().encode("theirs content\n");
+      const orphanSha = await calculateGitBlobSHA(
+        orphanContent.buffer.slice(
+          orphanContent.byteOffset,
+          orphanContent.byteOffset + orphanContent.byteLength,
+        ) as ArrayBuffer,
+      );
+
+      // Call create() with the matching theirsBlobSha.
+      const rec = await f.store.create(
+        baseArgs({
+          vaultPath: "Notes/note.md",
+          theirsBlobSha: orphanSha,
+          theirsContent: orphanContent.buffer.slice(
+            orphanContent.byteOffset,
+            orphanContent.byteOffset + orphanContent.byteLength,
+          ) as ArrayBuffer,
+        }),
+      );
+
+      // Adoption: the new record points at the EXISTING orphan,
+      // not a freshly-timestamped one.
+      expect(rec.siblingPath).toBe(orphanPath);
+
+      // No second sibling spawned in the vault.
+      const siblings = fs
+        .readdirSync(path.join(f.root, "Notes"))
+        .filter((name) => name.startsWith("note.conflict-from-"));
+      expect(siblings).toHaveLength(1);
+      expect(siblings[0]).toBe(
+        "note.conflict-from-OldDevice-2026-01-01T00-00-00Z.md",
+      );
+    });
   });
 
   describe("crash recovery on load", () => {
