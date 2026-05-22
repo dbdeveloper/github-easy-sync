@@ -9,6 +9,39 @@ import {
 } from "fs";
 import * as path from "path";
 
+// ── MOCK_PLATFORM mode ───────────────────────────────────────────────────────
+// Tests can set the simulated platform to expose Capacitor-vs-POSIX
+// divergences that would otherwise be invisible under Node fs.
+//
+// Real Obsidian on iOS / Android wraps Capacitor's Filesystem plugin,
+// whose `rename(from, to)` THROWS `"Destination file already exists!"`
+// when `to` already exists. POSIX `fs.rename` (Node, desktop Obsidian)
+// silently overwrites.
+//
+// 2026-05-21 mobile incident: production code that worked on desktop
+// crashed on mobile because of this exact assumption. Pairing tests
+// under both platforms catches that class of bug at unit-test time.
+//
+// Usage:
+//   setMockPlatform("mobile")   // adapter.rename throws if to exists
+//   setMockPlatform("desktop")  // POSIX behavior (default)
+//
+// Tests should reset to "desktop" in afterEach to avoid cross-test
+// leak. A test that exercises both should use describe.each with the
+// two values.
+
+export type MockPlatform = "desktop" | "mobile";
+
+let currentPlatform: MockPlatform = "desktop";
+
+export function setMockPlatform(mode: MockPlatform): void {
+  currentPlatform = mode;
+}
+
+export function getMockPlatform(): MockPlatform {
+  return currentPlatform;
+}
+
 // Obsidian patches Array.prototype with `.contains()` (an alias for
 // `.includes()`). Production source code uses it, so polyfill here so
 // the same code runs under Node during unit + integration tests.
@@ -211,13 +244,24 @@ export class Vault {
       },
 
       // Mirrors Obsidian's adapter.rename(oldPath, newPath). On
-      // POSIX, fs.rename is atomic when both paths live on the same
-      // filesystem — which they do here (both under rootPath) — so
-      // the 3-step ConflictStore protocol gets a real OS-level
-      // atomic transition between `meta.json.tmp` and `meta.json`.
+      // POSIX (desktop), fs.rename is atomic when both paths live
+      // on the same filesystem — which they do here (both under
+      // rootPath) — so the 3-step ConflictStore protocol gets a
+      // real OS-level atomic transition between `meta.json.tmp`
+      // and `meta.json`.
+      //
+      // Under MOCK_PLATFORM="mobile" we simulate Capacitor's
+      // Filesystem.rename: throws "Destination file already exists!"
+      // if `newPath` already exists. Mobile code must explicitly
+      // remove(newPath) before rename() when overwriting. Without
+      // this divergence, mock tests pass on CI but production breaks
+      // on user phones (2026-05-21 incident).
       rename: async (oldPath: string, newPath: string) => {
         const fromAbs = path.join(this.rootPath, oldPath);
         const toAbs = path.join(this.rootPath, newPath);
+        if (currentPlatform === "mobile" && existsSync(toAbs)) {
+          throw new Error("Destination file already exists!");
+        }
         await fs.rename(fromAbs, toAbs);
       },
 
