@@ -330,6 +330,52 @@ describe("ConflictStore", () => {
       expect(recoveryStore.get(rec.id)).toBeDefined();
       expect(fs.existsSync(path.join(f.root, rec.siblingPath))).toBe(false);
     });
+
+    // ─── Stage 13 Phase 3 RED test (Group 3: drop auto-restore) ─────
+    //
+    // 2026-05-21 mobile incident root cause: ConflictStore.load() saw
+    // a missing vault sibling and re-emitted it from the backup
+    // file inside `.conflicts/<id>/`. User-deleted siblings kept
+    // resurrecting on plugin restart, never closing the conflict.
+    //
+    // Decision #31 in PSEUDO-MERGE-MODE.md: load() does NOT restore
+    // siblings from backup. Missing sibling = resolution signal →
+    // drain Phase B drops the record on the next sync.
+    //
+    // Currently FAILS: the existing load() re-emits the sibling from
+    // backup (see the "step-3 crash → re-emits vault sibling from
+    // backup" test directly above this one, line 280-308). Phase 4
+    // Group 3 removes that auto-restore path and deletes the
+    // re-emit test; this N10 then turns GREEN.
+    it("N10 (Stage 13): missing vault sibling at load() does NOT restore from backup", async () => {
+      // Land a fully created record.
+      await f.store.load();
+      writeVaultFile(f.root, "Notes/note.md", "local content\n");
+      const rec = await f.store.create(baseArgs());
+      const siblingAbs = path.join(f.root, rec.siblingPath);
+      expect(fs.existsSync(siblingAbs)).toBe(true);
+
+      // User deletes the vault sibling externally (file explorer /
+      // CLI / another device's sync). Backup file in .conflicts/
+      // <id>/ stays intact (Phase 4 will repurpose it — for now
+      // it's just an artifact).
+      fs.unlinkSync(siblingAbs);
+      expect(fs.existsSync(siblingAbs)).toBe(false);
+
+      // Fresh load() — under Stage 13, this MUST leave the vault
+      // sibling missing. The record may stay indexed (drain Phase
+      // B will drop it on next sync) OR the orphan record may also
+      // be cleaned up at load. Phase 4 picks one; this test asserts
+      // only the critical invariant: the vault file stays gone.
+      const recoveryStore = new ConflictStore({
+        vault: f.vault as unknown as import("obsidian").Vault,
+        configDir: CONFIG_DIR,
+        selfPluginId: SELF_PLUGIN_ID,
+      });
+      await recoveryStore.load();
+
+      expect(fs.existsSync(siblingAbs)).toBe(false);
+    });
   });
 
   describe("defensive coercion on load", () => {
