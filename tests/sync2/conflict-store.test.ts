@@ -343,41 +343,16 @@ describe("ConflictStore", () => {
       expect(f.store.getAll().length).toBe(0);
     });
 
-    it("step-3 crash (meta.json + backup, but vault sibling missing) → re-emits vault sibling from backup", async () => {
-      // Land a fully created record so we have a known-good shape on disk.
-      await f.store.load();
-      writeVaultFile(f.root, "Notes/note.md", "local content\n");
-      const rec = await f.store.create(baseArgs());
-      const siblingAbs = path.join(f.root, rec.siblingPath);
-      // Simulate: user externally killed Obsidian mid-write OR the
-      // adapter died after meta.json was renamed but before the vault
-      // sibling write completed. Delete the vault sibling to mimic
-      // that state.
-      fs.unlinkSync(siblingAbs);
-      expect(fs.existsSync(siblingAbs)).toBe(false);
+    // Pre-Stage-13 "step-3 crash re-emits sibling from backup" test
+    // was deleted in Phase 4 Group 3 alongside the implementation
+    // change. Stage 13 load() does NOT touch the vault filesystem;
+    // backup re-emission is gone. N10 (immediately below) is the
+    // new contract.
 
-      // New store instance → fresh load → recovery should rewrite it.
-      const recoveryStore = new ConflictStore({
-        vault: f.vault as unknown as import("obsidian").Vault,
-        configDir: CONFIG_DIR,
-        selfPluginId: SELF_PLUGIN_ID,
-      });
-      await recoveryStore.load();
-
-      expect(fs.existsSync(siblingAbs)).toBe(true);
-      expect(readVaultText(f.root, rec.siblingPath)).toBe("theirs content\n");
-      const recovered = recoveryStore.get(rec.id);
-      expect(recovered).toBeDefined();
-      // siblingMtime got refreshed to whatever the new write produced.
-      expect(recovered!.siblingMtime).toBeGreaterThan(0);
-      expect(recovered!.siblingSize).toBe("theirs content\n".length);
-    });
-
-    it("step-3 done then user externally deletes vault sibling AND backup → record stays, but cache untouched", async () => {
-      // Boundary case: if both vault sibling AND backup are gone we
-      // can't auto-recover content. PSEUDO-MERGE-MODE.md says the
-      // classifier will handle it as case 1 ("accept ours").
-      // Stage 2 just leaves the record indexed.
+    it("step-3 done then user externally deletes vault sibling AND backup → record stays indexed", async () => {
+      // Stage 13: load() never resurrects vault content regardless of
+      // backup state. Record loads from meta.json; the missing
+      // sibling becomes a drain Phase B drop signal.
       await f.store.load();
       writeVaultFile(f.root, "Notes/note.md", "local\n");
       const rec = await f.store.create(baseArgs());
@@ -391,28 +366,21 @@ describe("ConflictStore", () => {
       });
       await recoveryStore.load();
 
-      // Record still loadable from meta.json, vault sibling NOT recreated
-      // (no source for content).
+      // Record indexed from meta.json; vault sibling stays gone.
       expect(recoveryStore.get(rec.id)).toBeDefined();
       expect(fs.existsSync(path.join(f.root, rec.siblingPath))).toBe(false);
     });
 
-    // ─── Stage 13 Phase 3 RED test (Group 3: drop auto-restore) ─────
+    // ─── Stage 13 RED test (Group 3: drop auto-restore) → GREEN ─────
     //
-    // 2026-05-21 mobile incident root cause: ConflictStore.load() saw
-    // a missing vault sibling and re-emitted it from the backup
-    // file inside `.conflicts/<id>/`. User-deleted siblings kept
-    // resurrecting on plugin restart, never closing the conflict.
+    // 2026-05-21 mobile incident root cause: pre-Stage-13 load() saw
+    // a missing vault sibling and re-emitted it from the backup file
+    // inside `.conflicts/<id>/`. User-deleted siblings kept
+    // resurrecting on plugin restart; conflicts never closed.
     //
     // Decision #31 in PSEUDO-MERGE-MODE.md: load() does NOT restore
     // siblings from backup. Missing sibling = resolution signal →
     // drain Phase B drops the record on the next sync.
-    //
-    // Currently FAILS: the existing load() re-emits the sibling from
-    // backup (see the "step-3 crash → re-emits vault sibling from
-    // backup" test directly above this one, line 280-308). Phase 4
-    // Group 3 removes that auto-restore path and deletes the
-    // re-emit test; this N10 then turns GREEN.
     it("N10 (Stage 13): missing vault sibling at load() does NOT restore from backup", async () => {
       // Land a fully created record.
       await f.store.load();

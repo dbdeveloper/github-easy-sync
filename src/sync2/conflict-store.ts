@@ -157,14 +157,23 @@ export default class ConflictStore {
   // recovery sweep. Idempotent — re-running after vault mutations
   // refreshes the index without leaking stale entries.
   //
-  // Recovery semantics (PSEUDO-MERGE-MODE.md §"Recovery sweep на onload"):
+  // Recovery semantics (Stage 13 — PSEUDO-MERGE-MODE.md §"Що
+  // видаляється з ConflictStore.load() (Stage 13)" + Decision #31):
   //   - meta.json missing      → step-1 crash, rmdir recordDir
-  //   - sibling on vault missing
-  //     AND sibling-content.bin present → step-3 crash, rewrite vault
-  //                                       sibling from backup, refresh
-  //                                       siblingMtime cache
   //   - meta.json corrupt JSON → skip (don't rmdir; let user notice)
   //   - else                    → index normally
+  //
+  // load() does NOT touch the vault filesystem. Missing vault siblings
+  // (user deleted them externally) are NOT restored from the
+  // `sibling-content.bin` backup. The drain-start Phase B sweep
+  // sees `!siblingExists` on each affected record and drops it on
+  // the next sync — that's the resolution signal.
+  //
+  // Pre-Stage-13 behavior auto-restored deleted siblings on load(),
+  // which caused the 2026-05-21 mobile incident: user wiped sibling
+  // files in the file explorer, plugin restart resurrected them,
+  // conflicts never closed. Decision #31 made the load() pure
+  // metadata read.
   async load(): Promise<void> {
     this.records.clear();
     this.byPath.clear();
@@ -173,7 +182,6 @@ export default class ConflictStore {
     const { folders } = await this.vault.adapter.list(this.conflictsRoot);
     for (const folder of folders) {
       const metaPath = `${folder}/${META_FILE}`;
-      const backupPath = `${folder}/${SIBLING_BACKUP_FILE}`;
       // Recovery window 1: meta.json absent → step-1 crash. The whole
       // dir is orphan staging — drop it. The conflict will be re-detected
       // when pull/reconcile next sees the SHA divergence.
@@ -193,26 +201,9 @@ export default class ConflictStore {
         record = null;
       }
       if (record === null) continue;
-      // Recovery window 2: meta.json + backup OK but vault sibling
-      // missing → step-3 crash. Re-emit the sibling from the backup
-      // and refresh the mtime cache. After this loop runs the record
-      // is in the same shape as a successful create().
-      const siblingExists = await this.vault.adapter.exists(record.siblingPath);
-      const backupExists = await this.vault.adapter.exists(backupPath);
-      if (!siblingExists && backupExists) {
-        const content = await this.vault.adapter.readBinary(backupPath);
-        await this.ensureParentDir(record.siblingPath);
-        await this.vault.adapter.writeBinary(record.siblingPath, content);
-        const stat = await this.vault.adapter.stat(record.siblingPath);
-        if (stat) {
-          record.siblingMtime = stat.mtime;
-          record.siblingSize = stat.size;
-          // siblingSha unchanged — bytes are identical to the backup
-          // (which we just confirmed matches what the original
-          // create() wrote).
-          await this.persistRecord(folder, record);
-        }
-      }
+      // Stage 13: do NOT consult the vault filesystem here. The record
+      // gets indexed exactly as persisted. Drain-start Phase B is the
+      // authoritative reconciliation point.
       this.indexRecord(record);
     }
   }
