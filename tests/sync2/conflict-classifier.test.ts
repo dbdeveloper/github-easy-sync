@@ -88,19 +88,10 @@ describe("classify (pure)", () => {
   // resolves at push time via attemptAutoMerge's "modify-wins"
   // branch. Former rows 2, 4, 10, 11, 12 dropped with the kind.
 
-  // ─── Row 3: sibling, !base, modify-vs-modify → cascade ──────────────
-
-  it("Row 3: sibling exists, base deleted, modify-vs-modify → delete-wins-cascade", () => {
-    const d = classify(
-      rec({ kind: "modify-vs-modify", oursBlobSha: "o", theirsBlobSha: "t" }),
-      false,
-      null,
-      null,
-      true,
-      "t",
-    );
-    expect(d).toEqual({ type: "delete-wins-cascade" });
-  });
+  // ─── Row 3: REMOVED in Stage 13 (Decision #30 — see N12 below) ─────
+  // The "user deletes base on modify-vs-modify → cascade delete every
+  // sibling" behavior is gone. Classifier now returns noop for this
+  // input (covered by N12 at the bottom of this describe block).
 
   // ─── Row 5: sibling, !base, delete-vs-modify → initial state, noop ─
 
@@ -341,7 +332,13 @@ describe("evaluateConflictState (orchestrator)", () => {
     ).toBe("theirs-content\n");
   });
 
-  it("user deletes base on modify-vs-modify (case 3) → cascade-delete entire path", async () => {
+  it("user deletes base on modify-vs-modify (Stage 13 — Decision #30) → noop, records + siblings stay", async () => {
+    // Replaces the old "case 3 cascade" test. Stage 13 no longer
+    // cascade-deletes siblings when the user removes base. The user
+    // must explicitly resolve EACH sibling (delete it or rename it
+    // onto base). Verified at the orchestrator level here; the pure
+    // classifier-level assertion is N12 in the `classify (pure)`
+    // describe block above.
     writeVaultFile(f.root, "Notes/note.md", "ours\n");
     const a = await createBaseConflict({ theirsBlobSha: "sha-A" });
     const b = await createBaseConflict({
@@ -349,17 +346,21 @@ describe("evaluateConflictState (orchestrator)", () => {
       theirsContent: arr("from-B\n"),
       remoteDevice: "Laptop",
     });
-    // User deletes the base file.
+    // User deletes the base file. Both sibling files still on disk.
     fs.unlinkSync(path.join(f.root, "Notes/note.md"));
 
-    const result = await evaluateConflictState(f.store, f.vault as unknown as import("obsidian").Vault, () => 100);
+    const result = await evaluateConflictState(
+      f.store,
+      f.vault as unknown as import("obsidian").Vault,
+      () => 100,
+    );
 
-    expect(new Set(result.recordsRemoved)).toEqual(new Set([a.id, b.id]));
-    expect([...result.pathsResolved]).toEqual(["Notes/note.md"]);
-    // BOTH siblings removed as part of cascade.
-    expect(fs.existsSync(path.join(f.root, a.siblingPath))).toBe(false);
-    expect(fs.existsSync(path.join(f.root, b.siblingPath))).toBe(false);
-    expect(f.store.getAll().length).toBe(0);
+    // No cascade. Records stay; siblings stay; path NOT resolved.
+    expect(result.recordsRemoved).toEqual([]);
+    expect(result.pathsResolved.size).toBe(0);
+    expect(fs.existsSync(path.join(f.root, a.siblingPath))).toBe(true);
+    expect(fs.existsSync(path.join(f.root, b.siblingPath))).toBe(true);
+    expect(f.store.getAll().length).toBe(2);
   });
 
   // modify-vs-delete is no longer a registered conflict kind —

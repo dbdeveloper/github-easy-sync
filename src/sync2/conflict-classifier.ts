@@ -36,12 +36,16 @@ export type Decision =
   // remaining kinds). User copied sibling content onto the base.
   // Drop the record AND the vault sibling. Drain will propagate
   // baseSha content to main on path-close.
-  | { type: "accept-theirs" }
-  // siblingExists, !baseExists, kind=modify-vs-modify.
-  // User deleted the base → delete-wins. SPECIAL: this is a
-  // path-level cascade — every record for the path gets dropped, every
-  // sibling file removed. Drain propagates "delete from main".
-  | { type: "delete-wins-cascade" };
+  | { type: "accept-theirs" };
+
+// `delete-wins-cascade` was removed in Stage 13 (Decision #30 in
+// PSEUDO-MERGE-MODE.md). The old behavior — "user deletes base →
+// engine cascade-deletes every sibling for the path" — broke the
+// mobile delete-then-rename workflow because the cascade fired
+// between the user's two ops. Stage 13: row 3 returns noop; deletion
+// now requires the user to remove EVERY sibling for the path too
+// (or rename one onto the base, which removes both the sibling and
+// reuses the now-converged base).
 
 // Pure classifier. No I/O. All inputs are already-fetched stat/hash
 // values.
@@ -53,7 +57,10 @@ export function classify(
   siblingExists: boolean,
   siblingSha: string | null,
 ): Decision {
-  const { kind } = record;
+  // kind is currently informational only — classify() doesn't branch
+  // on it. Stage 13 unified the two remaining kinds (modify-vs-modify
+  // and delete-vs-modify) under a single rule set.
+  void record.kind;
 
   // !siblingExists → accept ours regardless of kind. Both
   // modify-vs-modify and delete-vs-modify collapse to "drop record;
@@ -66,11 +73,9 @@ export function classify(
   // siblingExists from here on.
 
   if (!baseExists) {
-    // modify-vs-modify, base deleted → cascade delete-wins.
-    if (kind === "modify-vs-modify") {
-      return { type: "delete-wins-cascade" };
-    }
-    // delete-vs-modify, base absent → initial state, no-op.
+    // Stage 13 (Decision #30): user deleted base, sibling alive —
+    // wait for the user to do the rest. Sibling stays; record stays.
+    // No cascade. This unblocks delete-then-rename on mobile.
     return { type: "noop" };
   }
 
@@ -141,21 +146,9 @@ export async function evaluateConflictState(
     const baseExists = baseStat !== null && baseStat.type === "file";
     const baseSize = baseExists ? baseStat!.size : null;
 
-    // Quick check for Row 3 cascade BEFORE per-record loop: if base
-    // is absent AND any record on this path is modify-vs-modify, the
-    // whole path collapses to delete-wins. The cascade short-circuits
-    // all per-record work for this path.
-    if (!baseExists && recordsOnPath.some((r) => r.kind === "modify-vs-modify")) {
-      for (const r of recordsOnPath) {
-        if (await vault.adapter.exists(r.siblingPath)) {
-          await vault.adapter.remove(r.siblingPath);
-        }
-        await store.delete(r.id);
-        result.recordsRemoved.push(r.id);
-      }
-      result.pathsResolved.add(vaultPath);
-      continue;
-    }
+    // Stage 13 (Decision #30): the path-level Row 3 cascade is gone.
+    // Records with `!baseExists` no longer trigger an engine-driven
+    // sibling sweep; per-record classify() returns noop instead.
 
     // Lazy base SHA: computed (or cache-hit) on first record that
     // needs it. After computation it's cached in `baseShaCached` for
