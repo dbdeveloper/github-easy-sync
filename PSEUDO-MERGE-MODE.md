@@ -1631,7 +1631,218 @@ Allocation:
 
 ---
 
-## Future enhancements (out of scope for stage 1)
+## Phase 2 test audit (2026-05-23)
+
+Audit of 19 existing pseudo-merge test files (4 unit + 15 integration)
+against the Stage 13 model. Each test is classified by status
+(`aligns | partial | broken-by-pivot | irrelevant`) and gets an action
+(`KEEP | REWRITE | DELETE | NEW`) plus an effort estimate (S/M/L)
+for Phase 4 sequencing.
+
+**Status semantics:**
+- `aligns` — Stage 13 doesn't change the behavior or API; test passes as-is or with cosmetic assertion updates.
+- `partial` — behavior survives but API surface (return shape, callee, etc.) changes; assertions need rewrite.
+- `broken-by-pivot` — premise contradicts Stage 13 (event-driven mutation, row 3 cascade, auto-restore on load, etc.). Whole test class invalidated.
+- `irrelevant` — tests something orthogonal to pseudo-merge (snapshot reconcile, plain rotation); Stage 13 doesn't touch it.
+
+**Effort estimates:**
+- **S** (≤30 min) — assertion swaps, type signature updates, minor setup tweaks
+- **M** (30 min – 2 h) — moderate rewrite, new test infrastructure (mock platform, stubs), multi-step setup changes
+- **L** (2 h+) — full workflow rewrite involving real GitHub round-trips, multi-device, drain restructuring
+
+### Summary
+
+| File | Tests | KEEP | REWRITE | DELETE | NEW (planned) |
+|---|---|---|---|---|---|
+| `tests/sync2/conflict-watcher.test.ts` | 13 | 0 | 4 | 9 | — |
+| `tests/sync2/conflict-classifier.test.ts` | 19 | 7 | 7 | 5 | — |
+| `tests/sync2/conflict-store.test.ts` | 30 | 26 | 3 | 1 | — |
+| `tests/sync2/conflict-detection.test.ts` | 21 | 21 | 0 | 0 | — |
+| `tests/integration/scenarios/sync2/conflicts/` (7 files) | 8 | 5 | 1 | 2 | — |
+| `tests/integration/scenarios/sync2/conflicts-misc/` (4 files) | 6 | 6 | 0 | 0 | — |
+| `tests/integration/scenarios/sync2/multi-device/` (4 files) | 4 | 4 | 0 | 0 | — |
+| **Total existing** | **101** | **69 (68%)** | **15 (15%)** | **17 (17%)** | — |
+| **NEW tests (Phase 3 planned)** | — | — | — | — | **~18** |
+
+Most disruption hits the unit conflict-watcher tests (13/13 either deleted or rewritten because the watcher's premise — mutating store from listeners — is gone). All `conflict-detection.test.ts` survives untouched because Stage 13 doesn't touch auto-merge logic. Integration suite is mostly intact — the workflow-level tests already use the same patterns Stage 13 preserves.
+
+### Detail — `tests/sync2/conflict-watcher.test.ts`
+
+13 tests. 9 broken, 4 partial/rewrite. **All cluster under one root cause: Stage 13 makes vault.on listeners read-only.**
+
+| Line | Test | Status | Action | Effort | Replacement target | Notes |
+|---|---|---|---|---|---|---|
+| 104 | `handle(): irrelevant path → skips evaluation` | broken | DELETE | S | A-counter: `markDirty NOT called for irrelevant path` | Eval no longer called from listener |
+| 121 | `handle(): base path with active conflict → fires evaluation` | broken | DELETE | S | A-counter: `markDirty called for base path` | Same |
+| 146 | `handle(): sibling path → also triggers` | broken | DELETE | S | A-counter: `markDirty for sibling path` | Same |
+| 171 | `pause()/resume(): handles are no-ops, reactivates without queuing` | broken | DELETE | S | none | No pause/resume in Stage 13 |
+| 205 | `isPaused() reflects current state` | broken | DELETE | S | none | No pause API |
+| 219 | `concurrent handle() calls serialize through the chain` | broken | DELETE | S | A-counter: `markDirty coalesces concurrent events` | Chain removed; counter dirty-flag handles |
+| 252 | `queued tasks re-check relevance — already-resolved silently skips` | broken | DELETE | S | none | No queue in counter-only design |
+| 279 | `start() registers delete/modify/rename listeners` | partial | REWRITE | S | itself with counter callback | Listeners survive; callback target changes |
+| 301 | `start() is idempotent` | partial | REWRITE | S | itself | Same |
+| 314 | `stop() unsubscribes all listeners` | partial | REWRITE | S | itself | Same |
+| 329 | `end-to-end: vault.fireEvent('delete', sibling) → record resolved` | broken | DELETE | S | A-counter: `vault.on triggers markDirty → counter recomputes` | No record resolution from listener |
+| 346 | `end-to-end: vault.fireEvent('rename', new, old) → both paths checked` | partial | REWRITE | S | A-counter: same shape, markDirty target | Dual-path check survives |
+| 373 | `onError catches eval failures; chain stays alive` | broken | DELETE | S | none (counter has no chain) | Counter errors handled differently |
+
+### Detail — `tests/sync2/conflict-classifier.test.ts`
+
+19 tests split between pure `classify()` (9) and `evaluateConflictState` orchestrator (10). Pivot impact: row 3 cascade → noop; return shape changes (recordsRefreshed → ?), 2-phase rewrite.
+
+**Pure `classify()` (9 tests):**
+
+| Line | Test | Status | Action | Effort | Replacement target | Notes |
+|---|---|---|---|---|---|---|
+| 63 | `Row 1: !sibling, modify-vs-modify → accept-ours` | partial | REWRITE | S | A-classifier: `Phase B path-close on !sibling` | Decision type renamed under 2-phase |
+| 75 | `Row 1: !sibling, delete-vs-modify → accept-ours` | partial | REWRITE | S | A-classifier: same | Same |
+| 93 | `Row 3: sibling, !base, modify-vs-modify → delete-wins-cascade` | broken | DELETE | S | A-classifier: `!base + sibling → noop` (Decision #30) | Cascade removed; mobile delete-then-rename workflow now works |
+| 107 | `Row 5: sibling, !base, delete-vs-modify → noop` | aligns | KEEP | S | itself | Noop survives |
+| 121 | `Row 6: base === sibling, modify-vs-modify → accept-theirs` | partial | REWRITE | S | A-classifier: `Phase A SHA-match → engine deletes sibling + drops record` | Same outcome, different decision type |
+| 133 | `Row 6: base === sibling, delete-vs-modify → accept-theirs` | partial | REWRITE | S | A-classifier: same | Same |
+| 148 | `Row 7: sibling, base, base ≠ sibling, delete-vs-modify → noop` | aligns | KEEP | S | itself | Noop survives |
+| 160 | `Row 8: modify-vs-modify, base ≠ sibling AND base ≠ ours → noop` | aligns | KEEP | S | itself | Noop survives |
+| 172 | `Row 9: modify-vs-modify, base === ours → noop` | aligns | KEEP | S | itself | Noop survives |
+
+**`evaluateConflictState` orchestrator (10 tests):**
+
+| Line | Test | Status | Action | Effort | Replacement target | Notes |
+|---|---|---|---|---|---|---|
+| 281 | `user deletes sibling (case 1) → record dropped, path resolved` | aligns | KEEP | S | itself | Phase B path-close matches |
+| 296 | `user copies sibling onto base (case 6) → record + vault sibling dropped` | partial | REWRITE | S | itself with Phase A semantic | Engine deletes sibling under Phase A; behavior identical |
+| 318 | `user deletes base on modify-vs-modify (case 3) → cascade-delete entire path` | broken | DELETE | S | none (cascade gone) | Stage 13 row 3 → noop; new test "delete base + sibling → propagate delete" instead |
+| 346 | `initial state (base === ours, sibling intact) → noop + lastEvaluated bumped` | partial | REWRITE | S | A-classifier with new return shape | `lastEvaluated` field may move |
+| 369 | `sibling mtime+size unchanged → cache hit, no read+hash, no refreshed entry` | partial | REWRITE | S | A-classifier: cache hit semantics survive | `recordsRefreshed` return field may rename |
+| 379 | `sibling touched (mtime changed) → recordsRefreshed includes id` | partial | REWRITE | S | A-classifier: same | Same |
+| 408 | `multi-sibling: resolving one keeps the other; path NOT resolved until both go` | aligns | KEEP | S | itself | Exactly the Stage 13 multi-sibling behavior |
+| 439 | `multi-path: each path classified independently` | aligns | KEEP | S | itself | Phase B per-path semantics |
+| 476 | `re-running on already-resolved state is a no-op` | aligns | KEEP | S | itself | Idempotency survives |
+| 492 | `empty store → empty result` | aligns | KEEP | S | itself | Empty path matches |
+
+### Detail — `tests/sync2/conflict-store.test.ts`
+
+30 tests across helpers (8), create (5), dedup (3), crash recovery (3), defensive coercion (5), updateCache (3), delete+clearAll (2), multi-sibling (1), reload (1). Most survive: schema validation, atomic write protocol unchanged; only `sibling-content.bin` references and auto-restore on load break.
+
+**Helpers — `extensionOf` (3) + `buildSiblingPath` (5):** all 8 aligns. KEEP. Effort: S each.
+
+**create (5):**
+
+| Line | Test | Status | Action | Effort | Notes |
+|---|---|---|---|---|---|
+| 173 | `writes meta.json + sibling-content.bin + vault sibling for modify-vs-modify` | broken | REWRITE | M | Sibling-content.bin replaced by vault-level `.sync-bak` (Decision #29). Assertion targets must change |
+| 186 | `delete-vs-modify: oursBlobSha is null on disk` | aligns | KEEP | S | Schema field unchanged |
+| 204 | `populates siblingMtime/Size cache from final vault stat` | aligns | KEEP | S | Cache fields unchanged |
+| 211 | `indexes by vaultPath + by id` | aligns | KEEP | S | In-memory index unchanged |
+| 220 | `indexes by sibling path (O(1) lookup)` | aligns | KEEP | S | Sibling index unchanged |
+
+**dedup (3):** all aligns. KEEP. Note: new filesystem-orphan adoption test needed (NEW row in Phase 3).
+
+**crash recovery on load (3):**
+
+| Line | Test | Status | Action | Effort | Notes |
+|---|---|---|---|---|---|
+| 267 | `step-1 crash (recordDir + sibling-content.bin but no meta.json) → rmdir recordDir` | aligns | KEEP | S | Orphan cleanup survives; just no `sibling-content.bin` now |
+| 280 | `step-3 crash (meta.json + backup, but vault sibling missing) → re-emits vault sibling from backup` | broken | DELETE | S | Stage 13: load() does NOT auto-restore from backup. Replacement: C-lifecycle `.sync-bak` recovery completes Step 3 |
+| 310 | `step-3 done then external delete of vault sibling AND backup → record stays, but cache untouched` | partial | REWRITE | S | Under Stage 13: record drops on next drain Phase B (not "stays"). REWRITE assertions |
+
+**defensive coercion (5):** all aligns. KEEP. Effort: S each.
+
+**updateCache (3):** all aligns. KEEP. Effort: S each.
+
+**delete + clearAll (2):** all aligns. KEEP. Effort: S each.
+
+**multi-sibling (1):** aligns. KEEP.
+
+**reload (1):** aligns. KEEP.
+
+### Detail — `tests/sync2/conflict-detection.test.ts`
+
+21 tests. All aligns. KEEP all. Stage 13 doesn't touch auto-merge logic (text 3-way, plugin-js semver, binary register-conflict). Effort: S each, zero rewrite work.
+
+| Block | Tests | Status |
+|---|---|---|
+| `classifyConflictKind` | 4 | all aligns |
+| `attemptAutoMerge — text 3-way` | 4 | all aligns |
+| `attemptAutoMerge — plugin-js semver` | 10 | all aligns |
+| `attemptAutoMerge — binary` | 3 | all aligns |
+| `attemptAutoMerge — strategy dispatch` | 3 | all aligns |
+| `AutoMergeResult type` | 2 | all aligns |
+
+### Detail — `tests/integration/scenarios/sync2/conflicts/`
+
+8 it() blocks across 7 files. Most survive — workflow-level tests use sibling-delete patterns that Stage 13 preserves.
+
+| File | Test | Status | Action | Effort | Notes |
+|---|---|---|---|---|---|
+| `branch-lifecycle.test.ts` | `register → branch created with ours commit → resolve → finalize merge + deleteRef` | partial | REWRITE | L | Core flow survives. Currently calls `evaluateConflictState` directly; under Stage 13 may use drain. Assertions on conflict-branch name pattern stable |
+| `classifier-case6-accept-theirs.test.ts` | `user copies sibling onto base → classifier accepts theirs + drops record` | aligns | KEEP | S | Phase A SHA-match cleanup gives same outcome |
+| `defer-then-resolve-via-sibling-delete.test.ts` | `overlap → sibling registered → delete sibling → next sync pushes ours` | aligns | KEEP | S | Phase B path-close gives same outcome |
+| `edit-while-in-conflict.test.ts` | `conflict → edit local file again → next sync lands the edit on the branch, not main` | partial | REWRITE | M | Edit-while-in-conflict may route through synthetic batches under Stage 13. Assertions on branch.head SHA stable |
+| `multi-copy-pair-resolution.test.ts` | `two siblings on one path → resolve both → final push goes through` | aligns | KEEP | S | Multi-sibling Phase B handling works |
+| `pending-conflict-blocks-push.test.ts` | `edits to a pending-conflict path stay local; clean path goes through` | aligns | KEEP | S | Partition behavior preserved |
+| `watcher-realtime.test.ts` | `vault.on('delete', sibling) drops record before any further sync` | broken | DELETE | S | Stage 13: listeners don't mutate. Replacement: A-counter test confirming counter recomputes |
+| `watcher-realtime.test.ts` | `drain pauses watcher: mid-drain sibling write doesn't loop classifier` | broken | DELETE | S | No pause/resume in Stage 13. Replacement: none needed (counter is read-only by design) |
+
+### Detail — `tests/integration/scenarios/sync2/conflicts-misc/`
+
+6 it() blocks across 4 files. All aligns. KEEP all.
+
+| File | Test | Status | Action | Effort | Notes |
+|---|---|---|---|---|---|
+| `E1-reconcile-onload.test.ts` | `edit vault file with no client running → re-instantiated client picks it up on next sync` | irrelevant | KEEP | S | Tests SnapshotStore reconcile, not pseudo-merge |
+| `E2-binary-conflict-atomic.test.ts` | `binary differs on both sides → modify-vs-modify registered, no silent overwrite` | aligns | KEEP | S | Binary register-conflict preserved |
+| `E3-plugin-js-semver.test.ts` | `remote plugin version 2.0.0 > local 1.0.0 → remote main.js wins` | aligns | KEEP | S | semver auto-resolve unchanged |
+| `E3-plugin-js-semver.test.ts` | `local plugin version 3.0.0 > remote 1.5.0 → local main.js wins, lifts to remote` | aligns | KEEP | S | Same |
+| `E3-plugin-js-semver.test.ts` | `non-plugin .js falls through to standard text 3-way merge` | aligns | KEEP | S | Standard text branch |
+| `E4-plugin-js-same-version-mtime.test.ts` | `both sides at 1.0.0, local mtime in future → local main.js wins` | aligns | KEEP | S | mtime tie-break |
+| `E4-plugin-js-same-version-mtime.test.ts` | `both sides at 1.0.0, local mtime in past → remote main.js overwrites local` | aligns | KEEP | S | Same |
+| `E4-plugin-js-same-version-mtime.test.ts` | `remote manifest missing/malformed → falls back to mtime regardless of local version` | aligns | KEEP | S | Defensive fallback |
+
+### Detail — `tests/integration/scenarios/sync2/multi-device/`
+
+4 it() blocks across 4 files. All aligns/irrelevant. KEEP all.
+
+| File | Test | Status | Action | Effort | Notes |
+|---|---|---|---|---|---|
+| `G1-three-device-rotation.test.ts` | `A → B → C → A picks up each device's contribution` | irrelevant | KEEP | S | Plain rotation, no conflicts |
+| `G2-same-file-disjoint-edits.test.ts` | `A edits line 1, B edits line 3 on the same file → merged result has both` | aligns | KEEP | S | 3-way merge, no Stage 13 impact |
+| `G3-same-line-conflict.test.ts` | `both devices edit line 1 → second pusher registers conflict; resolve via sibling delete` | aligns | KEEP | S | Workflow preserved |
+| `G4-binary-atomic-across-devices.test.ts` | `A and B both modify img.png; B's sync registers conflict + sibling; resolve via sibling delete` | aligns | KEEP | S | Same |
+
+### Coverage gaps — NEW tests required for Stage 13
+
+Tests that don't exist yet but Stage 13 requires. Each maps to a test category (A-E) from the broader test plan. Phase 3 RED writes these against the API stubs (Phase 1.7); Phase 4 GREEN fills implementations to make them pass.
+
+| # | NEW test | Category | File | Effort |
+|---|---|---|---|---|
+| N1 | `ConflictCounter.markDirty + getValue: recompute happens once per dirty window` | A | `tests/sync2/conflict-counter.test.ts` (new) | M |
+| N2 | `ConflictCounter.subscribe: callback fires only on changed value, debounced` | A | same | M |
+| N3 | `ConflictCounter.flush: forces immediate recompute, bypasses microtask debounce` | A | same | S |
+| N4 | `ConflictCounter formula edge cases: missing base, !exists sibling, SHA cache stale` | A | same | M |
+| N5 | `PushQueue.enqueueSynthetic: creates batch with synthetic=true; returns id` | A | `tests/sync2/push-queue.test.ts` (extend) | M |
+| N6 | `PushQueue.enqueueSynthetic: never folds into next user enqueueOrMerge` | A | same | M |
+| N7 | `mergeIntoLatestPending skips synthetic batches even when fresh and non-attempted` | A | same | S |
+| N8 | `.sync-bak naming algorithm: stem.ext, hidden files, extensionless files, multi-dot names` | A | `tests/sync2/atomic-write.test.ts` (extend) | S |
+| N9 | `AtomicWriteRecovery.sweep SHA-verify: matches → finalize Step 3; mismatch → drop` | C | same | M |
+| N10 | `ConflictStore.load: missing sibling does NOT restore from backup (fix 2026-05-21 bug)` | C | `tests/sync2/conflict-store.test.ts` (add to existing crash-recovery describe block) | S |
+| N11 | `ConflictStore.create: filesystem-orphan adoption — scan parent dir, adopt matching SHA orphan` | A | `tests/sync2/conflict-store.test.ts` (add to dedup describe) | M |
+| N12 | `classifier !base + sibling → noop (NOT cascade) — confirms Decision #30` | A | `tests/sync2/conflict-classifier.test.ts` (replaces old row 3 cascade test) | S |
+| N13 | `delete-base-then-rename-sibling workflow: works under MOCK_PLATFORM=mobile` | B+E | `tests/sync2/...workflow.test.ts` (new) | M |
+| N14 | `pull-side new-sibling that matches base coincidentally → next drain Phase A auto-cleans` | C | `tests/sync2/...lifecycle.test.ts` (new) | M |
+| N15 | `GitignoreInvariants.enforce: drops mtime/hash short-circuit, always reads+splices+compares` | A | `tests/sync2/gitignore-invariants.test.ts` (extend) | S |
+| N16 | `Commit messages: hardcoded "sync ({deviceLabel})" / "resolve conflict ({deviceLabel})" — no template substitution` | A | `tests/sync2/push-queue.test.ts` (extend) | S |
+| N17 | `MOCK_PLATFORM=mobile reveals rename-overwrite bugs paired with desktop pass` | E | already added in `tests/mock-obsidian-platform.test.ts` (Phase 1.6); extend with conflict-store create flow | M |
+| N18 | `Counter live-recomputes on bulk vault.on events (5 delete events → 1 recompute)` | A | `tests/sync2/conflict-counter.test.ts` | M |
+
+**Effort total:** roughly 16h (S=~10×S × ~20min, M=~14×M × ~1h, L=~1×L × 3h).
+
+### Bail-out flags for Phase 3-4
+
+These tests merit a closer look during Phase 3-4 (questions to ask before assuming):
+
+- **`conflict-watcher.test.ts:373`** (`onError catches eval failures; chain stays alive`) — counter has no chain, but does it need error handling for failed recomputes? Worth deciding before deleting outright.
+- **`conflict-store.test.ts:310`** (`external delete of vault sibling AND backup → record stays`) — under Stage 13 record drops on next drain. But the test currently asserts record SURVIVES; if there's a reason for that (e.g., delaying drop to avoid data loss when user wipes everything), surface it before REWRITE.
+- **`branch-lifecycle.test.ts`** — calls `evaluateConflictState` directly. Phase 4 may route via drain instead. Decide whether the test should assert on drain-mediated flow or keep a direct classifier call as a sanity check.
 
 Ідеї, що з'явилися під час обговорення pseudo-merge mode, **але не
 включені у stage 1**. Зафіксовані тут, щоб не загубились. Можна
