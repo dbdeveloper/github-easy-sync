@@ -1854,6 +1854,26 @@ in-order. Each subsection below corresponds to one Phase 4
 implementation group (per "Phase 4 — dependency-ordered sequence"
 in the Stage 13 pivot notice).
 
+### Phase 4 progress snapshot (live tracker)
+
+| Group | What | Phase 3 commit | Phase 4 commit | State |
+|---|---|---|---|---|
+| 1 | enqueueSynthetic + meta.synthetic field | `4330c84` | `379a666` | ✅ GREEN |
+| 2 | Classifier row 3 → noop (Decision #30) | `a84246a` | `164fb93` | ✅ GREEN |
+| 3 | ConflictStore.load drops auto-restore | `eb98843` | `3c59969` | ✅ GREEN |
+| 4 | `.sync-bak` pre-suffix migration | `461da2e` | — | ⏸ pending |
+| 5 | ConflictCounter (dirty-flag + subscribers) | `6b3c4ee` | `2da64ff` | ✅ GREEN |
+| 6 | Drain wiring (drop drain-end sweep, guard) | (no NEW tests) | — | ⏸ pending |
+| 7 | Filesystem-orphan adoption at create | `dc5d0e2` | `d1af154` | ✅ GREEN |
+| 8 | GitignoreInvariants always-write | `dc5d0e2` | — | ⏸ pending |
+| 9 | Commit-template removal (Decision #36) | (deferred) | — | ⏸ pending |
+| 10 | Visibility 4→3 point (settings-tab badge) | (deferred) | — | ⏸ pending |
+
+**Status snapshot (last update: 2026-05-23):** 5/10 groups GREEN.
+Test suite state: 527 GREEN + 6 RED + 2 todo. The critical-path
+trio (Groups 1, 5, 2) all landed first; remaining work is mostly
+independent groups + the larger cleanup of Groups 4, 6, 9, 10.
+
 **Discipline:**
 - Write tests against the **Phase 4 API surface** (locked via stubs in
   Phase 1.7), not the current implementation. The stubs throw "Not
@@ -1863,7 +1883,7 @@ in the Stage 13 pivot notice).
 - Tests in the same group are written together as one Phase 3 commit
   (or a small number of grouped commits if the group is large).
 
-### Phase 4 Group 1 — Foundation (synthetic field + enqueueSynthetic)
+### Phase 4 Group 1 — Foundation (synthetic field + enqueueSynthetic) ✅
 
 **RED tests to land:**
 - N5: `PushQueue.enqueueSynthetic: creates batch with synthetic=true, returns id`
@@ -1878,7 +1898,7 @@ groups (especially #6 Drain wiring) call `enqueueSynthetic` directly
 from Phase B side-batch synthesis. Without #1 GREEN, #6 has nothing to
 exercise.
 
-### Phase 4 Group 2 — Classifier rewrite (2-phase + row 3 noop)
+### Phase 4 Group 2 — Classifier rewrite (2-phase + row 3 noop) ✅
 
 **RED tests to land:**
 - N12: `classifier !base + sibling → noop (NOT delete-wins-cascade) — confirms Decision #30`
@@ -1894,7 +1914,7 @@ exercise.
 - `conflict-classifier.test.ts:93` (Row 3 cascade — superseded by N12)
 - `conflict-classifier.test.ts:318` (case 3 cascade evaluator)
 
-### Phase 4 Group 3 — ConflictStore.load — drop auto-restore
+### Phase 4 Group 3 — ConflictStore.load — drop auto-restore ✅
 
 **RED test to land:**
 - N10: `ConflictStore.load: missing sibling does NOT restore from backup (fix 2026-05-21 bug)`
@@ -1915,7 +1935,7 @@ exercise.
 **Existing tests to REWRITE in same commit:**
 - `conflict-store.test.ts:173` (sibling-content.bin → `.sync-bak` flow)
 
-### Phase 4 Group 5 — ConflictWatcher → counter-only
+### Phase 4 Group 5 — ConflictWatcher → counter-only ✅
 
 **RED tests to land (new file `tests/sync2/conflict-counter.test.ts`):**
 - N1: `ConflictCounter.markDirty + getValue: recompute happens once per dirty window`
@@ -1949,7 +1969,7 @@ exercise.
 **Existing tests to DELETE:**
 - `conflicts/watcher-realtime.test.ts:73, 145` (both — listener no longer mutates store, no pause/resume)
 
-### Phase 4 Group 7 — Filesystem-orphan dedup at create()
+### Phase 4 Group 7 — Filesystem-orphan dedup at create() ✅
 
 **RED test to land:**
 - N11: `ConflictStore.create: filesystem-orphan adoption — scan parent dir, adopt matching SHA orphan`
