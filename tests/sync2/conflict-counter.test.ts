@@ -325,5 +325,41 @@ describe("ConflictCounter (Stage 13)", () => {
     expect(calls.length).toBeLessThanOrEqual(1);
     if (calls.length === 1) expect(calls[0]).toBe(1);
   });
+
+  // ─── consumeSweepRequest (drain-side sweep skip flag) ───────────────
+
+  it("consumeSweepRequest: initial state returns true (sweep on first drain)", () => {
+    // After construction we don't know if anything changed while
+    // the plugin was off, so the first drain must run the sweep.
+    expect(f.counter.consumeSweepRequest()).toBe(true);
+  });
+
+  it("consumeSweepRequest: clears the flag — second call returns false until markDirty()", () => {
+    expect(f.counter.consumeSweepRequest()).toBe(true);
+    expect(f.counter.consumeSweepRequest()).toBe(false);
+    expect(f.counter.consumeSweepRequest()).toBe(false);
+  });
+
+  it("consumeSweepRequest: markDirty re-arms the flag", () => {
+    // Consume the initial true.
+    expect(f.counter.consumeSweepRequest()).toBe(true);
+    expect(f.counter.consumeSweepRequest()).toBe(false);
+
+    // Vault event fires → markDirty → flag re-armed.
+    f.counter.markDirty();
+    expect(f.counter.consumeSweepRequest()).toBe(true);
+    expect(f.counter.consumeSweepRequest()).toBe(false);
+  });
+
+  it("consumeSweepRequest: independent of microtask recompute (survives flush)", async () => {
+    // dirty/scheduled/currentRun are cleared by the recompute
+    // microtask; sweepRequested must NOT be — drain may run
+    // independently of UI recomputes.
+    f.counter.markDirty();
+    await f.counter.flush();
+    // After flush, `dirty` is cleared but sweepRequested is still
+    // set (markDirty set it; no consumeSweepRequest ack yet).
+    expect(f.counter.consumeSweepRequest()).toBe(true);
+  });
 });
 

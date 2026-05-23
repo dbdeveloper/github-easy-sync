@@ -523,4 +523,55 @@ describe("evaluateConflictState (orchestrator)", () => {
     expect(result.pathsResolved.size).toBe(0);
     expect(result.recordsRefreshed).toEqual([]);
   });
+
+  // N14 from Phase 2 audit: pull-side coincidental SHA match.
+  // Documented edge case in PSEUDO-MERGE-MODE.md §"Edge case:
+  // pull-side new-sibling coincidentally matches base" — when a
+  // pull-side conflict registers a sibling whose SHA happens to
+  // equal the current base SHA (e.g., remote was reverted to
+  // match local independently), the next drain Phase A SHA-match
+  // cleanup auto-resolves with NO user action.
+  //
+  // Mechanically identical to the user-driven case 6 above
+  // ("user copies sibling onto base"), but framed as a pull-side
+  // entry point — the assertion is "engine spawned + then engine
+  // cleaned, with zero user intervention".
+  it("N14: pull-side coincidental SHA match → next sweep auto-cleans (no user action)", async () => {
+    writeVaultFile(f.root, "Notes/note.md", "shared content\n");
+    // Mimic pull-side conflict registration where theirsContent
+    // happens to equal current base content (e.g., remote was
+    // reverted on another device to match local).
+    const rec = await createBaseConflict({
+      theirsContent: arr("shared content\n"),
+      theirsBlobSha: "shared-sha",
+    });
+    // Initial state from create(): siblingSha is computed from
+    // theirsContent. baseSha is null in the record (create
+    // doesn't compute it; evaluator does on demand). On the first
+    // evaluator pass, the per-path lazy baseSha computation
+    // matches siblingSha → Phase A SHA-match cleanup fires.
+    expect(rec.siblingSha).toBeTruthy();
+    expect(
+      fs.existsSync(path.join(f.root, rec.siblingPath)),
+    ).toBe(true);
+
+    const result = await evaluateConflictState(
+      f.store,
+      f.vault as unknown as import("obsidian").Vault,
+      () => 200,
+    );
+
+    // Phase A removed sibling + dropped record; Phase B closed
+    // path. Zero user action required.
+    expect(result.recordsRemoved).toEqual([rec.id]);
+    expect([...result.pathsResolved]).toEqual(["Notes/note.md"]);
+    expect(
+      fs.existsSync(path.join(f.root, rec.siblingPath)),
+    ).toBe(false);
+    // Base file untouched.
+    expect(
+      fs.readFileSync(path.join(f.root, "Notes/note.md"), "utf8"),
+    ).toBe("shared content\n");
+    expect(f.store.getAll().length).toBe(0);
+  });
 });

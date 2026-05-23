@@ -1885,7 +1885,7 @@ wired into `AtomicWriteRecovery.sweep` against
 `record.theirsBlobSha` (N9/N9b activated and GREEN) +
 enqueueSynthetic production wiring + mobile-platform paired tests.
 
-Test suite state (unit): **507 passed, 0 RED, 0 todo.** Build clean.
+Test suite state (unit): **514 passed, 0 RED, 0 todo.** Build clean.
 
 Integration suite (89 non-bootstrap tests against real GitHub):
 **89 passed, 0 RED** after fixing 2 audit-flagged REWRITEs (both
@@ -1897,6 +1897,14 @@ pre-Stage-13 prefixes `"Conflict snapshot:"` /
 **Stage 13 truly complete now.** All advisor-flagged production
 gaps closed: Phase B side-batch synthesis wired, MOCK_PLATFORM=
 mobile coverage added, integration suite validated GREEN.
+
+Most recent additions (advisor hygiene cleanups #9 + #10):
+- N13/N14 explicit workflow tests (delete-base-then-rename under
+  MOCK_PLATFORM paired + pull-side coincidental SHA match)
+- `ConflictCounter.consumeSweepRequest()` flag — drain skips the
+  classifier sweep when no conflict-relevant vault events fired
+  since the previous drain. Survives microtask recompute cycles
+  (orthogonal to the existing `dirty` flag).
 
 **Discipline:**
 - Write tests against the **Phase 4 API surface** (locked via stubs in

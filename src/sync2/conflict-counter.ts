@@ -68,6 +68,14 @@ export class ConflictCounter {
   // this; markDirty() does not re-schedule if it's set (the in-flight
   // run will re-arm via the post-await dirty-check loop below).
   private currentRun: Promise<void> | null = null;
+  // Separate from `dirty` — survives recompute cycles. Set by any
+  // markDirty() call (including the initial state). Cleared only by
+  // `consumeSweepRequest()`, which the drain calls at the start of
+  // each cycle. Lets the drain skip its evaluateConflictState sweep
+  // when nothing relevant changed since the last drain.
+  // Initial `true` so the first drain after onload always runs the
+  // sweep (we don't know what changed while the plugin was off).
+  private sweepRequested: boolean = true;
   private readonly subscribers: Set<CountChangeCallback> = new Set();
 
   constructor(deps: ConflictCounterDeps) {
@@ -77,17 +85,39 @@ export class ConflictCounter {
       deps.scheduleMicrotask ?? ((fn) => queueMicrotask(fn));
   }
 
-  // O(1). Sets the dirty flag and schedules at most one debounced
+  // O(1). Sets the dirty flag (for UI counter recompute) AND the
+  // sweep-requested flag (for drain). Schedules at most one debounced
   // recompute via the microtask scheduler. Back-to-back calls
   // coalesce into one scheduled callback.
   markDirty(): void {
     this.dirty = true;
+    this.sweepRequested = true;
     if (this.scheduled || this.currentRun !== null) return;
     this.scheduled = true;
     this.scheduleMicrotask(() => {
       this.scheduled = false;
       void this.runIfDirty();
     });
+  }
+
+  // Drain-side companion to markDirty(). Atomically reads the sweep-
+  // requested flag AND clears it. The drain calls this at the top of
+  // each cycle:
+  //
+  //   if (store.records.length > 0 && counter.consumeSweepRequest()) {
+  //     await evaluateConflictState(...)
+  //   }
+  //
+  // Returns true:
+  //   - on first call after construction (initial state forces sweep)
+  //   - after any markDirty() since the previous consumeSweepRequest
+  //
+  // Returns false when nothing relevant has changed since the previous
+  // drain — skips the per-record stat walk entirely on idle clicks.
+  consumeSweepRequest(): boolean {
+    const requested = this.sweepRequested;
+    this.sweepRequested = false;
+    return requested;
   }
 
   // O(1). Returns the cached count. UI surfaces (status bar, ribbon)

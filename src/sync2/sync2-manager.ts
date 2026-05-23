@@ -33,6 +33,7 @@ import {
 } from "./conflict-detection";
 import { evaluateConflictState } from "./conflict-classifier";
 import { ConflictWatcher } from "./conflict-watcher";
+import { ConflictCounter } from "./conflict-counter";
 import { buildConflictBranchName } from "./conflict-branch";
 import { normalizeText } from "./text-normalize";
 import { FileChange } from "./types";
@@ -220,6 +221,13 @@ export interface Sync2ManagerDeps {
   // invocations. Optional: tests that don't care leave it out and
   // sweeps still run inline via evaluateConflictState directly.
   conflictWatcher?: ConflictWatcher;
+  // Stage 13 sweep-skip optimization (advisor concern #3). When
+  // wired, drain consults counter.consumeSweepRequest() before
+  // running evaluateConflictState — skips the sweep entirely on
+  // idle drains where no vault events touched conflict-relevant
+  // paths since the previous drain. Optional: when omitted, drain
+  // falls back to "always sweep if records exist" semantics.
+  conflictCounter?: ConflictCounter;
   // UI hook for queue-drain progress. main.ts wires this to a long-
   // lived Notice; tests omit it. Returns a handle whose update()
   // changes the displayed text and hide() dismisses the notice.
@@ -295,6 +303,7 @@ export class Sync2Manager {
   private readonly deviceLabel: () => string;
   private readonly conflictStore: ConflictStore | undefined;
   private readonly conflictWatcher: ConflictWatcher | undefined;
+  private readonly conflictCounter: ConflictCounter | undefined;
   private readonly accumulateOfflineSyncs: boolean;
   private readonly onProgress: ProgressFactory | undefined;
   private readonly onLocalCommitted:
@@ -337,6 +346,7 @@ export class Sync2Manager {
         : () => deps.deviceLabel as string;
     this.conflictStore = deps.conflictStore;
     this.conflictWatcher = deps.conflictWatcher;
+    this.conflictCounter = deps.conflictCounter;
     this.accumulateOfflineSyncs = deps.accumulateOfflineSyncs ?? false;
     this.onProgress = deps.onProgress;
     this.onLocalCommitted = deps.onLocalCommitted;
@@ -1811,9 +1821,21 @@ export class Sync2Manager {
       // optimization (Decision #26): on a clean device with no
       // active conflicts, drain skips the sweep entirely — its
       // latency stays at parity with 2.0.0-beta.
-      if (this.conflictStore && this.conflictStore.getAll().length > 0) {
+      // Guard: skip sweep when no records exist (90% of drains). Also
+      // skip when a wired ConflictCounter reports no sweep-relevant
+      // vault events since the last drain (idle drain). When the
+      // counter isn't wired, default to "always sweep if records
+      // exist" semantics.
+      const recordsExist =
+        this.conflictStore !== undefined &&
+        this.conflictStore.getAll().length > 0;
+      const sweepRequested =
+        this.conflictCounter !== undefined
+          ? this.conflictCounter.consumeSweepRequest()
+          : true;
+      if (recordsExist && sweepRequested) {
         const evalResult = await evaluateConflictState(
-          this.conflictStore,
+          this.conflictStore!,
           this.vault,
           this.now,
         );

@@ -190,6 +190,7 @@ export async function createSync2Client(
     }),
     conflictStore,
     conflictWatcher,
+    conflictCounter,
     accumulateOfflineSyncs: opts.accumulateOfflineSyncs ?? false,
     autoCanonicalize: () => opts.autoCanonicalize ?? true,
   });

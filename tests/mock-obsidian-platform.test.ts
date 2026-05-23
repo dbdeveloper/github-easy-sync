@@ -240,5 +240,84 @@ describe.each([{ platform: "desktop" as const }, { platform: "mobile" as const }
       expect(fs.readFileSync(sibling2Abs, "utf8")).toBe("v2 content\n");
       expect(store.getByPath("Notes/note.md")).toHaveLength(2);
     });
+
+    // N13 from Phase 2 audit: the mobile-shaped delete-then-rename
+    // workflow that motivated Decision #30 (classifier row 3 → noop).
+    // Pre-Stage-13 the engine cascade-deleted siblings the moment
+    // base went missing, leaving no time for the rename half of
+    // "accept theirs via mobile file manager". Stage 13 row 3 returns
+    // noop; sibling stays alive until the user touches it.
+    //
+    // Mobile-specific because Capacitor's rename throws on existing
+    // destination — the workflow must be: delete base FIRST, THEN
+    // rename sibling onto base. Desktop would tolerate atomic rename-
+    // overwrite, but we verify the mobile-portable path works under
+    // both platforms.
+    it("N13: delete-base-then-rename-sibling workflow resolves to accept-theirs", async () => {
+      // Need to dynamic-import because conflict-classifier pulls in
+      // the obsidian alias chain that fails at module-eval otherwise.
+      const { evaluateConflictState } = await import(
+        "../src/sync2/conflict-classifier"
+      );
+
+      // Setup: vault base + sibling + record (the post-conflict-
+      // detection state). Use store.create() so the full Stage 13
+      // `.sync-bak` flow runs and lands the sibling at its final
+      // path.
+      fs.mkdirSync(path.join(tmp, "Notes"), { recursive: true });
+      fs.writeFileSync(path.join(tmp, "Notes/note.md"), "ours\n");
+      const theirs = new TextEncoder()
+        .encode("theirs\n")
+        .buffer.slice(0) as ArrayBuffer;
+      const rec = await store.create({
+        vaultPath: "Notes/note.md",
+        kind: "modify-vs-modify",
+        theirsContent: theirs,
+        theirsBlobSha: "sha-theirs",
+        oursBlobSha: "sha-ours",
+        baseMtime: null,
+        baseSize: null,
+        baseSha: null,
+        remoteDevice: "Phone",
+      });
+      const baseAbs = path.join(tmp, "Notes/note.md");
+      const siblingAbs = path.join(tmp, rec.siblingPath);
+      expect(fs.existsSync(siblingAbs)).toBe(true);
+      expect(fs.existsSync(baseAbs)).toBe(true);
+
+      // Workflow: user wants "accept theirs".
+      //   Step 1: delete base (would cascade-kill sibling pre-Stage-13).
+      //   Step 2: rename sibling → base path.
+      // Between steps, NO classifier sweep fires (production listeners
+      // are read-only — they only mark counter dirty, not mutate
+      // store).
+      fs.unlinkSync(baseAbs);
+      expect(fs.existsSync(baseAbs)).toBe(false);
+      // Sibling still alive — Stage 13 row 3 → noop means engine
+      // doesn't react to bare base-deletion.
+      expect(fs.existsSync(siblingAbs)).toBe(true);
+
+      // Step 2: rename sibling → base. On mobile, the destination is
+      // empty (we just deleted base) so adapter.rename succeeds.
+      // mock-obsidian's vault.adapter.rename is called via mock-
+      // obsidian — must use vault adapter, not raw fs.renameSync, to
+      // exercise the platform check.
+      await vault.adapter.rename(rec.siblingPath, "Notes/note.md");
+      expect(fs.existsSync(siblingAbs)).toBe(false);
+      expect(fs.readFileSync(baseAbs, "utf8")).toBe("theirs\n");
+
+      // Now drain-start sweep fires (or any classifier eval). Phase B
+      // sees !siblingExists → drops record, path closed, propagate
+      // live base (theirs).
+      const result = await evaluateConflictState(
+        store,
+        vault as unknown as import("obsidian").Vault,
+      );
+      expect(result.recordsRemoved).toContain(rec.id);
+      expect([...result.pathsResolved]).toContain("Notes/note.md");
+      expect(store.get(rec.id)).toBeUndefined();
+      // Base file still has theirs content; nothing destroyed.
+      expect(fs.readFileSync(baseAbs, "utf8")).toBe("theirs\n");
+    });
   },
 );

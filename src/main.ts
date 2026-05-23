@@ -383,6 +383,7 @@ export default class GitHubSyncPlugin extends Plugin {
       }),
       conflictStore,
       conflictWatcher,
+      conflictCounter,
       accumulateOfflineSyncs: this.settings.accumulateOfflineSyncs ?? false,
       autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? false,
       onProgress: (initial: string) => {
