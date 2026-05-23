@@ -20,7 +20,7 @@ import SnapshotStore, { RemoteIdentity } from "./snapshot-store";
 import TreeBuilder from "./tree-builder";
 import { isAtomicPluginFile, pluginRootOf, readPluginVersion } from "./plugin-js";
 import {
-  formatSyncMessage,
+  commitMessageForBatch,
   formatConflictMessage,
   formatMergeConflictBranchMessage,
   formatInitMessage,
@@ -458,11 +458,10 @@ export class Sync2Manager {
         return;
       }
 
-      // Stage 13: hardcoded `sync ({deviceLabel})` format. Templating
-      // gone (Decision #36).
-      const message = formatSyncMessage(this.deviceLabel());
+      // Stage 13 (Decision #36 follow-on): no commitMessage passed —
+      // processBatch derives `sync ({deviceLabel})` at push time from
+      // batch.synthetic + current deviceLabel setting.
       const enqueued = await this.enqueueOrMerge([change], {
-        commitMessage: message,
         parentCommitSha: this.store.getLastSyncCommitSha(),
         parentTreeSha: this.store.getLastSyncTreeSha(),
       });
@@ -1691,10 +1690,9 @@ export class Sync2Manager {
 
   private fullSyncMeta(): EnqueueMeta {
     return {
-      // Stage 13: hardcoded `sync ({deviceLabel})` — Decision #36.
-      // Templating with `{date}` / `{time}` is gone; git commit
-      // metadata (authorDate / committerDate) carries the timestamp.
-      commitMessage: formatSyncMessage(this.deviceLabel()),
+      // Stage 13 (Decision #36 follow-on): commitMessage no longer
+      // persisted. processBatch derives `sync ({deviceLabel})` from
+      // batch.synthetic + the current setting at push time.
       parentCommitSha: this.store.getLastSyncCommitSha(),
       parentTreeSha: this.store.getLastSyncTreeSha(),
     };
@@ -2044,8 +2042,11 @@ export class Sync2Manager {
           { commitSha, treeSha: newTreeSha },
         );
       } else {
+        // Stage 13 (Decision #36 follow-on): message derived inline
+        // from batch.synthetic + current deviceLabel setting. No
+        // persisted commitMessage on the batch.
         commitSha = await this.client.createCommit({
-          message: batch.commitMessage,
+          message: commitMessageForBatch(batch.synthetic, this.deviceLabel()),
           treeSha: newTreeSha,
           parent: batch.parentCommitSha ?? undefined,
           retry: true,

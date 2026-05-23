@@ -79,6 +79,21 @@ export function formatInitMessage(deviceLabel: string): string {
   return `init (${safeLabel(deviceLabel)})`;
 }
 
+// Pick the commit message format for a batch at processBatch time
+// based on its `synthetic` flag. Synthetic = Phase B side-batch from
+// drain conflict-resolution → "resolve conflict ({label})". Non-
+// synthetic = user-driven sync click → "sync ({label})". Centralised
+// here so the inline derivation in processBatch is a one-liner and
+// the formatX choice stays consistent across call sites.
+export function commitMessageForBatch(
+  synthetic: boolean,
+  deviceLabel: string,
+): string {
+  return synthetic
+    ? formatResolveConflictMessage(deviceLabel)
+    : formatSyncMessage(deviceLabel);
+}
+
 // Inverse of the trailing `(label)` suffix: pulls the device label
 // off any commit message produced by sync2. Falls back to
 // UNKNOWN_DEVICE_LABEL for hand-edited or non-sync2 commits.

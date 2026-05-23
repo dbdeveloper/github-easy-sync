@@ -103,7 +103,6 @@ describe("TreeBuilder", () => {
   it("inlines content for text files; no createBlob call", async () => {
     writeVaultFile(f.root, "Notes/x.md", "hello\n");
     const id = await f.queue.enqueue([ADD("Notes/x.md")], {
-      commitMessage: "msg",
       parentCommitSha: "p1",
       parentTreeSha: "t1",
     });
@@ -120,7 +119,6 @@ describe("TreeBuilder", () => {
     const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
     writeVaultFile(f.root, "img.png", bytes);
     const id = await f.queue.enqueue([ADD("img.png")], {
-      commitMessage: "msg",
       parentCommitSha: null,
       parentTreeSha: null,
     });
@@ -149,7 +147,6 @@ describe("TreeBuilder", () => {
 
   it("emits deletions as { sha: null }", async () => {
     const id = await f.queue.enqueue([DEL("Folder/old.md")], {
-      commitMessage: "rm",
       parentCommitSha: null,
       parentTreeSha: null,
     });
@@ -167,7 +164,6 @@ describe("TreeBuilder", () => {
     const id = await f.queue.enqueue(
       [ADD("Notes/x.md"), ADD("img.png"), DEL("Folder/old.md")],
       {
-        commitMessage: "mix",
         parentCommitSha: "p",
         parentTreeSha: "t",
       },
@@ -188,7 +184,6 @@ describe("TreeBuilder", () => {
   it("reads from the batch's vault/ snapshot, not the live vault", async () => {
     writeVaultFile(f.root, "Notes/x.md", "v1-snapshot-time\n");
     const id = await f.queue.enqueue([ADD("Notes/x.md")], {
-      commitMessage: "msg",
       parentCommitSha: null,
       parentTreeSha: null,
     });
@@ -204,7 +199,6 @@ describe("TreeBuilder", () => {
   it("base_tree is null when batch was enqueued from a fresh state", async () => {
     writeVaultFile(f.root, "x.md", "first");
     const id = await f.queue.enqueue([ADD("x.md")], {
-      commitMessage: "first",
       parentCommitSha: null,
       parentTreeSha: null,
     });
@@ -214,7 +208,6 @@ describe("TreeBuilder", () => {
 
   it("empty batch (no files, no deletions) returns no entries", async () => {
     const id = await f.queue.enqueue([], {
-      commitMessage: "empty",
       parentCommitSha: "p",
       parentTreeSha: "t",
     });
@@ -230,7 +223,6 @@ describe("TreeBuilder", () => {
     const id = await f.queue.enqueue(
       [ADD("a.png"), ADD("b.png"), ADD("c.png")],
       {
-        commitMessage: "imgs",
         parentCommitSha: null,
         parentTreeSha: null,
       },
@@ -247,13 +239,15 @@ describe("TreeBuilder", () => {
   it("returns the original batch unchanged for the caller's bookkeeping", async () => {
     writeVaultFile(f.root, "x.md", "v");
     const id = await f.queue.enqueue([ADD("x.md")], {
-      commitMessage: "label",
       parentCommitSha: "abc",
       parentTreeSha: "def",
     });
     const { batch } = await f.builder.buildTreeEntries(id);
     expect(batch.id).toBe(id);
-    expect(batch.commitMessage).toBe("label");
+    // Stage 13 Group 9 follow-on: batch.commitMessage no longer
+    // exists; processBatch derives the message from synthetic +
+    // deviceLabel at push time.
+    expect(batch.synthetic).toBe(false);
     expect(batch.parentCommitSha).toBe("abc");
     expect(batch.parentTreeSha).toBe("def");
   });
@@ -269,7 +263,6 @@ describe("TreeBuilder", () => {
     const id = await f.queue.enqueue(
       [ADD("a.md"), ADD("b.md"), ADD("c.png"), ADD("d.png")],
       {
-        commitMessage: "mixed",
         parentCommitSha: null,
         parentTreeSha: null,
       },
@@ -294,7 +287,6 @@ describe("TreeBuilder", () => {
     const id = await f.queue.enqueue(
       [{ kind: "deleted", path: "x.md", previousRemoteSha: "abc" }],
       {
-        commitMessage: "del",
         parentCommitSha: null,
         parentTreeSha: null,
       },
@@ -313,7 +305,6 @@ describe("TreeBuilder", () => {
     writeVaultFile(f.root, "a.png", Buffer.from([1]));
     writeVaultFile(f.root, "b.png", Buffer.from([2]));
     const id = await f.queue.enqueue([ADD("a.png"), ADD("b.png")], {
-      commitMessage: "imgs",
       parentCommitSha: null,
       parentTreeSha: null,
     });

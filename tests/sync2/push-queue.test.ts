@@ -98,7 +98,6 @@ describe("PushQueue", () => {
     it("creates a batch directory with vault/, .meta.json, and the file", async () => {
       writeVaultFile(f.root, "Notes/x.md", "hello\n");
       const id = await f.queue.enqueue([ADD("Notes/x.md")], {
-        commitMessage: "first",
         parentCommitSha: "abc123",
         parentTreeSha: "def456",
       });
@@ -120,7 +119,6 @@ describe("PushQueue", () => {
       const id = await f.queue.enqueue(
         [ADD("x.md"), DEL("Folder/old.md")],
         {
-          commitMessage: "msg",
           parentCommitSha: "abc",
           parentTreeSha: "def",
         },
@@ -130,7 +128,6 @@ describe("PushQueue", () => {
       expect(batch).toMatchObject({
         id,
         inProgress: false,
-        commitMessage: "msg",
         parentCommitSha: "abc",
         parentTreeSha: "def",
         files: ["x.md"],
@@ -145,7 +142,6 @@ describe("PushQueue", () => {
       fs.writeFileSync(abs, bytes);
 
       const id = await f.queue.enqueue([ADD("img.png")], {
-        commitMessage: "img",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -159,7 +155,6 @@ describe("PushQueue", () => {
       const id = await f.queue.enqueue(
         [DEL("a.md"), DEL("b.md")],
         {
-          commitMessage: "cleanup",
           parentCommitSha: null,
           parentTreeSha: null,
         },
@@ -174,7 +169,6 @@ describe("PushQueue", () => {
       const id = await f.queue.enqueue(
         [ADD("Folder/Deep/Nested/note.md")],
         {
-          commitMessage: "deep",
           parentCommitSha: null,
           parentTreeSha: null,
         },
@@ -205,17 +199,14 @@ describe("PushQueue", () => {
       writeVaultFile(f.root, "b.md", "2");
       writeVaultFile(f.root, "c.md", "3");
       const id1 = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "1",
         parentCommitSha: null,
         parentTreeSha: null,
       });
       const id2 = await f.queue.enqueue([ADD("b.md")], {
-        commitMessage: "2",
         parentCommitSha: null,
         parentTreeSha: null,
       });
       const id3 = await f.queue.enqueue([ADD("c.md")], {
-        commitMessage: "3",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -225,7 +216,6 @@ describe("PushQueue", () => {
     it("ignores stray non-batch entries inside the queue root", async () => {
       writeVaultFile(f.root, "a.md", "1");
       const id = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "msg",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -243,13 +233,11 @@ describe("PushQueue", () => {
       const fixed = new Date("2026-05-03T09:38:23.500Z");
       f.clock.set(fixed);
       const id1 = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "1",
         parentCommitSha: null,
         parentTreeSha: null,
       });
       f.clock.set(fixed);
       const id2 = await f.queue.enqueue([ADD("b.md")], {
-        commitMessage: "2",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -262,7 +250,6 @@ describe("PushQueue", () => {
     it("marker survives across PushQueue instances", async () => {
       writeVaultFile(f.root, "a.md", "1");
       const id = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "x",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -280,7 +267,6 @@ describe("PushQueue", () => {
     it("clearInProgress removes the marker; double-clear is safe", async () => {
       writeVaultFile(f.root, "a.md", "1");
       const id = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "x",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -296,7 +282,6 @@ describe("PushQueue", () => {
     it("removes the batch directory and everything inside", async () => {
       writeVaultFile(f.root, "Folder/x.md", "1");
       const id = await f.queue.enqueue([ADD("Folder/x.md")], {
-        commitMessage: "x",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -319,7 +304,6 @@ describe("PushQueue", () => {
     it("merges new uploads into the latest pending batch", async () => {
       writeVaultFile(f.root, "a.md", "v1");
       const id = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "first",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -335,7 +319,6 @@ describe("PushQueue", () => {
     it("re-snapshots a path on overwrite", async () => {
       writeVaultFile(f.root, "a.md", "v1\n");
       const id = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "first",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -353,7 +336,6 @@ describe("PushQueue", () => {
     it("a deletion overrides a prior upload of the same path", async () => {
       writeVaultFile(f.root, "a.md", "v1");
       const id = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "first",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -371,7 +353,6 @@ describe("PushQueue", () => {
     it("an upload overrides a prior deletion of the same path", async () => {
       writeVaultFile(f.root, "a.md", "v1");
       const id = await f.queue.enqueue([DEL("a.md")], {
-        commitMessage: "first",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -387,7 +368,6 @@ describe("PushQueue", () => {
     it("skips in-progress batches and returns null if all are in-progress", async () => {
       writeVaultFile(f.root, "a.md", "v1");
       const id = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "x",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -502,7 +482,6 @@ describe("PushQueue", () => {
       // the youngest pending non-attempted entry.
       writeVaultFile(f.root, "a.md", "v1\n");
       const userId = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "user 1",
         parentCommitSha: "p0",
         parentTreeSha: "t0",
       });
@@ -541,7 +520,6 @@ describe("PushQueue", () => {
     it("replaces a file's content inside an existing batch", async () => {
       writeVaultFile(f.root, "a.md", "v1\n");
       const id = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "x",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -560,7 +538,6 @@ describe("PushQueue", () => {
     it("creates intermediate directories when overwriting a deeply nested file", async () => {
       writeVaultFile(f.root, "a.md", "v1\n");
       const id = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "x",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -594,7 +571,6 @@ describe("PushQueue", () => {
     it("CRLF in vault → snapshot has LF, vault file rewritten to LF", async () => {
       writeVaultFile(f.root, "a.md", "first\r\nsecond\r\n");
       const id = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "x",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -621,7 +597,6 @@ describe("PushQueue", () => {
       fs.writeFileSync(abs, bytes);
 
       const id = await f.queue.enqueue([ADD("doc.md")], {
-        commitMessage: "bom",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -638,7 +613,6 @@ describe("PushQueue", () => {
     it("missing trailing newline → added in both snapshot and vault", async () => {
       writeVaultFile(f.root, "a.md", "no trailing nl");
       const id = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "x",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -656,7 +630,6 @@ describe("PushQueue", () => {
     it("empty file stays empty (no \\n added)", async () => {
       writeVaultFile(f.root, "empty.md", "");
       const id = await f.queue.enqueue([ADD("empty.md")], {
-        commitMessage: "x",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -682,7 +655,6 @@ describe("PushQueue", () => {
       await new Promise((r) => setTimeout(r, 25));
 
       const id = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "x",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -712,7 +684,6 @@ describe("PushQueue", () => {
       fs.writeFileSync(abs, bytes);
 
       const id = await f.queue.enqueue([ADD("img.png")], {
-        commitMessage: "bin",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -730,7 +701,6 @@ describe("PushQueue", () => {
     it("mergeIntoLatestPending normalizes the re-snapshotted text too", async () => {
       writeVaultFile(f.root, "a.md", "v1\n");
       const id = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "first",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -753,7 +723,6 @@ describe("PushQueue", () => {
     it("overwriteFile normalizes non-canonical text input (cascade-rebase safety net)", async () => {
       writeVaultFile(f.root, "a.md", "seed\n");
       const id = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "x",
         parentCommitSha: null,
         parentTreeSha: null,
       });
@@ -780,7 +749,6 @@ describe("PushQueue", () => {
     it("overwriteFile leaves binary content byte-exact even with CRLF-like bytes", async () => {
       writeVaultFile(f.root, "a.md", "seed\n");
       const id = await f.queue.enqueue([ADD("a.md")], {
-        commitMessage: "x",
         parentCommitSha: null,
         parentTreeSha: null,
       });

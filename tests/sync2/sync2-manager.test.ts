@@ -657,7 +657,6 @@ describe("Sync2Manager.syncAll — basic flow", () => {
     const id1 = await f.queue.enqueue(
       [{ kind: "added", path: "a.md", size: 1, mtime: 0 }],
       {
-        commitMessage: "first",
         parentCommitSha: "BRANCH_HEAD_INIT",
         parentTreeSha: "TREE_0",
       },
@@ -666,7 +665,6 @@ describe("Sync2Manager.syncAll — basic flow", () => {
     const id2 = await f.queue.enqueue(
       [{ kind: "added", path: "b.md", size: 1, mtime: 0 }],
       {
-        commitMessage: "second",
         parentCommitSha: "BRANCH_HEAD_INIT",
         parentTreeSha: "TREE_0",
       },
@@ -692,11 +690,17 @@ describe("Sync2Manager.syncAll — basic flow", () => {
 
     await f.manager.resumeQueue();
 
-    // Two commits, in order.
+    // Two commits, in order. Stage 13 Group 9 follow-on: both messages
+    // are derived from synthetic=false + deviceLabel; the batches no
+    // longer carry distinct commitMessage values.
     const commits = f.client.calls.filter((c) => c.op === "createCommit");
     expect(commits).toHaveLength(2);
-    expect((commits[0].args as { message: string }).message).toBe("first");
-    expect((commits[1].args as { message: string }).message).toBe("second");
+    expect((commits[0].args as { message: string }).message).toBe(
+      "sync (test-device)",
+    );
+    expect((commits[1].args as { message: string }).message).toBe(
+      "sync (test-device)",
+    );
 
     // After both, queue is empty.
     expect(await f.queue.list()).toEqual([]);
@@ -1018,7 +1022,6 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       const id1 = await f.queue.enqueue(
         [{ kind: "added", path: "x.md", size: 1, mtime: 0 }],
         {
-          commitMessage: "Q1",
           parentCommitSha: "BASE_HEAD",
           parentTreeSha: "BASE_TREE",
         },
@@ -1028,7 +1031,6 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       const id2 = await f.queue.enqueue(
         [{ kind: "added", path: "x.md", size: 1, mtime: 0 }],
         {
-          commitMessage: "Q2",
           parentCommitSha: "BASE_HEAD",
           parentTreeSha: "BASE_TREE",
         },
@@ -1053,7 +1055,6 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       const id1b = await f2.queue.enqueue(
         [{ kind: "added", path: "x.md", size: 1, mtime: 0 }],
         {
-          commitMessage: "Q1",
           parentCommitSha: "BASE_HEAD",
           parentTreeSha: "BASE_TREE",
         },
@@ -1062,7 +1063,6 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       const id2b = await f2.queue.enqueue(
         [{ kind: "added", path: "x.md", size: 1, mtime: 0 }],
         {
-          commitMessage: "Q2",
           parentCommitSha: "BASE_HEAD",
           parentTreeSha: "BASE_TREE",
         },
@@ -1674,7 +1674,6 @@ describe("Sync2Manager.syncAll — basic flow", () => {
           },
         ],
         {
-          commitMessage: "stranded commit",
           parentCommitSha: null,
           parentTreeSha: null,
         },
@@ -1789,7 +1788,6 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       const id = await f.queue.enqueue(
         [{ kind: "added", path: "stale.md", size: 1, mtime: 0 }],
         {
-          commitMessage: "stranded",
           parentCommitSha: "BRANCH_HEAD_INIT",
           parentTreeSha: "INITIAL_TREE",
         },
@@ -1799,8 +1797,11 @@ describe("Sync2Manager.syncAll — basic flow", () => {
 
       const commits = f.client.calls.filter((c) => c.op === "createCommit");
       expect(commits).toHaveLength(1);
+      // Stage 13 Group 9 follow-on: commit message is derived at push
+      // time from batch.synthetic (false here) + the manager's
+      // deviceLabel ("test-device") — no batch-level commitMessage.
       expect((commits[0].args as { message: string }).message).toBe(
-        "stranded",
+        "sync (test-device)",
       );
       expect(await f.queue.list()).toEqual([]);
       // batch is gone from disk
@@ -1820,7 +1821,6 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       const id = await f.queue.enqueue(
         [{ kind: "added", path: "x.md", size: 1, mtime: 0 }],
         {
-          commitMessage: "left in-progress",
           parentCommitSha: "BRANCH_HEAD_INIT",
           parentTreeSha: "INITIAL_TREE",
         },
@@ -2008,7 +2008,6 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       await f2.queue.enqueue(
         [{ kind: "added", path: "a.md", size: 1, mtime: 0 }],
         {
-          commitMessage: "first",
           parentCommitSha: "BRANCH_HEAD_INIT",
           parentTreeSha: "TREE_0",
         },
@@ -2017,7 +2016,6 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       await f2.queue.enqueue(
         [{ kind: "added", path: "b.md", size: 1, mtime: 0 }],
         {
-          commitMessage: "second",
           parentCommitSha: "BRANCH_HEAD_INIT",
           parentTreeSha: "TREE_0",
         },
@@ -2356,7 +2354,6 @@ describe("Sync2Manager — reconcileRemoteIdentity", () => {
         },
       ],
       {
-        commitMessage: "old commit",
         parentCommitSha: "OLD_PARENT",
         parentTreeSha: "OLD_PARENT_TREE",
       },

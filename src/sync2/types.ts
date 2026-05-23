@@ -53,9 +53,16 @@ export type QueueBatch = {
   // user's rule "in-progress OR failed batch is blocked from
   // merges; new sync clicks create a new batch instead".
   attempted: boolean;
-  // Commit message to use for this batch's commit. Templated at enqueue
-  // time so subsequent settings edits can't change a queued message.
-  commitMessage: string;
+  // Stage 13 (Decision #36 follow-on): `commitMessage` is no longer
+  // persisted. processBatch derives the message inline from
+  // `synthetic` + the current `deviceLabel` setting via
+  // `commitMessageForBatch` in src/sync2/commit-message.ts.
+  //
+  // True for Phase B side-batches synthesized from drain conflict-
+  // resolution (push to main as "resolve conflict ({label})").
+  // False for user-driven batches from syncAll / syncFile (push as
+  // "sync ({label})").
+  synthetic: boolean;
   // Snapshot of the parent commit SHA at enqueue time. Used as the
   // first-pick parent; if the remote has moved since, the runner
   // resolves the conflict before pushing.

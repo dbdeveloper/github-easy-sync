@@ -48,7 +48,6 @@ function newBatchId(now: Date = new Date()): string {
 }
 
 export type EnqueueMeta = {
-  commitMessage: string;
   parentCommitSha: string | null;
   parentTreeSha: string | null;
   // Stage 13 (Phase 4 implementation): marks Phase B-synthesized
@@ -122,7 +121,6 @@ export default class PushQueue {
     }
 
     await this.writeMeta(batchDir, {
-      commitMessage: meta.commitMessage,
       parentCommitSha: meta.parentCommitSha,
       parentTreeSha: meta.parentTreeSha,
       createdAt: Date.now(),
@@ -194,7 +192,6 @@ export default class PushQueue {
     }
 
     await this.writeMeta(batchDir, {
-      commitMessage: "",
       parentCommitSha: args.parentCommitSha,
       parentTreeSha: args.parentTreeSha,
       createdAt: Date.now(),
@@ -231,7 +228,7 @@ export default class PushQueue {
       id,
       inProgress,
       attempted,
-      commitMessage: meta.commitMessage,
+      synthetic: meta.synthetic,
       parentCommitSha: meta.parentCommitSha,
       parentTreeSha: meta.parentTreeSha,
       files,
@@ -308,12 +305,12 @@ export default class PushQueue {
       const meta = await this.readMeta(batchDir);
       const updated = { ...meta.uploadedBlobs, [path]: sha };
       await this.writeMeta(batchDir, {
-        commitMessage: meta.commitMessage,
         parentCommitSha: meta.parentCommitSha,
         parentTreeSha: meta.parentTreeSha,
         createdAt: meta.createdAt,
         uploadedBlobs: updated,
         fileMtimes: meta.fileMtimes,
+        synthetic: meta.synthetic,
       });
     });
     // Swallow errors on the chained queue value (so one failure
@@ -450,28 +447,10 @@ export default class PushQueue {
     );
   }
 
-  // Replace the batch's commit message in .meta.json. Used by
-  // enqueueOrMerge after a successful accumulate-merge: the
-  // "accumulate group" should commit with the message of the LAST
-  // (most recent) sync click rather than the first, so the
-  // timestamp on GitHub reflects when the batch actually pushed.
-  // Routed through the same metaWriteQueue as recordBlobUpload so
-  // concurrent writers don't clobber each other.
-  async updateCommitMessage(
-    id: string,
-    commitMessage: string,
-  ): Promise<void> {
-    const next = this.metaWriteQueue.then(async () => {
-      const batchDir = `${this.queueRoot}/${id}`;
-      const meta = await this.readMeta(batchDir);
-      await this.writeMeta(batchDir, {
-        ...meta,
-        commitMessage,
-      });
-    });
-    this.metaWriteQueue = next.catch(() => undefined);
-    return next;
-  }
+  // `updateCommitMessage` removed in Stage 13 Group 9 follow-on
+  // (Decision #36). Commit messages are derived at processBatch time
+  // from `batch.synthetic` + `deviceLabel` — there's no persisted
+  // template to refresh after an accumulate-merge.
 
   // Read a single file's bytes from inside the batch's vault/ snapshot.
   // Used by Sync2Manager during conflict reconciliation to obtain the
@@ -615,7 +594,6 @@ export default class PushQueue {
   private async writeMeta(
     batchDir: string,
     meta: {
-      commitMessage: string;
       parentCommitSha: string | null;
       parentTreeSha: string | null;
       createdAt: number;
@@ -640,7 +618,6 @@ export default class PushQueue {
   }
 
   private async readMeta(batchDir: string): Promise<{
-    commitMessage: string;
     parentCommitSha: string | null;
     parentTreeSha: string | null;
     createdAt: number;
@@ -668,8 +645,6 @@ export default class PushQueue {
       }
     }
     return {
-      commitMessage:
-        typeof raw.commitMessage === "string" ? raw.commitMessage : "",
       parentCommitSha:
         typeof raw.parentCommitSha === "string" ? raw.parentCommitSha : null,
       parentTreeSha:

@@ -1869,20 +1869,20 @@ in the Stage 13 pivot notice).
 | 9 | Commit-template removal (Decision #36) | (deferred) | (this commit) | ✅ GREEN |
 | 10 | Visibility 4→3 point (settings-tab badge) | (deferred) | (this commit) | ✅ GREEN |
 
-**Status snapshot (last update: 2026-05-23):** **10/10 groups GREEN.**
-Stage 13 Phase 4 main scope is complete. Group 10 removed the
-settings-tab "Pending conflicts" header + record list per the
-Decision #21 revision; visibility now lives in three surfaces
-(status bar, pre-sync modal, ribbon badge) — settings tab no
-longer carries conflict UI.
+**Status snapshot (last update: 2026-05-23):** **10/10 groups GREEN
++ Group 9 follow-on complete.** Stage 13 Phase 4 main scope plus
+the meta.json `commitMessage` field removal are done. processBatch
+derives the commit message inline at push time from
+`batch.synthetic` + the current `deviceLabel` setting via the new
+`commitMessageForBatch` helper. `PushQueue.updateCommitMessage`
+deleted; meta.json carries no commit-message field anymore.
 
 Test suite state: 501 passed + 2 todo, 0 RED.
 
-Remaining follow-on work (NOT in the main 10-group scope; deferred
-to future commits): Group 4 migration follow-on (refactor
-atomicWriteFile / ConflictStore.create to use `stagingPathFor`,
-unlock N9/N9b SHA-verify todos) + Group 9 follow-on (drop
-`commitMessage` field from EnqueueMeta / writeMeta / readMeta).
+Remaining follow-on work (NOT in the main 10-group scope; deferred):
+Group 4 migration follow-on (refactor atomicWriteFile /
+ConflictStore.create to use `stagingPathFor`, unlock N9/N9b
+SHA-verify todos).
 
 **Discipline:**
 - Write tests against the **Phase 4 API surface** (locked via stubs in
