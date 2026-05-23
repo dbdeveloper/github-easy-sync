@@ -1861,7 +1861,7 @@ in the Stage 13 pivot notice).
 | 1 | enqueueSynthetic + meta.synthetic field | `4330c84` | `379a666` | ✅ GREEN |
 | 2 | Classifier row 3 → noop (Decision #30) | `a84246a` | `164fb93` | ✅ GREEN |
 | 3 | ConflictStore.load drops auto-restore | `eb98843` | `3c59969` | ✅ GREEN |
-| 4 | `.sync-bak` pre-suffix migration | `461da2e` | — | ⏸ pending |
+| 4 | `.sync-bak` pre-suffix `stagingPathFor` | `461da2e` | (this commit) | ✅ GREEN (algorithm); ⏸ migration of `atomicWriteFile` + `ConflictStore.create` staging is follow-on work |
 | 5 | ConflictCounter (dirty-flag + subscribers) | `6b3c4ee` | `2da64ff` | ✅ GREEN |
 | 6 | Drain wiring (drop drain-end sweep, guard) | (no NEW tests) | — | ⏸ pending |
 | 7 | Filesystem-orphan adoption at create | `dc5d0e2` | `d1af154` | ✅ GREEN |
@@ -1869,11 +1869,18 @@ in the Stage 13 pivot notice).
 | 9 | Commit-template removal (Decision #36) | (deferred) | — | ⏸ pending |
 | 10 | Visibility 4→3 point (settings-tab badge) | (deferred) | — | ⏸ pending |
 
-**Status snapshot (last update: 2026-05-23):** 6/10 groups GREEN.
-Test suite state: 528 GREEN + 5 RED + 2 todo. The critical-path
-trio (Groups 1, 5, 2) landed first; the independent groups (3, 7,
-8) followed. Remaining: Group 4 (`.sync-bak` migration — touches
-recovery + create flows) and the larger cleanup of Groups 6, 9, 10.
+**Status snapshot (last update: 2026-05-23):** 7/10 groups GREEN
+(Group 4 algorithm landed; the larger migration of atomicWriteFile +
+ConflictStore.create staging to use `stagingPathFor` is follow-on
+work tracked separately). **All RED tests turned GREEN.**
+Test suite state: 533 passed + 2 todo, 0 RED. The 2 todo placeholders
+are N9/N9b (SHA-verify recovery during AtomicWriteRecovery.sweep) —
+they unlock once `ConflictStore.create` migrates to vault-level
+`.sync-bak` staging.
+
+Remaining Phase 4 work: Group 6 (drain wiring REWRITEs), Group 9
+(commit-template removal), Group 10 (settings-tab badge cleanup),
+plus the `stagingPathFor` migration of atomicWriteFile / ConflictStore.
 
 **Discipline:**
 - Write tests against the **Phase 4 API surface** (locked via stubs in
@@ -1926,7 +1933,7 @@ exercise.
 **Existing tests to REWRITE:**
 - `conflict-store.test.ts:310` (post-bail-out-flag review needed first — see flags above)
 
-### Phase 4 Group 4 — `.sync-bak` migration
+### Phase 4 Group 4 — `.sync-bak` migration ✅ (algorithm; migration follow-on)
 
 **RED tests to land:**
 - N8: `.sync-bak naming algorithm: stem.ext, hidden files, extensionless, multi-dot names`

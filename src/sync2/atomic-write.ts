@@ -28,7 +28,7 @@ import type SnapshotStore from "./snapshot-store";
 export const SYNC_TMP_SUFFIX = ".sync-tmp";
 export const SYNC_BAK_SUFFIX = ".sync-bak";
 
-// Stage 13 (Phase 1.7 stub — Phase 4 fills in).
+// Stage 13: pre-suffix staging path. Phase 4 Group 4 implementation.
 //
 // Computes the staging path for a target file by inserting `.sync-bak`
 // (or `.sync-tmp` if `which="tmp"`) BEFORE the file extension instead
@@ -45,15 +45,34 @@ export const SYNC_BAK_SUFFIX = ".sync-bak";
 //   - "README" (no ext)                 → "README.sync-bak"
 //   - ".obsidian/.gitignore"            → ".obsidian/.gitignore.sync-bak"
 //   - "note.conflict-from-Phone-X.md"   → "note.conflict-from-Phone-X.sync-bak.md"
+//   - "file.tar.gz"                     → "file.tar.sync-bak.gz"  (uses LAST extension)
 //
-// Phase 3 RED tests exercise the algorithm; Phase 4 fills in.
+// Hidden + extensionless files append the suffix (no extension to
+// insert before). Files like ".gitignore" or "README" can't be
+// extensioned without becoming a different filename shape, so the
+// suffix appends.
 export function stagingPathFor(
-  _finalPath: string,
-  _which: "bak" | "tmp" = "bak",
+  finalPath: string,
+  which: "bak" | "tmp" = "bak",
 ): string {
-  throw new Error(
-    "stagingPathFor: not implemented (Stage 13 Phase 4 — see PSEUDO-MERGE-MODE.md)",
-  );
+  const suffix = which === "tmp" ? SYNC_TMP_SUFFIX : SYNC_BAK_SUFFIX;
+  const slashIdx = finalPath.lastIndexOf("/");
+  const dotIdx = finalPath.lastIndexOf(".");
+
+  // Conditions that mean "no extension to insert before":
+  //   - dotIdx < 0 → no dot at all (e.g., "README", "Folder/Makefile")
+  //   - dotIdx <= slashIdx → the only dot is in a directory segment
+  //     above the file, not in the filename itself
+  //   - dotIdx === slashIdx + 1 → the dot is the leading character of
+  //     the filename (hidden file like ".gitignore")
+  if (dotIdx < 0 || dotIdx <= slashIdx || dotIdx === slashIdx + 1) {
+    return finalPath + suffix;
+  }
+
+  // Normal file with extension. Insert suffix before the LAST extension.
+  const stem = finalPath.slice(0, dotIdx);
+  const ext = finalPath.slice(dotIdx);
+  return stem + suffix + ext;
 }
 
 export async function atomicWriteFile(
