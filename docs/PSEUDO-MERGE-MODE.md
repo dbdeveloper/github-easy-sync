@@ -542,17 +542,18 @@ logging and for reasoning about what was lost (in `atomic`, the
 losing side's bytes are no longer in the resolved file, though they
 remain reachable in git history).
 
-**Why binary always registers a conflict.** Earlier versions of the
-plugin used an *atomic mtime* picker for binary files: whichever side
-had the more recent modification time won, silently. This was
-correct in the trivial case (one device truly had the newer version)
-but catastrophic in the non-trivial case (both devices edited the
-same image independently — the older version was destroyed without
-the user ever knowing). Pseudo-merge mode rejects the silent picker:
-binary files always produce a sibling so that the user can see both
-versions and decide. The user's resolution path is the same as for
-text — delete the sibling or rename it over the base — but neither
-version is discarded without their consent.
+**Why binary always registers a conflict.** A plausible alternative
+for binary files would be an *atomic mtime* picker — whichever side
+has the more recent modification time wins, silently. This is
+correct in the trivial case (one device truly has the newer
+version) but catastrophic in the non-trivial case (both devices
+edited the same image independently — the older version is
+destroyed without the user ever knowing). Pseudo-merge mode rejects
+the silent picker for that reason: binary files always produce a
+sibling so that the user can see both versions and decide. The
+user's resolution path is the same as for text — delete the sibling
+or rename it over the base — but neither version is discarded
+without their consent.
 
 **Why plugin bundles use atomic semver.** The bundled `main.js` of
 an Obsidian plugin is minified JavaScript. A three-way diff3 of two
@@ -909,61 +910,55 @@ Step 2; the snapshot in Path A's Step 4), so a crash that destroys
 the protocol's progress nonetheless leaves enough information on disk
 for the sweep to decide what was supposed to happen.
 
-**A note on what changed.** Ownership dispatch lives on the `.sync-tmp`
-pass, not on `.sync-bak`. The reason: forward-direction staging is
-the operation common to both callsites, and `.sync-tmp` is the
-suffix that denotes that operation regardless of which callsite
-produced it. An earlier iteration of the design had Path B also
-produce `.sync-bak` files — coercing a forward-target into a
-suffix that conventionally means "backup of an old version" — and
-the ownership dispatch lived there instead. That design was
-semantically misleading: a reader inspecting a `.sync-bak` on disk
-could not know whether it was a backup or a staged new file without
-checking the conflict store. Aligning each suffix with a single
-meaning removes that ambiguity from the static reading of the
-filesystem, and confines the remaining ownership question to
-`.sync-tmp`, where it is also intuitively the right place to ask
-("which forward-direction protocol owns this staging file?").
+Ownership dispatch lives on the `.sync-tmp` pass for a structural
+reason: forward-direction staging is the operation common to both
+callsites, and `.sync-tmp` is the suffix that denotes that
+operation regardless of which callsite produced it. The
+ownership-versus-orphan question is therefore native to `.sync-tmp`
+and has no analogue on `.sync-bak`, which is unambiguous by
+construction (only `atomicWriteFile` ever produces it). Confining
+the dispatch to `.sync-tmp` keeps each suffix readable in isolation:
+a `.sync-bak` on disk always means "backup of a previous file
+version," and the question of ownership only arises where the
+filesystem itself cannot decide which protocol a staging file
+belongs to.
 
 ### 9.6 Why Vault-Level Staging
 
-An earlier iteration of the design used `<configDir>/.conflicts/<id>/sibling-content.bin`
-as the staging location for Path B — a private area under the
-plugin's config directory, parallel to the conflict record itself.
-Pseudo-merge mode moved staging into the vault, co-located with the
-eventual sibling, for two reasons:
+Path B's staging file lives in the vault, co-located with the
+eventual sibling — not in a private area under the plugin's config
+directory parallel to the conflict record. Two properties motivate
+this placement:
 
-1. **The atomic-write infrastructure already existed.** Path A had
-   been using `atomicWriteFile`, with its own recovery sweep that
-   walked the vault for staging files, before pseudo-merge mode
-   landed. Reusing that infrastructure for Path B removed a class of
-   bespoke recovery code and ensures that future fixes to atomic-write
-   semantics propagate to the conflict-store path automatically. The
-   single unified sweep described in §9.5 is the direct dividend.
+1. **The atomic-write infrastructure is shared with Path A.** Path A
+   uses `atomicWriteFile` with a recovery sweep that walks the vault
+   for staging files. Routing Path B through the same primitive
+   removes a class of bespoke recovery code and ensures that any
+   change to atomic-write semantics propagates to the conflict-store
+   path automatically. The single unified sweep described in §9.5
+   is the direct dividend.
 2. **The staging file is recoverable in place.** If the rename in
    Path B's Step 3 fails (the OS reports an I/O error, the destination
    suddenly exists, etc.), no copying is required to recover — the
    bytes are already at the right parent directory, and the recovery
    sweep only needs to perform the rename a second time.
 
-### 9.7 What `load()` No Longer Does
+### 9.7 The Boundary Between `load()` and the Recovery Sweep
 
-A subtle but important property: the conflict store's `load()` does
-**not** check the vault for sibling files. It reads `meta.json`
-files from the conflict-records directory and builds its in-memory
-index purely from that. The recovery sweep described in §9.5 runs
-separately, and the *resolution* of conflicts based on what is or is
-not in the vault happens only at the next `drain()`.
+The conflict store's `load()` does **not** check the vault for
+sibling files. It reads `meta.json` files from the conflict-records
+directory and builds its in-memory index purely from that. The
+recovery sweep described in §9.5 runs separately, and the
+*resolution* of conflicts based on what is or is not in the vault
+happens only at the next `drain()`.
 
-This split is deliberate. An earlier design had `load()` "restore"
-missing siblings from a stored backup, on the reasoning that a
-missing sibling indicated the user had accidentally deleted it. In
-practice, this design produced a bug: the user *intentionally*
-deleted a sibling to resolve the conflict, the app quit before the
-next sync, and on the next plugin load the deleted sibling was
-"helpfully" restored, undoing the resolution. The current design
-takes the opposite stance — *filesystem state is authoritative* —
-and trusts that a missing sibling means the user wanted it gone.
+This split is deliberate: it makes **filesystem state authoritative**
+for resolution. A missing sibling means the user wanted it gone, and
+no part of the load path treats it as something to "restore." The
+alternative — having `load()` re-emit a missing sibling from a
+durable backup — would silently undo the user's intentional deletes
+across a plugin restart, which is exactly the failure mode the
+"trust the filesystem" rule prevents.
 
 ---
 
