@@ -3,8 +3,71 @@
 > Sync your Obsidian vault with a GitHub repository — no `git` binary,
 > no `isomorphic-git`, identical behaviour on desktop and mobile.
 
-Version `2.0.0-beta` · AGPL-3.0 · Fork of
+Version `2.0.1-beta` · AGPL-3.0 · Fork of
 [`github-gitless-sync`](https://github.com/silvanocerza/github-gitless-sync)
+
+---
+
+## What's new in 2.0.1-beta
+
+Conflict resolution rebuilt from the ground up. Full design rationale
+in [docs/PSEUDO-MERGE-MODE.md](./docs/PSEUDO-MERGE-MODE.md); the
+practical highlights:
+
+- **Resolve conflicts with plain file operations — no plugin UI
+  required.** Every conflict becomes a pair of ordinary files in
+  your vault: the original (your local version) and a sibling
+  (`<note>.conflict-from-<device>-<timestamp>.md`) carrying the
+  remote version. You resolve by managing those files the same way
+  you manage any other file in Obsidian: delete the sibling to keep
+  yours, rename it over the base to accept theirs, edit either or
+  both to produce a hand-merged result. No modal dialogs, no
+  conflict markers leaking into your reading view. *(A dedicated
+  side-by-side diff-edit GUI is planned for the next release. For
+  now, resolution uses only the native Obsidian file operations
+  you already know — file explorer, editor, delete, rename.)*
+- **Keep typing even while a file is in conflict.** Your in-progress
+  edits flow to a private GitHub branch that no other device sees
+  until you finalise the resolution. The conflict doesn't block
+  you, and other devices stay protected from your half-resolved
+  state.
+- **Your full edit history is preserved on GitHub — forever.** Every
+  commit the plugin ever produces — including every iteration made
+  during a conflict-resolution session — remains reachable on the
+  GitHub network graph. Nothing is silently squashed or discarded;
+  months later you can find the merge-commit for any resolved
+  conflict and walk the side-branch to see exactly how you got
+  there.
+- **Auto-merge first.** Text files get a real three-way merge against
+  the last-synced base; only overlapping line edits surface as
+  conflicts. Plugin bundles auto-resolve by semantic version
+  (`manifest.json`'s `version` field), so a plugin update on one
+  device propagates without manual intervention. Binary files
+  always produce a sibling so you can see both versions side by
+  side — no silent overwrites of edited images.
+- **Crash-tolerant atomic writes.** Every disk operation that
+  touches multiple files (writing a sibling, persisting a conflict
+  record, replacing a pulled file) is built on a documented
+  multi-step protocol with a recovery sweep on plugin load. An
+  interruption — mobile OS suspending the app mid-write, laptop
+  losing battery during a push — leaves the vault in either the
+  pre-operation state or the post-operation state, never a
+  half-applied state.
+- **Three visibility surfaces for pending conflicts.** Status bar
+  shows `🔀 N`, the ribbon icon carries a count badge, and the next
+  Sync click surfaces a confirmation modal listing exactly which
+  files are still pending. Nothing about a conflict can hide from
+  you.
+- **Multi-file conflict sessions resolve one file at a time.** When
+  several files end up in conflict, each per-file resolution
+  publishes its result to `main` as an ordinary commit; the
+  conflict branch waits in the background and merges back only
+  when the last file is settled.
+- **`Reset` cleanly relabels conflict siblings.** If you wipe the
+  plugin state via the settings-tab `Reset` button, your
+  `*.conflict-from-*` files are renamed to
+  `<file>.unresolved-<original-ts>.<ext>` so they won't collide
+  with a future re-enable.
 
 ---
 
@@ -419,46 +482,78 @@ credentials → one Sync click → reload → done.
 
 ## Conflict resolution
 
-> **Status: works but not exhaustively tested.** The atomic paths
-> (binary, plugin files) and the simple 3-way text merge are
-> well-covered by integration tests; the diff-edit UI for unresolved
-> text conflicts works on desktop and Android but the UX is still
-> rough. Treat this section as a beta feature: it won't lose data
-> (sibling-file deferral guarantees that), but it may surprise you.
-
 A conflict happens when the same file changed on both sides since
 the last sync — for example, you edited a note on your phone, then
 edited the same note on your laptop, then clicked Sync on the
-laptop. The plugin classifies the path and picks a resolver:
+laptop. **Full design rationale and worked examples in
+[docs/PSEUDO-MERGE-MODE.md](./docs/PSEUDO-MERGE-MODE.md).** The
+user-facing summary:
 
-| What changed | Resolver |
-|---|---|
-| Binary (`.png`, `.pdf`, …) | **Atomic mtime** — the newer side wins. No merge attempt, no prompt. |
-| Plugin's `main.js` or `manifest.json` | **Atomic semver** — the higher version from `manifest.json` wins, with mtime as tie-break. Merging minified plugin code would crash Obsidian, so we don't try. |
-| Other text (`.md`, `.txt`, …) | **3-way merge** against the last-synced base. If the merge is clean, applied silently. If it produces conflict markers, the diff view opens. |
-| Local deleted + remote modified | **Surfaced as a conflict** — pick: keep delete / take remote / merge / defer. |
+### Auto-merge happens first
 
-When the diff view opens, you get three resolution choices:
+Before any conflict surfaces, the plugin tries to reconcile the two
+sides on its own. The strategy depends on the file type:
 
-- **Resolve now** — edit the merged content directly in the diff
-  view, then save. The resolved content lands in the next push.
-- **Merge into one** — concatenates both versions with clear
-  separators. Useful when both edits should be preserved verbatim
-  (you'll clean up the result later in your normal editor).
-- **Defer** — keep your local version as-is and write the remote
-  version next to it as a sibling file named
-  `<note>.conflict-from-<deviceLabel>-<timestamp>.md`. Sync
-  resumes; you resolve at your own pace. Deleting the sibling
-  closes the conflict.
+| File type | Auto-merge strategy | Surfaces as a conflict only when… |
+|---|---|---|
+| Text (`.md`, `.txt`, …) | Three-way merge against the last-synced base. | Edits overlap on the same line. |
+| Plugin bundle (`<plugin>/main.js`, `<plugin>/manifest.json`) | Higher semantic version from `manifest.json` wins; mtime tie-break. | Identical version **and** identical mtime. |
+| Binary (`.png`, `.pdf`, attachments) | None — binary always surfaces. | Always (no silent overwrites of edited images). |
+| Local deleted, remote modified | Auto-resolves in favour of the modification (the more recent intent wins; the file resurrects on remote). | Never. |
+| Local modified, remote deleted | Surfaces as a conflict — your edit is preserved as a sibling. | Always. |
 
-<!-- SCREENSHOT: conflict view, both panes visible -->
+When auto-merge succeeds, the merged result goes straight to GitHub
+and you're never notified — there was nothing for you to decide.
 
-Deferred conflicts show up as a 🔀 counter in the status bar
-(click it to open the list).
+### When a conflict surfaces
 
-The `.conflict-from-…` sibling files are gitignored by default —
-they stay strictly local. If you want them to sync across devices,
-edit `<vault>/.gitignore` and remove the `*.conflict-from-*` line.
+The plugin writes the remote version into the vault next to your
+file, named:
+
+```
+<note>.conflict-from-<remote-device>-<isoTimestamp>.md
+```
+
+The original file (your local version) is **not** touched. Both
+files are visible in the Obsidian file explorer, openable in the
+editor, indistinguishable from any other Markdown / binary file.
+The status bar shows `🔀 N` for the count; the ribbon icon carries
+a matching badge.
+
+### Resolution — entirely through native Obsidian file operations
+
+> **A dedicated side-by-side diff-edit GUI is planned for the next
+> release.** In this release, conflict resolution is done with the
+> native Obsidian operations you already use every day: open the
+> files in the editor, delete a file from the file explorer, rename
+> a file by long-press (mobile) or right-click → rename (desktop).
+
+The three resolution moves and what they mean:
+
+- **Delete the sibling** (`<note>.conflict-from-…md`) → keep your
+  local version. On the next sync the local content is published to
+  GitHub.
+- **Rename the sibling onto the base** (`<note>.conflict-from-…md`
+  → `<note>.md`, overwriting your local version) → accept the
+  remote version.
+- **Edit the base file by hand**, copying the parts you want from
+  the sibling, then **delete the sibling** → publish your
+  hand-merged result.
+
+A file may carry several siblings if multiple devices contributed
+conflicting versions — they're distinguished by the device-label
+segment in the filename. The conflict on that path is closed only
+when **every** sibling is gone (or matches the base byte-for-byte).
+
+While a file is in conflict, **you can keep editing the base
+file**. Those edits flow to a private branch on GitHub that no
+other device sees until you finalise. The conflict doesn't block
+you; other devices stay protected from your half-resolved state.
+
+The `*.conflict-from-*` filename pattern is gitignored by default —
+siblings stay strictly local. If you want them to sync across
+devices, edit `<vault>/.gitignore` and remove the
+`*.conflict-from-*` line.
 
 ---
 
