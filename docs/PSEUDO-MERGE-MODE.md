@@ -996,7 +996,8 @@ Thursday.` and clicks `[Sync]`. The phone's `drain()` runs:
    `github-easy-sync-conflicts-Phone-20260508153022-847` on the
    current `main` HEAD and pushes the Phone's version of `idea.md`
    to it.
-3. A sibling is written to the vault using the `.sync-bak` protocol:
+3. A sibling is written to the vault using the `.sync-tmp` staging
+   protocol (§9.4):
    `Notes/idea.conflict-from-Laptop-2026-05-08T15-30-00Z.md`
    containing `Launch by Monday.`
 4. A conflict record is persisted under
@@ -1122,18 +1123,20 @@ conflict" until the last one is settled.
 ### Scenario D: Crash Mid-Create
 
 The Phone is processing the conflict from Scenario A. Step 1 (write
-`idea.sync-bak.md`) completes. Step 2 (write `meta.json`) begins.
-The OS suspends the app before `meta.json` is fully written.
+`idea.conflict-from-Laptop-...sync-tmp.md`) completes. Step 2 (write
+`meta.json`) begins. The OS suspends the app before `meta.json` is
+fully written.
 
 On the next plugin load:
 
-1. The atomic-write recovery sweep walks the vault, finds
-   `Notes/idea.sync-bak.md`, and consults the conflict-record store.
-   The record does not exist (Step 2 never finished). The recovery
-   matrix's row 3 applies: the staging file is an orphan; the sweep
-   removes it.
+1. The atomic-write recovery sweep walks the vault, finds the
+   `.sync-tmp` staging file, and consults the conflict-record store.
+   The record does not exist (Step 2 never finished). Per §9.5's
+   `.sync-tmp` pass: no record names this final path → the staging
+   file is dropped as a Path A transient (the only safe assumption
+   when there is no ownership claim).
 2. The conflict store loads (zero records).
-3. The next `[Sync]` runs as if the conflict never happened. The
+3. The next `[Sync]` runs as if the confliet never happened. The
    pull re-encounters the divergence between Phone and `main`,
    auto-merge fails again, and the protocol restarts at Step 1 with
    a fresh record. The user sees the same end state as if the crash
@@ -1142,13 +1145,191 @@ On the next plugin load:
 
 Had the crash occurred between Step 2 and Step 3 instead — i.e.,
 the record was written but the final rename did not happen — the
-recovery sweep would find both the staging file and a record naming
-the final path. The SHA-verify check would succeed (the bytes match
-`record.theirsBlobSha` because they were written from
-`theirsContent` in Step 1), and the sweep would complete Step 3 by
-performing the rename. The user opens Obsidian and sees the
-sibling at its final name; nothing visible suggests anything went
-wrong.
+recovery sweep would find both the `.sync-tmp` staging file and a
+record naming the final path. The SHA-verify check would succeed
+(the bytes match `record.theirsBlobSha` because they were written
+from `theirsContent` in Step 1), and the sweep would complete
+Step 3 by performing the rename. The user opens Obsidian and sees
+the sibling at its final name; nothing visible suggests anything
+went wrong.
+
+### Scenario E: Partial Resolution of a Multi-Path Conflict Session
+
+Scenarios A through D all involved a single conflicted path. Real
+multi-device usage routinely produces several conflicts in one
+sync. This scenario traces how those resolve one at a time, and
+what the relationship is between per-file resolution and the
+conflict branch's final merge.
+
+Consider a wider divergence than Scenario A: while the Phone was
+offline, the user edited three files on it — `Notes/idea.md`,
+`Notes/plan.md`, and `Notes/todo.md` — and the Laptop, online,
+edited the same three files. All three pairs of edits land on
+overlapping lines, so auto-merge fails on each.
+
+When the Phone reconnects and clicks `[Sync]`, the drain processes
+its queued batch:
+
+1. Pull from `main` discovers that all three files diverge.
+   Auto-merge attempts run, all three fail, and three conflicts are
+   registered in sequence:
+   - A conflict branch is created on the first registration —
+     `github-easy-sync-conflicts-Phone-20260508153022-847` — at
+     the current `main` HEAD. The Phone's pre-conflict version of
+     `idea.md` is pushed to it as the first commit
+     (`message: "conflict (Phone)"`).
+   - The second and third registrations each append one commit to
+     the **same** conflict branch, carrying the Phone's
+     pre-conflict versions of `plan.md` and `todo.md` respectively.
+   - Three sibling files are written next to the originals:
+     - `Notes/idea.conflict-from-Laptop-...md`
+     - `Notes/plan.conflict-from-Laptop-...md`
+     - `Notes/todo.conflict-from-Laptop-...md`
+   - Three conflict records are persisted, one per file.
+
+State after the drain:
+
+```
+GitHub:
+  main:       ── ... ── Cn (Laptop's three edits) ───────────
+                            │
+                            └── X1 ── X2 ── X3
+                              (idea  (plan   (todo
+                               Phone) Phone)  Phone)
+                                              ↑
+                                              conflict branch tip
+
+Phone vault:
+  Notes/idea.md                                  ← Phone's version
+  Notes/idea.conflict-from-Laptop-...md          ← sibling (Laptop's)
+  Notes/plan.md                                  ← Phone's version
+  Notes/plan.conflict-from-Laptop-...md          ← sibling (Laptop's)
+  Notes/todo.md                                  ← Phone's version
+  Notes/todo.conflict-from-Laptop-...md          ← sibling (Laptop's)
+
+Status bar: 🔀 3
+```
+
+Three records in the conflict store, one conflict branch with three
+commits, three pairs of files in the vault. `main` is unchanged
+relative to before the Phone's sync — none of the conflicted files
+have reached it.
+
+**First resolution — `idea.md`, by deleting the sibling.** The user
+inspects, decides their Phone version of `idea.md` is correct, and
+deletes the sibling `idea.conflict-from-Laptop-...md`. On the next
+`[Sync]`:
+
+- **Phase A** finds the record for `idea.md` has `!siblingExists`
+  (user-deleted) → record dropped from store.
+- **Phase B** observes that `idea.md` now has zero records →
+  `enqueueSynthetic({path: "idea.md", content: <Phone's bytes>,
+  parentCommitSha: lastSync, ...})` adds a side-batch to the queue.
+- `processBatch` runs over the side-batch. The path is no longer in
+  `inConflictFiles` (no records), so it partitions into `plainPaths`,
+  and the new content of `idea.md` is pushed **to `main`** as an
+  ordinary commit (`message: "resolve conflict (Phone)"`,
+  `meta.synthetic: true`).
+- **Finalise gate:** `store.records.length === 2` — `plan.md` and
+  `todo.md` still have records. The finalise block at the end of the
+  drain skips. The conflict branch is untouched.
+
+```
+GitHub:
+  main:       ── ... ── Cn ── M1
+                            │  ↑
+                            │  "resolve conflict (Phone)" — idea.md
+                            │
+                            └── X1 ── X2 ── X3   (unchanged)
+
+Status bar: 🔀 2
+```
+
+**Second resolution — `plan.md`, by renaming the sibling onto the
+base.** The user prefers the Laptop's version of `plan.md`. They
+rename `plan.conflict-from-Laptop-...md` → `plan.md`, overwriting
+the Phone's version. On the next `[Sync]`:
+
+- **Phase A** finds the record for `plan.md` has `!siblingExists`
+  (renamed away) → record dropped.
+- **Phase B** synthesises a side-batch for `plan.md` containing the
+  bytes now sitting at `plan.md` (the Laptop's version).
+- `processBatch` pushes the new `plan.md` content to **`main`** as
+  another ordinary commit.
+- **Finalise gate:** `store.records.length === 1` — `todo.md` still
+  pending. Finalise still does not run.
+
+```
+GitHub:
+  main:       ── ... ── Cn ── M1 ── M2
+                            │       ↑
+                            │       "resolve conflict (Phone)" — plan.md
+                            │
+                            └── X1 ── X2 ── X3   (still unchanged)
+
+Status bar: 🔀 1
+```
+
+**Third (and last) resolution — `todo.md`, by hand-merging.** The
+user opens both `todo.md` and its sibling, copies the wanted lines
+from each into `todo.md`, then deletes the sibling. On the next
+`[Sync]`:
+
+- **Phase A** finds the record for `todo.md` has `!siblingExists`
+  → record dropped.
+- **Phase B** synthesises a side-batch for `todo.md` with the
+  merged content.
+- `processBatch` pushes the merged `todo.md` to `main` as the third
+  "resolve conflict (Phone)" commit.
+- **Finalise gate:** `store.records.length === 0` **and** the
+  conflict branch exists → the finalise block fires:
+  1. A marker commit (`final state (Phone)`) is written to the
+     branch's tip, preserving the Phone's final state on the branch.
+  2. A manual `createCommit({message: "merge conflict-branch
+     (Phone)", treeSha: main.tree, parents: [main.head,
+     branch.head]})` constructs the merge-commit on `main`.
+  3. `updateBranchHead` makes the merge-commit `main`'s new tip.
+  4. `deleteReference("heads/github-easy-sync-conflicts-Phone-...")`
+     removes the branch label. The four branch commits remain
+     reachable through the merge-commit's second parent (§2.3).
+  5. `lastSyncCommitSha` is advanced to the merge-commit.
+
+```
+GitHub:
+  main:       ── ... ── Cn ── M1 ── M2 ── M3 ── M (merge-commit)
+                            │                  /
+                            └── X1 ── X2 ── X3 ── X4 (final state)
+                            (branch label deleted; commits still reachable through M)
+
+Status bar: (empty — no conflicts pending)
+```
+
+**Net history view.** The repository now shows, in chronological
+order on `main`:
+
+- `Cn` — the Laptop's pre-conflict commits.
+- `M1`, `M2`, `M3` — three separate "resolve conflict (Phone)"
+  commits, one per resolved file. Each commit touches exactly its
+  one file; no batching, no cross-contamination between resolutions.
+- `M` — the merge-commit that joins the conflict branch back into
+  `main`. Its second parent is the branch tip; the four branch
+  commits (X1, X2, X3, X4) remain part of the repository's history
+  forever, visible in the GitHub Network graph as a four-commit side
+  arm joining `main` at `M`.
+
+**The structural property to note.** The conflict branch was alive
+for the full duration of the multi-conflict session — through all
+three per-file resolutions — and was only finalised when the
+**last** record disappeared from the store. Each per-file resolution
+published its result to `main` as an ordinary commit by the same
+Phase B → side-batch → `processBatch` → main-push pipeline that any
+non-conflicting file would use. The branch and its merge-commit
+exist for one reason only: to keep the Phone's pre-conflict and
+in-conflict edits to *every* file in this session permanently
+reachable from `main`. Per-file closure is therefore cheap and
+local — one ordinary commit on `main`, no branch round-trips — and
+the branch lifecycle is governed strictly by the "store empty?"
+predicate at drain end.
 
 ---
 
@@ -1307,10 +1488,15 @@ Used by the change detector and by pull-side reconciliation to
 distinguish "this file changed locally" from "this file changed
 remotely" from "this file changed on both sides."
 
-**Staging path / `.sync-bak`** — The intermediate location of a
-sibling file during the three-step atomic write protocol. Named
-`<stem>.sync-bak<ext>` (pre-suffix form) so that the file extension
-is preserved and gitignore's `*.sync-bak*` pattern catches it.
+**Staging path / `.sync-tmp` / `.sync-bak`** — The intermediate
+location of a file during the atomic write protocols. `.sync-tmp`
+holds new bytes destined for a target path (forward direction;
+both Path A and Path B produce these). `.sync-bak` holds the old
+bytes of a file moved aside before an overwrite (rollback
+direction; only Path A produces these). Both use pre-suffix form
+(e.g., `note.sync-tmp.md`, `note.sync-bak.md`) so that the file
+extension is preserved and gitignore's `*.sync-tmp*` / `*.sync-bak*`
+patterns catch them. See §9.
 
 **Tree** — A directory listing in git's object storage: an ordered
 collection of `(name, mode, sha)` entries where each `sha` points
