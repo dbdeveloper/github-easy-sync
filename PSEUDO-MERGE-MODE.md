@@ -1887,11 +1887,16 @@ enqueueSynthetic production wiring + mobile-platform paired tests.
 
 Test suite state (unit): **507 passed, 0 RED, 0 todo.** Build clean.
 
-Integration suite (~106 tests against real GitHub) validation
-in progress. Pre-wiring baseline showed 1 failure in
-`edit-while-in-conflict.test.ts` (audit-flagged for REWRITE).
-Re-run with current HEAD pending — results will determine
-whether additional follow-on is needed.
+Integration suite (89 non-bootstrap tests against real GitHub):
+**89 passed, 0 RED** after fixing 2 audit-flagged REWRITEs (both
+were branch-commit-message-format assertions still pinned to
+pre-Stage-13 prefixes `"Conflict snapshot:"` /
+`"Edit-while-in-conflict:"`; updated to the Stage 13 hardcoded
+`conflict ({deviceLabel})` shape from Decision #36).
+
+**Stage 13 truly complete now.** All advisor-flagged production
+gaps closed: Phase B side-batch synthesis wired, MOCK_PLATFORM=
+mobile coverage added, integration suite validated GREEN.
 
 **Discipline:**
 - Write tests against the **Phase 4 API surface** (locked via stubs in

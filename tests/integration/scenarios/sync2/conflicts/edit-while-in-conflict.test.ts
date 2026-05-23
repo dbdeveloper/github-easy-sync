@@ -122,8 +122,12 @@ describe.skipIf(!integrationEnabled())(
         );
         expect(await readRemoteFile(branch, "note.md")).toBe("theirs\n");
 
-        // Branch head advanced to a new commit. Commit message tags
-        // the edit-while-in-conflict route.
+        // Branch head advanced to a new commit. Stage 13 uses a
+        // uniform `conflict ({deviceLabel})` commit message for
+        // every commit on the conflict-branch (initial registration
+        // + edit-while-in-conflict pushes). Pre-Stage-13 the latter
+        // had a distinct "Edit-while-in-conflict:" prefix; Decision
+        // #36 removed all template differentiation.
         const updatedCb = (
           client.store as unknown as {
             data: { conflictBranch: { name: string; head: string } | null };
@@ -131,9 +135,12 @@ describe.skipIf(!integrationEnabled())(
         ).data.conflictBranch;
         expect(updatedCb!.head).not.toBe(branchHeadAfterRegister);
         const messages = await getBranchCommitMessages(updatedCb!.name);
-        expect(
-          messages.some((m) => m.startsWith("Edit-while-in-conflict:")),
-        ).toBe(true);
+        // At least 2 conflict commits now: initial registration +
+        // the edit-while-in-conflict push.
+        const conflictCommitCount = messages.filter((m) =>
+          m.startsWith("conflict ("),
+        ).length;
+        expect(conflictCommitCount).toBeGreaterThanOrEqual(2);
 
         // ConflictStore still has one active record (resolution
         // hasn't fired). Sibling file is still in the vault.

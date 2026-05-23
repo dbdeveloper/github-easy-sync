@@ -121,11 +121,12 @@ describe.skipIf(!integrationEnabled())(
           "ours version\n",
         );
 
-        // Branch commit messages reflect the conflict snapshot.
+        // Branch commit messages use the Stage 13 hardcoded format
+        // `conflict ({deviceLabel})` — see src/sync2/commit-message.ts
+        // (Decision #36). Pre-Stage-13 the message embedded the
+        // vault path + kind ("Conflict snapshot: <path> (<kind>)").
         const messages = await getBranchCommitMessages(cb!.name);
-        expect(messages.some((m) => m.startsWith("Conflict snapshot:"))).toBe(
-          true,
-        );
+        expect(messages.some((m) => m.startsWith("conflict ("))).toBe(true);
 
         // Main on remote still has theirs (push skipped the path).
         expect(await readRemoteFile(branch, "note.md")).toBe(
