@@ -13,7 +13,6 @@ import {
 } from "obsidian";
 import GitHubSyncPlugin from "src/main";
 import { logFileNameFor } from "src/logger";
-import type SnapshotStore from "src/sync2/snapshot-store";
 import { formatSyncMessage } from "src/sync2/commit-message";
 import manifest from "../../manifest.json";
 
@@ -30,69 +29,14 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    // ── Pending conflicts ───────────────────────────────────────────
-    // Pseudo-merge 4-point visibility surface #3
-    // (PSEUDO-MERGE-MODE.md §"4-точкове попередження"). Gated on
-    // first-sync-completed (SnapshotStore.lastSyncCommitSha !==
-    // null) — before the first successful sync there's no remote
-    // we've talked to, so a "Pending conflicts" header would
-    // confuse a fresh-install user who hasn't even entered a
-    // token yet. Once the first sync lands, the block stays
-    // visible permanently (zero-count case shows "Nothing to
-    // resolve" so the tab layout stays stable).
-    const snapshotStore = (
-      this.plugin.sync2Manager as unknown as { store: SnapshotStore }
-    ).store;
-    const hasCompletedFirstSync =
-      snapshotStore?.getLastSyncCommitSha() != null;
-    if (hasCompletedFirstSync) {
-      const conflictRecords = this.plugin.conflictStore?.getAll() ?? [];
-      const conflictCount = conflictRecords.length;
-      new Setting(containerEl)
-        .setName(
-          conflictCount > 0
-            ? `🔀 Pending conflicts (${conflictCount})`
-            : "Pending conflicts",
-        )
-        .setHeading();
-      if (conflictCount === 0) {
-        new Setting(containerEl).setDesc(
-          "Nothing to resolve. Files in conflict between this device and " +
-            "GitHub appear here with the path to the sibling file the " +
-            "plugin created to capture the remote side.",
-        );
-      } else {
-        new Setting(containerEl).setDesc(
-          "Files listed below have diverging versions on this device and " +
-            "GitHub. They are not visible to other devices until you " +
-            "resolve them. Delete the sibling file to keep your local " +
-            "version; rename/copy the sibling onto the base path to keep " +
-            "the remote version.",
-        );
-        // Cap the visible list at 50 to avoid blowing up the settings
-        // tab on a very stale device. The badge in the section header
-        // still shows the full count.
-        const list = containerEl.createEl("ul");
-        const visible = conflictRecords.slice(0, 50);
-        for (const r of visible) {
-          const li = list.createEl("li");
-          li.createEl("strong", { text: r.vaultPath });
-          li.createSpan({ text: ` (${r.kind})` });
-          li.createEl("br");
-          li.createSpan({
-            text: `sibling: ${r.siblingPath}`,
-            cls: "github-easy-sync-conflict-sibling-path",
-          });
-        }
-        if (conflictRecords.length > visible.length) {
-          containerEl
-            .createEl("p")
-            .setText(
-              `… and ${conflictRecords.length - visible.length} more.`,
-            );
-        }
-      }
-    }
+    // Stage 13 (Decision #21 revision): the settings-tab "Pending
+    // conflicts" header + record list was removed. Visibility for
+    // unresolved conflicts now lives in three places: status bar,
+    // pre-sync modal, ribbon badge. The settings-tab variant was a
+    // detail surface that didn't pull its weight — users with a
+    // conflict click the status bar / ribbon to open the sibling,
+    // not the settings tab. Detailed conflict list will live in
+    // Diff2 (stage 2) as a dedicated UI surface.
 
     // ── Remote repository ────────────────────────────────────────────
     new Setting(containerEl).setName("Remote Repository").setHeading();

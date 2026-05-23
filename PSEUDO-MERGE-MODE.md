@@ -1867,21 +1867,22 @@ in the Stage 13 pivot notice).
 | 7 | Filesystem-orphan adoption at create | `dc5d0e2` | `d1af154` | ✅ GREEN |
 | 8 | GitignoreInvariants always-write | `dc5d0e2` | (this commit) | ✅ GREEN |
 | 9 | Commit-template removal (Decision #36) | (deferred) | (this commit) | ✅ GREEN |
-| 10 | Visibility 4→3 point (settings-tab badge) | (deferred) | — | ⏸ pending |
+| 10 | Visibility 4→3 point (settings-tab badge) | (deferred) | (this commit) | ✅ GREEN |
 
-**Status snapshot (last update: 2026-05-23):** 9/10 groups GREEN.
-Group 9 deleted the commit-templates module entirely; commit
-messages are now hardcoded via `formatX` helpers in
-src/sync2/commit-message.ts. Settings UI commit-template input is
-gone; only the device label remains user-tunable. Sync2Manager's
-`commitMessage` dep is removed.
+**Status snapshot (last update: 2026-05-23):** **10/10 groups GREEN.**
+Stage 13 Phase 4 main scope is complete. Group 10 removed the
+settings-tab "Pending conflicts" header + record list per the
+Decision #21 revision; visibility now lives in three surfaces
+(status bar, pre-sync modal, ribbon badge) — settings tab no
+longer carries conflict UI.
 
 Test suite state: 501 passed + 2 todo, 0 RED.
 
-Remaining Phase 4 work: Group 10 (settings-tab badge cleanup), plus
-the Group 4 migration follow-on (refactor atomicWriteFile /
-ConflictStore.create to use `stagingPathFor`, unlock N9/N9b
-SHA-verify todos).
+Remaining follow-on work (NOT in the main 10-group scope; deferred
+to future commits): Group 4 migration follow-on (refactor
+atomicWriteFile / ConflictStore.create to use `stagingPathFor`,
+unlock N9/N9b SHA-verify todos) + Group 9 follow-on (drop
+`commitMessage` field from EnqueueMeta / writeMeta / readMeta).
 
 **Discipline:**
 - Write tests against the **Phase 4 API surface** (locked via stubs in
@@ -2004,7 +2005,7 @@ Existing `gitignore-invariants.test.ts` likely needs minor REWRITE if it asserte
 - `push-queue.test.ts` parts that assert on commit message format
 - Integration tests that check commit messages on GitHub (L1, L4 — may need REWRITE per `accumulateOfflineSyncs` audit)
 
-### Phase 4 Group 10 — Visibility 4→3 point
+### Phase 4 Group 10 — Visibility 4→3 point ✅
 
 **RED test to land:**
 - (No new test — UI change, settings tab badge removed)
