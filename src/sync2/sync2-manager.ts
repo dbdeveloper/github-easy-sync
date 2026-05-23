@@ -1754,20 +1754,20 @@ export class Sync2Manager {
       // bootstrapIfNeeded short-circuits in O(1) when
       // lastSyncCommitSha !== null, so the click-path callers pay
       // nothing for this defensive call.
-      // Pseudo-merge stage 9: pause ConflictWatcher events for the
-      // whole drain window. Obsidian events are NOT buffered while
-      // paused (PSEUDO-MERGE-MODE.md §"Архітектура push") — that's
-      // fine because the drain-start + drain-end sweeps below
-      // re-evaluate ConflictStore vs file-system state, which
-      // catches drift regardless of whether vault events fired.
-      this.conflictWatcher?.pause();
-
-      // Drain-start sweep: catches drift that happened OUTSIDE drain
-      // since the last sweep — external mods (iCloud/file-manager
-      // edits), plugin toggle off→on windows, mobile suspension
-      // where vault.on doesn't fire reliably. Per spec the sweep is
-      // a safety net even when ConflictWatcher is wired.
-      if (this.conflictStore) {
+      // Stage 13 drain-start sweep — the ONLY point of state
+      // mutation for conflict resolution (PSEUDO-MERGE-MODE.md
+      // §"Архітектура push: split-push у processBatch (β)").
+      //
+      // ConflictWatcher no longer needs pause/resume: under Stage 13
+      // it's a counter-only listener that calls
+      // `counter.markDirty()`, never mutates the store. Drain owns
+      // all store mutations.
+      //
+      // The guard `if (store.records.length > 0)` is the 90%-case
+      // optimization (Decision #26): on a clean device with no
+      // active conflicts, drain skips the sweep entirely — its
+      // latency stays at parity with 2.0.0-beta.
+      if (this.conflictStore && this.conflictStore.getAll().length > 0) {
         await evaluateConflictState(
           this.conflictStore,
           this.vault,
@@ -1808,23 +1808,14 @@ export class Sync2Manager {
         );
         pushedAnyBatch = true;
       }
-      // Drain-end sweep (pseudo-merge stage 9). Catches state that
-      // changed DURING drain:
-      //   - our own sibling writes (registerConflictAndDropPath fired
-      //     during reconcile or applyRemoteAddOrModify) — those
-      //     vault.on events fire while ConflictWatcher is paused and
-      //     get effectively dropped; the sweep re-discovers the
-      //     state via fs scan.
-      //   - user's mid-drain actions on conflict files (delete
-      //     sibling, copy onto base, edit base) — these can resolve
-      //     conflicts inline so finalize fires in the same drain.
-      if (this.conflictStore) {
-        await evaluateConflictState(
-          this.conflictStore,
-          this.vault,
-          this.now,
-        );
-      }
+      // Stage 13: drain-end sweep removed. Listeners are read-only,
+      // so the pre-Stage-13 "events queued during pause, recovered at
+      // drain-end" pattern no longer applies. State that changed
+      // DURING drain (sibling writes from our own conflict
+      // registration, user mid-drain edits) is picked up at the
+      // start of the NEXT drain — accepted latency trade-off for the
+      // simpler model (PSEUDO-MERGE-MODE.md §"Архітектура push").
+      //
       // Conflict-branch finalize hook (pseudo-merge stage 7b). Runs
       // once per drain when the queue is empty: if the active
       // conflict-branch state holds AND every record in the
@@ -1866,10 +1857,8 @@ export class Sync2Manager {
       }
     } finally {
       this.running = false;
-      // Resume ConflictWatcher unconditionally — even on a drain
-      // error the watcher should pick up subsequent vault events
-      // (the next sync will re-evaluate).
-      this.conflictWatcher?.resume();
+      // Stage 13: no resume — listener is read-only and was never
+      // paused. Drain doesn't own the listener lifecycle.
     }
   }
 

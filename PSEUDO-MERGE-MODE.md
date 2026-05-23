@@ -1863,24 +1863,27 @@ in the Stage 13 pivot notice).
 | 3 | ConflictStore.load drops auto-restore | `eb98843` | `3c59969` | ✅ GREEN |
 | 4 | `.sync-bak` pre-suffix `stagingPathFor` | `461da2e` | (this commit) | ✅ GREEN (algorithm); ⏸ migration of `atomicWriteFile` + `ConflictStore.create` staging is follow-on work |
 | 5 | ConflictCounter (dirty-flag + subscribers) | `6b3c4ee` | `2da64ff` | ✅ GREEN |
-| 6 | Drain wiring (drop drain-end sweep, guard) | (no NEW tests) | — | ⏸ pending |
+| 6 | Drain wiring + ConflictCounter wire-up | (REWRITEs in unit suite) | (this commit) | ✅ GREEN |
 | 7 | Filesystem-orphan adoption at create | `dc5d0e2` | `d1af154` | ✅ GREEN |
 | 8 | GitignoreInvariants always-write | `dc5d0e2` | (this commit) | ✅ GREEN |
 | 9 | Commit-template removal (Decision #36) | (deferred) | — | ⏸ pending |
 | 10 | Visibility 4→3 point (settings-tab badge) | (deferred) | — | ⏸ pending |
 
-**Status snapshot (last update: 2026-05-23):** 7/10 groups GREEN
-(Group 4 algorithm landed; the larger migration of atomicWriteFile +
-ConflictStore.create staging to use `stagingPathFor` is follow-on
-work tracked separately). **All RED tests turned GREEN.**
-Test suite state: 533 passed + 2 todo, 0 RED. The 2 todo placeholders
-are N9/N9b (SHA-verify recovery during AtomicWriteRecovery.sweep) —
-they unlock once `ConflictStore.create` migrates to vault-level
-`.sync-bak` staging.
+**Status snapshot (last update: 2026-05-23):** 8/10 groups GREEN.
+Group 6 (drain wiring + ConflictCounter wire-up) turned the new
+counter architecture from dark code into live production: the
+counter is constructed in main.ts onload, the watcher is now
+counter-only (no store mutation, no eval calls), drain dropped
+pause/resume and the drain-end sweep, and the UI badge reads
+counter.getValue() with subscribe-driven refresh. The 2026-05-21
+race-condition class is now actually fixed in production paths.
 
-Remaining Phase 4 work: Group 6 (drain wiring REWRITEs), Group 9
-(commit-template removal), Group 10 (settings-tab badge cleanup),
-plus the `stagingPathFor` migration of atomicWriteFile / ConflictStore.
+Test suite state: 528 passed + 2 todo, 0 RED.
+
+Remaining Phase 4 work: Group 9 (commit-template removal), Group 10
+(settings-tab badge cleanup), plus the Group 4 migration follow-on
+(refactor atomicWriteFile / ConflictStore.create to use
+`stagingPathFor`, unlock N9/N9b SHA-verify todos).
 
 **Discipline:**
 - Write tests against the **Phase 4 API surface** (locked via stubs in
@@ -1965,7 +1968,7 @@ exercise.
 
 **Bail-out flag resolved here:** `conflict-watcher.test.ts:373` (onError) decided before delete. If counter recompute can throw, add a small replacement test for that.
 
-### Phase 4 Group 6 — Drain wiring (drop drain-end sweep, add guard)
+### Phase 4 Group 6 — Drain wiring (drop drain-end sweep, add guard) ✅
 
 **RED tests to land:**
 - (Mostly integration coverage — many existing tests already exercise drain implicitly)

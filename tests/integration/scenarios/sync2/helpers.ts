@@ -28,6 +28,7 @@ import PushQueue from "../../../../src/sync2/push-queue";
 import TreeBuilder from "../../../../src/sync2/tree-builder";
 import ConflictStore from "../../../../src/sync2/conflict-store";
 import { ConflictWatcher } from "../../../../src/sync2/conflict-watcher";
+import { ConflictCounter } from "../../../../src/sync2/conflict-counter";
 import {
   GitHubSyncSettings,
   DEFAULT_SETTINGS,
@@ -152,13 +153,17 @@ export async function createSync2Client(
     selfPluginId: SELF_PLUGIN_ID,
   });
   await conflictStore.load();
-  // ConflictWatcher — opt-in for tests that want to drive
-  // real-time vault events. Started by default so drain's pause/
-  // resume cycle runs through. Tests that want to disable the
-  // real-time watcher can call .stop() before fixturing.
+  // Stage 13 wire-up: ConflictCounter + counter-only ConflictWatcher.
+  // The watcher's only side effect is `counter.markDirty()` on
+  // relevant vault events. Production main.ts wires identically.
+  const conflictCounter = new ConflictCounter({
+    vault,
+    store: conflictStore,
+  });
   const conflictWatcher = new ConflictWatcher({
     vault,
     store: conflictStore,
+    counter: conflictCounter,
   });
   conflictWatcher.start();
 

@@ -23,6 +23,7 @@ import GitignoreInvariants from "./sync2/gitignore-invariants";
 import { Sync2Manager } from "./sync2/sync2-manager";
 import { IntervalScheduler } from "./sync2/interval-scheduler";
 import ConflictStore from "./sync2/conflict-store";
+import { ConflictCounter } from "./sync2/conflict-counter";
 import { ConflictWatcher } from "./sync2/conflict-watcher";
 import { ConflictStatusIndicator } from "./sync2/views/conflict-status-indicator";
 import { PreSyncConflictModal } from "./sync2/views/pre-sync-conflict-modal";
@@ -44,6 +45,7 @@ export default class GitHubSyncPlugin extends Plugin {
   sync2Manager!: Sync2Manager;
   conflictStore!: ConflictStore;
   conflictWatcher!: ConflictWatcher;
+  conflictCounter!: ConflictCounter;
   logger!: Logger;
   // Exposed for the settings tab's "Push plugins data.json" toggle,
   // which reads/writes the allow line directly via this owner.
@@ -321,21 +323,26 @@ export default class GitHubSyncPlugin extends Plugin {
     });
     await conflictStore.load();
     this.conflictStore = conflictStore;
-    // Pseudo-merge stage 9: real-time vault listener that fires the
-    // classifier on delete/modify/rename events touching either a
-    // conflict's base path or its sibling. Drain pauses it during
-    // the batch loop; outside drain it picks up the user's actions
-    // (delete sibling, copy onto base, etc.) immediately so the
-    // status bar / UI surfaces stay live.
+    // Stage 13 wire-up (PSEUDO-MERGE-MODE.md §"Counter formula +
+    // vault.on listeners role"): ConflictCounter owns the count
+    // formula + debounced recompute; ConflictWatcher just calls
+    // counter.markDirty() on relevant vault events; the counter
+    // notifies UI surfaces via subscribe().
+    const conflictCounter = new ConflictCounter({
+      vault: this.app.vault,
+      store: conflictStore,
+    });
+    conflictCounter.subscribe(() => this.refreshConflictUI());
+    this.conflictCounter = conflictCounter;
+    // Seed the counter with whatever conflicts persisted from the
+    // last session. markDirty + flush so the UI badge reflects
+    // current state on first paint.
+    conflictCounter.markDirty();
+    await conflictCounter.flush();
     const conflictWatcher = new ConflictWatcher({
       vault: this.app.vault,
       store: conflictStore,
-      onError: (err) =>
-        void this.logger.error("ConflictWatcher error", `${err}`),
-      // Stage 10 — every watcher-triggered classifier sweep refreshes
-      // the 4 visibility surfaces. Cheap on a clean device (zero
-      // conflicts → 0-cost refresh that just hides the indicator).
-      onResolution: () => this.refreshConflictUI(),
+      counter: conflictCounter,
     });
     conflictWatcher.start();
     this.conflictWatcher = conflictWatcher;
@@ -451,7 +458,12 @@ export default class GitHubSyncPlugin extends Plugin {
     } catch (err) {
       new Notice(`Error syncing. ${err}`);
     }
-    this.refreshConflictUI();
+    // Drain may have mutated ConflictStore (Phase A SHA-match
+    // cleanup, Phase B path-close drops) without firing the vault
+    // listeners that normally drive the counter. Mark dirty so the
+    // counter recomputes and the subscribe → refreshConflictUI()
+    // path fires when the badge value actually changes.
+    this.conflictCounter?.markDirty();
   }
 
   // Background drain — entry point for the interval timer when
@@ -483,7 +495,8 @@ export default class GitHubSyncPlugin extends Plugin {
     } catch (err) {
       new Notice(`Error syncing. ${err}`);
     }
-    this.refreshConflictUI();
+    // See markDirty rationale in sync() above.
+    this.conflictCounter?.markDirty();
   }
 
   // ── stage 10 — pre-sync conflict gate + UI refresh ──────────────────
@@ -523,11 +536,13 @@ export default class GitHubSyncPlugin extends Plugin {
   }
 
   // Refresh every visibility surface (status bar, ribbon badge,
-  // settings tab) from the current ConflictStore count. Cheap —
-  // counts records and updates DOM only when count crosses zero or
-  // changes magnitude.
+  // settings tab) from the current ConflictCounter value. The
+  // counter applies the Stage 13 formula (excludes records with
+  // !siblingExists and records where siblingSha == baseSha) so the
+  // UI badge reflects what the user actually still has to resolve,
+  // not the raw record count.
   refreshConflictUI(): void {
-    const count = this.conflictStore?.getAll().length ?? 0;
+    const count = this.conflictCounter?.getValue() ?? 0;
     this.conflictStatusIndicator?.refresh(count);
     this.refreshRibbonConflictBadge(count);
   }
