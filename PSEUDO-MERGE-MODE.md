@@ -1869,23 +1869,17 @@ in the Stage 13 pivot notice).
 | 9 | Commit-template removal (Decision #36) | (deferred) | (this commit) | ✅ GREEN |
 | 10 | Visibility 4→3 point (settings-tab badge) | (deferred) | (this commit) | ✅ GREEN |
 
-**Status snapshot (last update: 2026-05-23):** **10/10 groups GREEN
-+ Group 9 follow-on complete + Group 4 atomic-write migration
-complete.** `atomicWriteFile`, `AtomicWriteRecovery.sweep`, and the
-gitignore patterns now use the Stage 13 pre-suffix `.sync-bak` /
-`.sync-tmp` shape via `stagingPathFor` / `parseStagingPath`. Staging
-files like `note.sync-bak.md` stay visible in Obsidian's file
-explorer under "Show all file types: false". Recovery sweep walks
-the vault, recognizes both pre-suffix and suffix forms, and applies
-the existing snapshot-based recovery semantics.
+**Status snapshot (last update: 2026-05-23):** **Stage 13 fully
+complete.** All 10 main groups GREEN + Group 9 follow-on (drop
+meta.json `commitMessage`) + Group 4 migration (atomicWriteFile +
+sweep + gitignore patterns) + ConflictStore migration to vault-level
+`.sync-bak` (drops `sibling-content.bin` backup) + SHA-verify
+wired into `AtomicWriteRecovery.sweep` against
+`record.theirsBlobSha` (N9/N9b activated and GREEN).
 
-Test suite state: 501 passed + 2 todo, 0 RED.
+Test suite state: **503 passed, 0 RED, 0 todo.** Build clean.
 
-Remaining follow-on (smaller scope, deferred): ConflictStore.create
-migration to vault-level `.sync-bak` staging (drops the
-`sibling-content.bin` backup artifact) + wire SHA-verify into
-recovery sweep against `record.theirsBlobSha`. That unlocks the
-2 N9/N9b SHA-verify todos.
+No follow-on work outstanding for Stage 13.
 
 **Discipline:**
 - Write tests against the **Phase 4 API surface** (locked via stubs in

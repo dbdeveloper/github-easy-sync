@@ -197,26 +197,51 @@ export async function atomicWriteFile(
   }
 }
 
-// Crash-recovery sweep for `atomicWriteFile`. Runs on plugin onload
+// Structural view of the ConflictStore dependency used by sweep.
+// Sidesteps the conflict-store.ts ↔ atomic-write.ts circular import
+// (conflict-store imports `stagingPathFor` from this file).
+interface ConflictStoreLike {
+  getBySibling(siblingPath: string): { theirsBlobSha: string } | undefined;
+}
+
+// Crash-recovery sweep for `atomicWriteFile` AND for ConflictStore's
+// vault-level `.sync-bak` sibling staging. Runs on plugin onload
 // BEFORE the engine starts touching the vault — walks the tree for
-// any `*.sync-tmp` and `*.sync-bak` leftovers and reconciles them
-// against the snapshot store. Outcomes:
+// any `.sync-tmp` / `.sync-bak` leftovers and reconciles them
+// against the snapshot + conflict stores.
 //
-//   *.sync-tmp                       → delete (stale write artifact)
-//   *.sync-bak (no <file> exists)    → rename(bak → file) [restore]
-//   *.sync-bak (with <file>):
-//     snapshot.remoteSha === SHA(file) → delete bak [crash 4: write
-//                                       done + recordSync done +
-//                                       cleanup didn't run]
-//     mismatch                       → restore bak [crash 3: write
-//                                       partial OR recordSync didn't
-//                                       run — next sync will re-pull]
+// `.sync-tmp` files: always safe to drop (transient write artifact).
+//
+// `.sync-bak` files: dispatch by ownership. If `conflictStore.
+// getBySibling(finalPath)` returns a record, we treat the staging
+// as a Stage 13 conflict-sibling stage (PSEUDO-MERGE-MODE.md §"Recovery
+// sweep на onload — vault-level `.sync-bak` sweep"):
+//
+//   finalPath exists                         → delete bak [Step 3 done,
+//                                              orphan cleanup]
+//   finalPath missing, SHA(bak) === theirsBlobSha → rename(bak → finalPath)
+//                                              [resume Step 3]
+//   finalPath missing, SHA(bak) ≠ theirsBlobSha   → delete bak (data
+//                                              integrity > resolution
+//                                              completeness; record
+//                                              gets dropped on next
+//                                              drain Phase B)
+//
+// Otherwise (no record owns finalPath) the sweep falls through to the
+// existing snapshot-based atomicWriteFile recovery semantics:
+//
+//   finalPath missing                        → rename(bak → finalPath)
+//                                              [restore]
+//   finalPath exists, snapshot.remoteSha === SHA(file) → delete bak
+//                                              [cleanup race]
+//   mismatch / no snapshot                   → restore bak
 //
 // Returns counts so main.ts can log / surface what was recovered.
 export class AtomicWriteRecovery {
   constructor(
     private readonly vault: Vault,
     private readonly store: SnapshotStore,
+    private readonly conflictStore?: ConflictStoreLike,
   ) {}
 
   async sweep(): Promise<{ cleaned: number; restored: number }> {
@@ -236,9 +261,38 @@ export class AtomicWriteRecovery {
       }
     }
 
-    // 2. .sync-bak: state-driven recovery.
+    // 2. .sync-bak: state-driven recovery. Dispatch by ownership.
     for (const { stagingPath: bakPath, finalPath: originalPath } of syncBaks) {
       try {
+        // Stage 13: ConflictStore owns siblings — record-bound
+        // recovery uses theirsBlobSha as the integrity witness.
+        const conflictRecord = this.conflictStore?.getBySibling(originalPath);
+        if (conflictRecord !== undefined) {
+          const fileExists = await this.vault.adapter.exists(originalPath);
+          if (fileExists) {
+            // Step 3 completed at some point; the staging is stale.
+            await this.vault.adapter.remove(bakPath);
+            cleaned++;
+            continue;
+          }
+          const bytes = await this.vault.adapter.readBinary(bakPath);
+          const sha = await calculateGitBlobSHA(bytes);
+          if (sha === conflictRecord.theirsBlobSha) {
+            // Resume the interrupted Step 3.
+            await this.vault.adapter.rename(bakPath, originalPath);
+            restored++;
+          } else {
+            // SHA mismatch — disk corruption or a stale staging from
+            // some unrelated path that happens to collide. Drop it;
+            // the next drain Phase B drops the record on the missing
+            // sibling.
+            await this.vault.adapter.remove(bakPath);
+            cleaned++;
+          }
+          continue;
+        }
+
+        // Fall-through: atomicWriteFile-style snapshot-based recovery.
         const fileExists = await this.vault.adapter.exists(originalPath);
         if (!fileExists) {
           // Crash between step 2 and step 3: only backup survived.

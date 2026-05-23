@@ -171,15 +171,20 @@ describe("ConflictStore", () => {
   }
 
   describe("create", () => {
-    it("writes meta.json + sibling-content.bin + vault sibling for modify-vs-modify", async () => {
+    it("writes meta.json + vault sibling (no sibling-content.bin under Stage 13) for modify-vs-modify", async () => {
       await f.store.load();
       writeVaultFile(f.root, "Notes/note.md", "local content\n");
       const rec = await f.store.create(baseArgs());
 
       const dir = path.join(f.conflictsRoot, rec.id);
+      // meta.json persisted; tmp atomic-write artifact cleaned.
       expect(fs.existsSync(path.join(dir, "meta.json"))).toBe(true);
-      expect(fs.existsSync(path.join(dir, "sibling-content.bin"))).toBe(true);
       expect(fs.existsSync(path.join(dir, "meta.json.tmp"))).toBe(false);
+      // Stage 13: sibling staging lives in the vault as a `.sync-bak`
+      // pre-suffix file, then atomically renamed to the final
+      // siblingPath. No legacy `sibling-content.bin` backup inside
+      // the recordDir.
+      expect(fs.existsSync(path.join(dir, "sibling-content.bin"))).toBe(false);
       expect(fs.existsSync(path.join(f.root, rec.siblingPath))).toBe(true);
       expect(readVaultText(f.root, rec.siblingPath)).toBe("theirs content\n");
     });
@@ -349,15 +354,18 @@ describe("ConflictStore", () => {
     // backup re-emission is gone. N10 (immediately below) is the
     // new contract.
 
-    it("step-3 done then user externally deletes vault sibling AND backup → record stays indexed", async () => {
-      // Stage 13: load() never resurrects vault content regardless of
-      // backup state. Record loads from meta.json; the missing
-      // sibling becomes a drain Phase B drop signal.
+    it("step-3 done then user externally deletes vault sibling → record stays indexed", async () => {
+      // Stage 13: load() never resurrects vault content. Record loads
+      // from meta.json; the missing sibling becomes a drain Phase B
+      // drop signal. (Pre-Stage-13 also had a `sibling-content.bin`
+      // backup file inside recordDir; that artifact is gone now —
+      // vault-level `.sync-bak` staging is the new mechanism and
+      // it's already been renamed to the final siblingPath by the
+      // time create() returns.)
       await f.store.load();
       writeVaultFile(f.root, "Notes/note.md", "local\n");
       const rec = await f.store.create(baseArgs());
       fs.unlinkSync(path.join(f.root, rec.siblingPath));
-      fs.unlinkSync(path.join(f.conflictsRoot, rec.id, "sibling-content.bin"));
 
       const recoveryStore = new ConflictStore({
         vault: f.vault as unknown as import("obsidian").Vault,

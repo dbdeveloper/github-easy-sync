@@ -369,11 +369,113 @@ describe("stagingPathFor (Stage 13)", () => {
 // against ConflictStore. RED-test ergonomics dictate: file an it.todo
 // placeholder so Phase 4 implementer doesn't miss this. Active
 // assertion lives in the Group 4 implementation commit.
-describe.skip("AtomicWriteRecovery SHA-verify (Stage 13) — Phase 4 wires sweep against ConflictStore", () => {
-  it.todo(
-    "N9: sweep finds .sync-bak with SHA matching record.theirsBlobSha → rename to finalPath",
-  );
-  it.todo(
-    "N9b: sweep finds .sync-bak with SHA NOT matching record.theirsBlobSha → drop, leave record for drain Phase B",
-  );
+describe("AtomicWriteRecovery SHA-verify (Stage 13) — Phase 4 wires sweep against ConflictStore", () => {
+  // Fixture that wires AtomicWriteRecovery against both SnapshotStore
+  // and ConflictStore so sweep can dispatch by ownership. We plant
+  // a ConflictStore record manually (via create + remove final), then
+  // place a `.sync-bak` staging file and exercise the sweep.
+
+  let f: ReturnType<typeof fixture>;
+
+  beforeEach(() => {
+    f = fixture();
+  });
+
+  afterEach(() => {
+    f.cleanup();
+  });
+
+  it("N9: sweep finds .sync-bak with SHA matching record.theirsBlobSha → rename to finalPath", async () => {
+    const { default: ConflictStore } = await import(
+      "../../src/sync2/conflict-store"
+    );
+    const conflictStore = new ConflictStore({
+      vault: f.vault as unknown as import("obsidian").Vault,
+      configDir: ".obsidian",
+      selfPluginId: "github-easy-sync",
+    });
+    await conflictStore.load();
+    // create() lands the sibling at its final path via the new
+    // `.sync-bak` flow. To simulate the Step 3 crash, we need: meta
+    // persisted (record in store), `.sync-bak` content on disk,
+    // final sibling missing.
+    fs.mkdirSync(path.join(f.root, "Notes"), { recursive: true });
+    fs.writeFileSync(path.join(f.root, "Notes/note.md"), "local content\n");
+    const rec = await conflictStore.create({
+      vaultPath: "Notes/note.md",
+      kind: "modify-vs-modify",
+      theirsContent: bytesOf("theirs content\n"),
+      theirsBlobSha: await shaOf("theirs content\n"),
+      oursBlobSha: "ours-sha",
+      baseMtime: null,
+      baseSize: null,
+      baseSha: null,
+      remoteDevice: "Phone",
+    });
+    // Synthesize the mid-Step-3 crash state.
+    const siblingAbs = path.join(f.root, rec.siblingPath);
+    const stagingAbs = path.join(f.root, stagingPathFor(rec.siblingPath, "bak"));
+    fs.renameSync(siblingAbs, stagingAbs);
+    expect(fs.existsSync(siblingAbs)).toBe(false);
+    expect(fs.existsSync(stagingAbs)).toBe(true);
+
+    const recovery = new AtomicWriteRecovery(
+      f.vault as unknown as import("obsidian").Vault,
+      f.store,
+      conflictStore,
+    );
+    const result = await recovery.sweep();
+    expect(result.restored).toBe(1);
+    expect(fs.existsSync(siblingAbs)).toBe(true);
+    expect(fs.existsSync(stagingAbs)).toBe(false);
+    expect(fs.readFileSync(siblingAbs, "utf8")).toBe("theirs content\n");
+  });
+
+  it("N9b: sweep finds .sync-bak with SHA NOT matching record.theirsBlobSha → drop, leave record for drain Phase B", async () => {
+    const { default: ConflictStore } = await import(
+      "../../src/sync2/conflict-store"
+    );
+    const conflictStore = new ConflictStore({
+      vault: f.vault as unknown as import("obsidian").Vault,
+      configDir: ".obsidian",
+      selfPluginId: "github-easy-sync",
+    });
+    await conflictStore.load();
+    fs.mkdirSync(path.join(f.root, "Notes"), { recursive: true });
+    fs.writeFileSync(path.join(f.root, "Notes/note.md"), "local content\n");
+    const rec = await conflictStore.create({
+      vaultPath: "Notes/note.md",
+      kind: "modify-vs-modify",
+      theirsContent: bytesOf("theirs content\n"),
+      theirsBlobSha: await shaOf("theirs content\n"),
+      oursBlobSha: "ours-sha",
+      baseMtime: null,
+      baseSize: null,
+      baseSha: null,
+      remoteDevice: "Phone",
+    });
+    // Synthesize the mid-Step-3 crash, but with CORRUPTED staging
+    // content (SHA differs from record.theirsBlobSha — disk
+    // corruption / race / unrelated staging collision).
+    const siblingAbs = path.join(f.root, rec.siblingPath);
+    const stagingAbs = path.join(f.root, stagingPathFor(rec.siblingPath, "bak"));
+    fs.unlinkSync(siblingAbs);
+    fs.writeFileSync(stagingAbs, "corrupted bytes");
+
+    const recovery = new AtomicWriteRecovery(
+      f.vault as unknown as import("obsidian").Vault,
+      f.store,
+      conflictStore,
+    );
+    const result = await recovery.sweep();
+    // Staging dropped (cleaned), no restore.
+    expect(result.cleaned).toBe(1);
+    expect(result.restored).toBe(0);
+    expect(fs.existsSync(stagingAbs)).toBe(false);
+    // Vault sibling stays missing. Record is still indexed — drain
+    // Phase B drops it on the next sync (out of scope for this
+    // sweep test).
+    expect(fs.existsSync(siblingAbs)).toBe(false);
+    expect(conflictStore.get(rec.id)).toBeDefined();
+  });
 });

@@ -265,17 +265,11 @@ export default class GitHubSyncPlugin extends Plugin {
       lastSyncCommitSha: store.getLastSyncCommitSha(),
       paths: store.paths().length,
     });
-    // Crash-recovery sweep for atomic-write artifacts. Runs BEFORE the
-    // engine starts touching the vault so any *.sync-tmp / *.sync-bak
-    // leftovers from a previous crash are reconciled against the
-    // snapshot before findChanges sees them.
-    try {
-      const recovery = new AtomicWriteRecovery(this.app.vault, store);
-      const result = await recovery.sweep();
-      await this.logger.info("initSync2: AtomicWriteRecovery sweep", result);
-    } catch (err) {
-      await this.logger.error("Atomic-write recovery sweep failed", `${err}`);
-    }
+    // (Stage 13 wire-up: AtomicWriteRecovery sweep moved down to AFTER
+    // ConflictStore.load so the sweep can resolve `.sync-bak` files
+    // owned by conflict records via record.theirsBlobSha SHA-verify,
+    // not just snapshot-based reasoning. See block after conflictStore
+    // construction below.)
     const gi = new GI(vaultRoot);
     const queue = new PushQueue({
       vault: this.app.vault,
@@ -323,6 +317,22 @@ export default class GitHubSyncPlugin extends Plugin {
     });
     await conflictStore.load();
     this.conflictStore = conflictStore;
+    // Crash-recovery sweep for atomic-write artifacts AND for
+    // ConflictStore vault-level `.sync-bak` siblings. Runs BEFORE the
+    // engine starts touching the vault so any leftover staging from a
+    // previous crash is reconciled against the snapshot + conflict
+    // stores before findChanges or drain sees them.
+    try {
+      const recovery = new AtomicWriteRecovery(
+        this.app.vault,
+        store,
+        conflictStore,
+      );
+      const result = await recovery.sweep();
+      await this.logger.info("initSync2: AtomicWriteRecovery sweep", result);
+    } catch (err) {
+      await this.logger.error("Atomic-write recovery sweep failed", `${err}`);
+    }
     // Stage 13 wire-up (PSEUDO-MERGE-MODE.md §"Counter formula +
     // vault.on listeners role"): ConflictCounter owns the count
     // formula + debounced recompute; ConflictWatcher just calls

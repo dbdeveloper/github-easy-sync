@@ -4,6 +4,7 @@
 
 import { Vault } from "obsidian";
 import { calculateGitBlobSHA } from "../utils";
+import { stagingPathFor } from "./atomic-write";
 
 // Pseudo-merge ConflictStore (PSEUDO-MERGE-MODE.md, stage 2).
 //
@@ -29,7 +30,13 @@ import { calculateGitBlobSHA } from "../utils";
 const CONFLICTS_DIRNAME = ".conflicts";
 const META_FILE = "meta.json";
 const META_TMP_FILE = "meta.json.tmp";
-const SIBLING_BACKUP_FILE = "sibling-content.bin";
+// Legacy: pre-Stage-13 ConflictStore wrote a `sibling-content.bin`
+// backup file inside each `<recordDir>` for crash recovery. Stage 13
+// uses vault-level `.sync-bak` staging instead (see create() below)
+// and load() no longer consults the backup at all. Old install dirs
+// may still carry a `sibling-content.bin` artifact; it's harmless
+// dead weight and gets removed by `delete()` along with the rest of
+// the recordDir.
 
 // Two kinds: modify-vs-modify (both sides edited) and delete-vs-modify
 // (local deleted, remote modified). The third theoretical kind —
@@ -251,21 +258,32 @@ export default class ConflictStore {
     const siblingSha = orphan?.sha ?? (await calculateGitBlobSHA(args.theirsContent));
 
     const recordDir = `${this.conflictsRoot}/${id}`;
+    const stagingPath = stagingPathFor(siblingPath, "bak");
 
-    // ── Step 1 ─────────────────────────────────────────────────────
-    // recordDir + sibling-content.bin. Always raw bytes; recovery
-    // code can branch purely on existence checks.
+    // Stage 13 (Decision #29): vault-level `.sync-bak` staging
+    // replaces the legacy `<recordDir>/sibling-content.bin` backup.
+    // 3-step protocol per PSEUDO-MERGE-MODE.md §"3-step atomic
+    // create protocol":
+    //
+    //   1. writeBinary(<sibling>.sync-bak.<ext>, theirsContent)
+    //   2. atomic write meta.json (via persistRecord — tmp + rename)
+    //   3. atomic rename staging → siblingPath
+    //
+    // Adoption skips Steps 1 + 3: the sibling file already lives at
+    // siblingPath, no need to stage or rename.
+
+    // ── Step 1: stage content (skip for adoption) ──────────────────
     await this.ensureDir(this.conflictsRoot);
     await this.ensureDir(recordDir);
-    await this.vault.adapter.writeBinary(
-      `${recordDir}/${SIBLING_BACKUP_FILE}`,
-      args.theirsContent,
-    );
+    if (!orphan) {
+      await this.ensureParentDir(stagingPath);
+      await this.vault.adapter.writeBinary(stagingPath, args.theirsContent);
+    }
 
-    // ── Step 2 ─────────────────────────────────────────────────────
+    // ── Step 2: persist meta.json ──────────────────────────────────
     // Build the record. siblingMtime/Size get final values in step 3
-    // after the vault write lands; for now we seed with the size of
-    // the bytes we just wrote.
+    // after the rename lands; for now we seed with the size of the
+    // bytes we just wrote.
     const record: ConflictRecord = {
       id,
       vaultPath: args.vaultPath,
@@ -285,14 +303,16 @@ export default class ConflictStore {
     };
     await this.persistRecord(recordDir, record);
 
-    // ── Step 3 ─────────────────────────────────────────────────────
-    // Vault sibling. Raw bytes — no canonicalization (sibling is not
-    // user-authored content; user resolves manually).
-    // Adopted orphan: file is already on disk; SHA already matched
-    // theirsBlobSha so the bytes are correct. Skip the write.
+    // ── Step 3: atomic rename staging → siblingPath (skip for adoption)
     if (!orphan) {
-      await this.ensureParentDir(siblingPath);
-      await this.vault.adapter.writeBinary(siblingPath, args.theirsContent);
+      // Capacitor's rename throws on existing destination — clean any
+      // stale file (e.g., the orphan-adoption path was checked but a
+      // bytes-identical sibling appeared between then and now) before
+      // rename. Cross-platform-safe.
+      if (await this.vault.adapter.exists(siblingPath)) {
+        await this.vault.adapter.remove(siblingPath);
+      }
+      await this.vault.adapter.rename(stagingPath, siblingPath);
     }
 
     // Index the record NOW, before the optional stat refresh. If the
@@ -397,18 +417,8 @@ export default class ConflictStore {
     return next;
   }
 
-  // Read raw bytes of the sibling backup. classifier uses
-  // this when it needs the original theirs content (e.g., to write
-  // back over the base as part of "accept theirs" resolution before
-  // we can drop the backup).
-  async readSiblingBackup(id: string): Promise<ArrayBuffer | null> {
-    const backupPath = `${this.conflictsRoot}/${id}/${SIBLING_BACKUP_FILE}`;
-    if (!(await this.vault.adapter.exists(backupPath))) return null;
-    return await this.vault.adapter.readBinary(backupPath);
-  }
-
-  // Remove a record and its on-disk footprint (recordDir +
-  // sibling-content.bin). Does NOT remove the vault sibling — the
+  // Remove a record and its on-disk footprint (recordDir). Does
+  // NOT remove the vault sibling — the
   // classifier the classifierdecides whether the sibling should stay
   // (case 4 user copied content over → leave vault sibling for user
   // to clean up; case 1 user already deleted sibling → no-op).
