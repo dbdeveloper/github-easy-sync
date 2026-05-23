@@ -1866,24 +1866,22 @@ in the Stage 13 pivot notice).
 | 6 | Drain wiring + ConflictCounter wire-up | (REWRITEs in unit suite) | (this commit) | ✅ GREEN |
 | 7 | Filesystem-orphan adoption at create | `dc5d0e2` | `d1af154` | ✅ GREEN |
 | 8 | GitignoreInvariants always-write | `dc5d0e2` | (this commit) | ✅ GREEN |
-| 9 | Commit-template removal (Decision #36) | (deferred) | — | ⏸ pending |
+| 9 | Commit-template removal (Decision #36) | (deferred) | (this commit) | ✅ GREEN |
 | 10 | Visibility 4→3 point (settings-tab badge) | (deferred) | — | ⏸ pending |
 
-**Status snapshot (last update: 2026-05-23):** 8/10 groups GREEN.
-Group 6 (drain wiring + ConflictCounter wire-up) turned the new
-counter architecture from dark code into live production: the
-counter is constructed in main.ts onload, the watcher is now
-counter-only (no store mutation, no eval calls), drain dropped
-pause/resume and the drain-end sweep, and the UI badge reads
-counter.getValue() with subscribe-driven refresh. The 2026-05-21
-race-condition class is now actually fixed in production paths.
+**Status snapshot (last update: 2026-05-23):** 9/10 groups GREEN.
+Group 9 deleted the commit-templates module entirely; commit
+messages are now hardcoded via `formatX` helpers in
+src/sync2/commit-message.ts. Settings UI commit-template input is
+gone; only the device label remains user-tunable. Sync2Manager's
+`commitMessage` dep is removed.
 
-Test suite state: 528 passed + 2 todo, 0 RED.
+Test suite state: 501 passed + 2 todo, 0 RED.
 
-Remaining Phase 4 work: Group 9 (commit-template removal), Group 10
-(settings-tab badge cleanup), plus the Group 4 migration follow-on
-(refactor atomicWriteFile / ConflictStore.create to use
-`stagingPathFor`, unlock N9/N9b SHA-verify todos).
+Remaining Phase 4 work: Group 10 (settings-tab badge cleanup), plus
+the Group 4 migration follow-on (refactor atomicWriteFile /
+ConflictStore.create to use `stagingPathFor`, unlock N9/N9b
+SHA-verify todos).
 
 **Discipline:**
 - Write tests against the **Phase 4 API surface** (locked via stubs in
@@ -1994,7 +1992,7 @@ No existing tests touched.
 
 Existing `gitignore-invariants.test.ts` likely needs minor REWRITE if it asserted on short-circuit behavior — check during Phase 3.
 
-### Phase 4 Group 9 — Commit-template removal (biggest scope)
+### Phase 4 Group 9 — Commit-template removal (biggest scope) ✅
 
 **RED test to land:**
 - N16: `Commit messages: hardcoded "sync ({deviceLabel})" / "resolve conflict ({deviceLabel})" — no template substitution`

@@ -14,10 +14,7 @@ import {
 import GitHubSyncPlugin from "src/main";
 import { logFileNameFor } from "src/logger";
 import type SnapshotStore from "src/sync2/snapshot-store";
-import {
-  applyTemplate,
-  appendDeviceSuffix,
-} from "src/sync2/commit-templates";
+import { formatSyncMessage } from "src/sync2/commit-message";
 import manifest from "../../manifest.json";
 
 // Sync2-only settings tab. Mirrors the shape of GitHubSyncSettings —
@@ -347,24 +344,16 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     new Setting(containerEl).setName("Sync").setHeading();
 
     // Both commit-message inputs render a live preview directly
-    // underneath. The preview substitutes example values for each
-    // placeholder and appends the device suffix exactly as the
-    // sync engine would on push, so the user sees on-GitHub shape
-    // as they type. References captured in `previews` so the
-    // device-label input can also nudge them when label changes.
-    const previewSamples = {
-      date: new Date(),
-    };
+    // Stage 13: commit-message template input removed (Decision #36).
+    // Hardcoded formats live in src/sync2/commit-message.ts. The
+    // device label is the only user-tunable component now — it
+    // appears as the trailing " (label)" suffix on every sync2
+    // commit. Preview shows the user what that looks like.
     const previews: Array<() => void> = [];
-    const renderPreview = (template: string): string => {
-      const base = applyTemplate(template, previewSamples);
-      return appendDeviceSuffix(
-        base,
-        this.plugin.settings.deviceLabel ?? "Obsidian",
-      );
-    };
+    const renderDeviceLabelPreview = (): string =>
+      formatSyncMessage(this.plugin.settings.deviceLabel ?? "Obsidian");
 
-    new Setting(containerEl)
+    const deviceLabelSetting = new Setting(containerEl)
       .setName("Device label")
       .setDesc(
         "Label for this machine. Baked into commit messages as a trailing " +
@@ -377,11 +366,15 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.deviceLabel = value.trim() || "Obsidian";
             await this.plugin.saveSettings();
-            // Refresh the commit-message preview — the trailing
-            // suffix changed.
             for (const refresh of previews) refresh();
           }),
       );
+    const deviceLabelPreview = makePreviewElement(deviceLabelSetting.infoEl);
+    const updateDeviceLabelPreview = (): void => {
+      deviceLabelPreview.setText(`Sync commit example: "${renderDeviceLabelPreview()}"`);
+    };
+    updateDeviceLabelPreview();
+    previews.push(updateDeviceLabelPreview);
 
     // ── Sync strategy ───────────────────────────────────────────────
     const syncStrategies = {
@@ -460,40 +453,10 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           });
       });
 
-    // ── Commit message ──────────────────────────────────────────────
-    // One unified template — pseudo-merge's split-push +
-    // accumulate-offline-syncs mean a commit's content may include
-    // more than the file the user clicked Sync on, so a per-file
-    // template would mislead. {filename}/{path} placeholders are
-    // gone for the same reason.
-    const messageDefault = "Sync at {date} {time}";
-    const messageSetting = new Setting(containerEl)
-      .setName("Commit message")
-      .setDesc(
-        "Template used on every commit (single file or whole-vault). " +
-          "Placeholders: {date} (YYYY-MM-DD), {time} (HH:MM:SS.ccc). " +
-          'A " (deviceLabel)" suffix is appended automatically.',
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder(messageDefault)
-          .setValue(this.plugin.settings.commitMessage ?? messageDefault)
-          .onChange(async (value) => {
-            this.plugin.settings.commitMessage =
-              value.trim() || messageDefault;
-            await this.plugin.saveSettings();
-            updateMessagePreview();
-          }),
-      );
-    // Mount preview INSIDE the setting row's info column so it stays
-    // visually attached to the input.
-    const messagePreview = makePreviewElement(messageSetting.infoEl);
-    const updateMessagePreview = (): void => {
-      const tpl = this.plugin.settings.commitMessage ?? messageDefault;
-      messagePreview.setText(`Preview: "${renderPreview(tpl)}"`);
-    };
-    updateMessagePreview();
-    previews.push(updateMessagePreview);
+    // Stage 13 (Decision #36): the "Commit message" template input
+    // is gone. Commit messages are hardcoded — see
+    // src/sync2/commit-message.ts. Device label above is the only
+    // user-tunable component of every sync2 commit.
 
     new Setting(containerEl)
       .setName("Auto-canonicalize text files")

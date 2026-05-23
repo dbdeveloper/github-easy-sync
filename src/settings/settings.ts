@@ -41,15 +41,10 @@ export interface GitHubSyncSettings {
 
   enableLogging: boolean;
 
-  // Unified commit-message template — drives both whole-vault and
-  // single-file sync commits. Placeholders: {date}, {time}. The
-  // deviceLabel is appended as a fixed " (label)" suffix
-  // automatically (see commit-templates.ts → appendDeviceSuffix).
-  // {filename}/{path} are NOT supported: accumulate-offline-syncs
-  // and pseudo-merge's split-push mean a commit's content can
-  // include more than the file the user clicked Sync on, so a
-  // file-specific template would mislead.
-  commitMessage?: string;
+  // Stage 13 (Decision #36): the `commitMessage` template field is
+  // gone. Commit messages are hardcoded via formatX helpers in
+  // src/sync2/commit-message.ts. The only user-tunable component of
+  // a sync2 commit is `deviceLabel` below (the trailing suffix).
 
   // When sync2 is offline (last push failed) and this is true,
   // subsequent Sync clicks fold into the latest pending batch
@@ -119,7 +114,6 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   showStatusBarItem: true,
   showSyncRibbonButton: true,
   enableLogging: false,
-  commitMessage: "Sync at {date} {time}",
   accumulateOfflineSyncs: false,
   deviceLabel: "Obsidian",
   syncConfigDir: false,

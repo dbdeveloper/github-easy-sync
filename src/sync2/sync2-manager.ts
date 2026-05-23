@@ -20,11 +20,12 @@ import SnapshotStore, { RemoteIdentity } from "./snapshot-store";
 import TreeBuilder from "./tree-builder";
 import { isAtomicPluginFile, pluginRootOf, readPluginVersion } from "./plugin-js";
 import {
-  applyTemplate,
-  appendDeviceSuffix,
-  DEFAULT_INIT_COMMIT_MESSAGE,
+  formatSyncMessage,
+  formatConflictMessage,
+  formatMergeConflictBranchMessage,
+  formatInitMessage,
   parseDeviceSuffix,
-} from "./commit-templates";
+} from "./commit-message";
 import ConflictStore, { ConflictKind } from "./conflict-store";
 import {
   attemptAutoMerge,
@@ -202,14 +203,9 @@ export interface Sync2ManagerDeps {
   invariants?: GitignoreInvariants;
   configDir: string;
   selfPluginId: string;
-  // Templates with `{date}` / `{filename}` / `{path}` placeholders.
-  // Accept string OR getter so callers that read live from settings
-  // can pass a closure; the manager re-reads on every use, so a
-  // settings-tab edit propagates without rebuilding the manager.
-  commitMessage: string | (() => string);
   // Per-device label appended to every commit message as a fixed
   // " (label)" suffix and recorded in conflict-store metadata. One
-  // setting drives both surfaces — see commit-templates.ts /
+  // setting drives both surfaces — see commit-message.ts /
   // conflict-store.ts for the consumers. Live-readable for the same
   // reason as the templates above.
   deviceLabel: string | (() => string);
@@ -296,7 +292,6 @@ export class Sync2Manager {
   private readonly invariants: GitignoreInvariants | undefined;
   private readonly configDir: string;
   private readonly selfPluginId: string;
-  private readonly commitMessage: () => string;
   private readonly deviceLabel: () => string;
   private readonly conflictStore: ConflictStore | undefined;
   private readonly conflictWatcher: ConflictWatcher | undefined;
@@ -336,10 +331,6 @@ export class Sync2Manager {
     this.invariants = deps.invariants;
     this.configDir = deps.configDir;
     this.selfPluginId = deps.selfPluginId;
-    this.commitMessage =
-      typeof deps.commitMessage === "function"
-        ? deps.commitMessage
-        : () => deps.commitMessage as string;
     this.deviceLabel =
       typeof deps.deviceLabel === "function"
         ? deps.deviceLabel
@@ -467,14 +458,9 @@ export class Sync2Manager {
         return;
       }
 
-      // Same unified template as syncAll — pseudo-merge's split-push
-      // + accumulate-offline-syncs make per-file commit identity
-      // unreliable. {filename}/{path} placeholders are no longer
-      // supported.
-      const baseMessage = applyTemplate(this.commitMessage(), {
-        date: new Date(this.now()),
-      });
-      const message = appendDeviceSuffix(baseMessage, this.deviceLabel());
+      // Stage 13: hardcoded `sync ({deviceLabel})` format. Templating
+      // gone (Decision #36).
+      const message = formatSyncMessage(this.deviceLabel());
       const enqueued = await this.enqueueOrMerge([change], {
         commitMessage: message,
         parentCommitSha: this.store.getLastSyncCommitSha(),
@@ -1359,7 +1345,11 @@ export class Sync2Manager {
     const branchContent = args.kind === "delete-vs-modify" ? null : await this.readLocalBytesForBranchPush(args.vaultPath);
     await this.pushConflictPathsToBranch(
       [{ path: args.vaultPath, content: branchContent }],
-      `Conflict snapshot: ${args.vaultPath} (${args.kind})`,
+      // Stage 13: hardcoded `conflict ({deviceLabel})` — Decision #36.
+      // Pre-Stage-13 the message embedded the vault path + kind for
+      // debugging; git commit metadata + the branch diff carry the
+      // path now, and `kind` is informational only.
+      formatConflictMessage(this.deviceLabel()),
     );
 
     if (args.fromBatchId === null) return;
@@ -1558,10 +1548,11 @@ export class Sync2Manager {
     });
     const mainTreeSha = mainCommit.tree.sha;
 
-    const message = appendDeviceSuffix(
-      `Merge ${cb.name}`,
-      this.deviceLabel(),
-    );
+    // Stage 13: hardcoded `merge conflict-branch ({deviceLabel})` —
+    // Decision #36. Pre-Stage-13 embedded the branch name; that's
+    // discoverable from the merge-commit's second parent SHA and the
+    // (still-deleted) ref shows up in the Network graph as a tip.
+    const message = formatMergeConflictBranchMessage(this.deviceLabel());
     const mergeCommit = await this.client.createCommit({
       message,
       treeSha: mainTreeSha,
@@ -1686,11 +1677,11 @@ export class Sync2Manager {
     if (this.accumulateOfflineSyncs) {
       const target = await this.queue.mergeIntoLatestPending(changes);
       if (target !== null) {
-        // Refresh the merged batch's commit message to the latest
-        // template render. "Last std-sync in the group wins" — the
-        // timestamp on GitHub then reflects when the batch actually
-        // shipped, not when the first click happened.
-        await this.queue.updateCommitMessage(target, meta.commitMessage);
+        // Stage 13: commit messages are hardcoded so there's no
+        // "template re-render" to refresh on accumulate-merge. The
+        // existing batch's commitMessage already reads
+        // `sync ({deviceLabel})` — same as what `meta` carries —
+        // so no rewrite needed.
         return changes.length;
       }
     }
@@ -1699,15 +1690,11 @@ export class Sync2Manager {
   }
 
   private fullSyncMeta(): EnqueueMeta {
-    const base = applyTemplate(this.commitMessage(), {
-      date: new Date(this.now()),
-    });
     return {
-      // Always-trailing " (deviceLabel)" lets a future viewer read
-      // the source-device off any sync2 commit on GitHub regardless
-      // of how the user customized the template.
-      // See commit-templates.ts → appendDeviceSuffix.
-      commitMessage: appendDeviceSuffix(base, this.deviceLabel()),
+      // Stage 13: hardcoded `sync ({deviceLabel})` — Decision #36.
+      // Templating with `{date}` / `{time}` is gone; git commit
+      // metadata (authorDate / committerDate) carries the timestamp.
+      commitMessage: formatSyncMessage(this.deviceLabel()),
       parentCommitSha: this.store.getLastSyncCommitSha(),
       parentTreeSha: this.store.getLastSyncTreeSha(),
     };
@@ -1979,7 +1966,12 @@ export class Sync2Manager {
           }
           await this.pushConflictPathsToBranch(
             branchEntries,
-            `Edit-while-in-conflict: ${conflictPaths.length} path(s)`,
+            // Stage 13: same hardcoded `conflict ({deviceLabel})` as
+            // the initial registration commit on the branch — Decision
+            // #36. The branch log shows a uniform sequence of conflict
+            // commits with no per-commit metadata in the message
+            // itself.
+            formatConflictMessage(this.deviceLabel()),
           );
           for (const p of conflictPaths) {
             await this.queue.removeFile(id, p);
@@ -2119,12 +2111,8 @@ export class Sync2Manager {
     const path = this.invariants?.rootPath ?? ".gitignore";
     const buf = await this.vault.adapter.readBinary(path);
     const content = arrayBufferToBase64(buf);
-    const message = appendDeviceSuffix(
-      applyTemplate(DEFAULT_INIT_COMMIT_MESSAGE, {
-        date: new Date(this.now()),
-      }),
-      this.deviceLabel(),
-    );
+    // Stage 13: hardcoded `init ({deviceLabel})` — Decision #36.
+    const message = formatInitMessage(this.deviceLabel());
     await this.logger.info(`Sync2 seed bare repo`, { path, message });
     const seed = await this.client.createFile({
       path,

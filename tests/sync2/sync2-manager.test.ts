@@ -392,7 +392,6 @@ function fixture(opts?: {
     logger: silentLogger(),
     configDir: CONFIG_DIR,
     selfPluginId: SELF_PLUGIN_ID,
-    commitMessage: "Sync at {date} {time}",
     deviceLabel: "test-device",
     conflictStore: defaultConflictStore,
     accumulateOfflineSyncs: opts?.accumulateOfflineSyncs ?? false,
@@ -494,17 +493,16 @@ describe("Sync2Manager.syncAll — basic flow", () => {
     expect(await f.queue.list()).toEqual([]);
   });
 
-  it("commit message uses the all-sync template with {date}", async () => {
+  it("commit message uses the hardcoded `sync ({deviceLabel})` format", async () => {
     writeVaultFile(f.root, "x.md", "v");
     f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
 
     await f.manager.syncAll();
 
-    // New defaults (legacy 6.5): "Sync at {date} {time}" template + auto-
-    // appended " (deviceLabel)" suffix from appendDeviceSuffix.
-    expect(f.client.state.lastCommit?.message).toBe(
-      "Sync at 2026-05-03 09:38:23.000 (test-device)",
-    );
+    // Stage 13 (Decision #36): templates gone. Every user-driven
+    // sync commit is `sync ({deviceLabel})` — see
+    // src/sync2/commit-message.ts.
+    expect(f.client.state.lastCommit?.message).toBe("sync (test-device)");
   });
 
   it("creates a binary blob first, references its SHA in the tree", async () => {
@@ -718,7 +716,7 @@ describe("Sync2Manager.syncAll — basic flow", () => {
     expect(f.client.calls.filter((c) => c.op === "createCommit")).toEqual([]);
   });
 
-  it("syncFile: pushes a single-file batch with the unified commit message", async () => {
+  it("syncFile: pushes a single-file batch with the hardcoded `sync ({device})` message", async () => {
     writeVaultFile(f.root, "Notes/note.md", "fresh\n");
     f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
 
@@ -726,11 +724,11 @@ describe("Sync2Manager.syncAll — basic flow", () => {
 
     const commits = f.client.calls.filter((c) => c.op === "createCommit");
     expect(commits).toHaveLength(1);
-    // Unified template: "Sync at {date} {time}" + " (test-device)"
-    // suffix appended via appendDeviceSuffix. syncFile no longer
-    // has a separate per-file template.
+    // Stage 13 (Decision #36): syncFile uses the same hardcoded
+    // `sync ({deviceLabel})` format as syncAll — no per-file
+    // templating, no shared template field.
     expect((commits[0].args as { message: string }).message).toBe(
-      "Sync at 2026-05-03 09:38:23.000 (test-device)",
+      "sync (test-device)",
     );
 
     // Tree contains exactly the one file we asked for.
@@ -1625,7 +1623,6 @@ describe("Sync2Manager.syncAll — basic flow", () => {
         logger: silentLogger(),
         configDir: CONFIG_DIR,
         selfPluginId: SELF_PLUGIN_ID,
-        commitMessage: "Sync at {date} {time}",
         deviceLabel: "test-device",
         conflictStore,
         onLocalCommitted: (n) => calls.push(n),

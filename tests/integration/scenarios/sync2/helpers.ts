@@ -178,10 +178,10 @@ export async function createSync2Client(
     invariants,
     configDir: CONFIG_DIR,
     selfPluginId: SELF_PLUGIN_ID,
-    // Pass through live getters so I-series tests can mutate
-    // `settings.deviceLabel` / `settings.commitMessage*` between
-    // syncs and the next push picks up the new value.
-    commitMessage: () => settings.commitMessage ?? "Sync2 test {date}",
+    // Pass through live getter so I-series tests can mutate
+    // `settings.deviceLabel` between syncs and the next push picks
+    // up the new value. Stage 13: no commitMessage template — see
+    // src/sync2/commit-message.ts.
     deviceLabel: () => settings.deviceLabel ?? "sync2-int-test",
     remoteIdentity: () => ({
       owner: settings.githubOwner,

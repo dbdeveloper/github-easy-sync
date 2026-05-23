@@ -358,11 +358,10 @@ export default class GitHubSyncPlugin extends Plugin {
       invariants: this.invariants,
       configDir: this.app.vault.configDir,
       selfPluginId: manifest.id,
-      // Templates + label read live from settings so the user can
-      // change them in the settings tab and the next syncAll picks
-      // up the new value — no plugin reload needed.
-      commitMessage: () =>
-        this.settings.commitMessage ?? "Sync at {date} {time}",
+      // Label read live from settings so the user can change it in
+      // the settings tab and the next sync picks up the new value —
+      // no plugin reload needed. Stage 13: commitMessage template is
+      // gone (Decision #36); messages are hardcoded via commit-message.ts.
       deviceLabel: () => this.settings.deviceLabel ?? "Obsidian",
       // Remote identity read live so the manager catches a mid-session
       // settings change (user edits the repo coords in the settings

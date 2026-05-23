@@ -89,18 +89,5 @@ export type QueueBatch = {
   fileMtimes: Record<string, number>;
 };
 
-// Placeholder substitutions allowed in commit-message templates.
-//
-// {date}/{time} both expand from the same Date instant. There is no
-// {filename}/{path} support — pseudo-merge's split-push + accumulate-
-// offline-syncs mean any commit may include more than the file the
-// user clicked Sync on, so a per-file template would mislead.
-//
-// Note: deviceLabel is intentionally NOT a placeholder. It's appended
-// as a fixed-position trailing " (deviceLabel)" suffix by
-// appendDeviceSuffix() so it lands at a reliable, parseable position
-// regardless of how the user edited their template — the regex
-// /\s\(([^)]+)\)$/ pulls it back out of any commit on GitHub.
-export type CommitMessagePlaceholders = {
-  date?: Date;
-};
+// CommitMessagePlaceholders removed in Stage 13 (Decision #36 —
+// templates gone, hardcoded `formatX` functions in commit-message.ts).
