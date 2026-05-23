@@ -104,10 +104,15 @@ mid-range Android devices without OOM crashes.
   very first sync on a non-empty vault against a non-empty remote)
   never silently overwrites local files: it mtime-checks every
   divergence and keeps local when local is newer.
-- **Polling, not events.** The plugin walks the vault on each sync
-  click instead of subscribing to live events, so edits made while
-  the plugin was disabled are picked up on the next click — no
-  "missed events" failure mode.
+- **Polling, not events — for the sync engine itself.** The plugin
+  walks the vault on each sync click instead of subscribing to live
+  events for sync purposes, so edits made while the plugin was
+  disabled are picked up on the next click — no "missed events"
+  failure mode. Vault event listeners *are* attached, but strictly
+  read-only: they only refresh the pending-conflict counter (status
+  bar 🔀 + ribbon badge) in real time so you see resolution
+  progress immediately as you delete or rename sibling files. They
+  never push, never pull, never mutate sync state.
 - **Click feels instant.** The click path writes the commit batch to
   disk and returns immediately; the network work happens in the
   background. Idle syncs stay silent; only heavy ones show a progress
