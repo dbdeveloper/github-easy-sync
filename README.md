@@ -10,64 +10,41 @@ Version `2.0.1-beta` · AGPL-3.0 · Fork of
 
 ## What's new in 2.0.1-beta
 
-Conflict resolution rebuilt from the ground up. Full design rationale
-in [docs/PSEUDO-MERGE-MODE.md](./docs/PSEUDO-MERGE-MODE.md); the
-practical highlights:
+Conflict resolution rebuilt from the ground up. Full mechanics in
+[§Conflict resolution](#conflict-resolution) below; full design
+rationale in [docs/PSEUDO-MERGE-MODE.md](./docs/PSEUDO-MERGE-MODE.md).
+Headline changes:
 
-- **Resolve conflicts with plain file operations — no plugin UI
-  required.** Every conflict becomes a pair of ordinary files in
-  your vault: the original (your local version) and a sibling
-  (`<note>.conflict-from-<device>-<timestamp>.md`) carrying the
-  remote version. You resolve by managing those files the same way
-  you manage any other file in Obsidian: delete the sibling to keep
-  yours, rename it over the base to accept theirs, edit either or
-  both to produce a hand-merged result. No modal dialogs, no
-  conflict markers leaking into your reading view. *(A dedicated
-  side-by-side diff-edit GUI is planned for the next release. For
-  now, resolution uses only the native Obsidian file operations
-  you already know — file explorer, editor, delete, rename.)*
-- **Keep typing even while a file is in conflict.** Your in-progress
-  edits flow to a private GitHub branch that no other device sees
-  until you finalise the resolution. The conflict doesn't block
-  you, and other devices stay protected from your half-resolved
-  state.
-- **Your full edit history is preserved on GitHub — forever.** Every
-  commit the plugin ever produces — including every iteration made
-  during a conflict-resolution session — remains reachable on the
-  GitHub network graph. Nothing is silently squashed or discarded;
-  months later you can find the merge-commit for any resolved
-  conflict and walk the side-branch to see exactly how you got
-  there.
-- **Auto-merge first.** Text files get a real three-way merge against
-  the last-synced base; only overlapping line edits surface as
-  conflicts. Plugin bundles auto-resolve by semantic version
-  (`manifest.json`'s `version` field), so a plugin update on one
-  device propagates without manual intervention. Binary files
-  always produce a sibling so you can see both versions side by
-  side — no silent overwrites of edited images.
-- **Crash-tolerant atomic writes.** Every disk operation that
-  touches multiple files (writing a sibling, persisting a conflict
-  record, replacing a pulled file) is built on a documented
-  multi-step protocol with a recovery sweep on plugin load. An
-  interruption — mobile OS suspending the app mid-write, laptop
-  losing battery during a push — leaves the vault in either the
-  pre-operation state or the post-operation state, never a
-  half-applied state.
+- **Resolve conflicts with plain file operations.** No modal
+  dialogs, no `<<<<<<<` markers in your notes. Each conflict
+  becomes an ordinary sibling file you handle with delete / rename
+  / edit. *(A dedicated diff-edit GUI is planned for the next
+  release; this release uses only the native Obsidian operations
+  you already know.)*
+- **Keep typing on a conflicted file.** Your in-progress edits
+  flow to a private GitHub branch invisible to other devices until
+  you finalise; the conflict doesn't block you.
+- **Full edit history preserved on GitHub — forever.** Every commit
+  the plugin produces — including every iteration during a
+  conflict-resolution session — stays reachable in the Network
+  graph. Nothing is silently squashed or discarded.
+- **Auto-merge first.** Text three-way merge, plugin-bundle
+  semver, modify-vs-delete favours the modification. Only
+  genuinely irreconcilable cases surface as siblings.
+- **Crash-tolerant atomic writes.** Multi-step disk operations
+  have a documented recovery sweep on plugin load; an interruption
+  leaves the vault in either the pre- or post-state, never
+  half-applied.
 - **Three visibility surfaces for pending conflicts.** Status bar
-  shows `🔀 N`, the ribbon icon carries a count badge, and the next
-  Sync click surfaces a confirmation modal listing exactly which
-  files are still pending. Nothing about a conflict can hide from
-  you.
-- **Multi-file conflict sessions resolve one file at a time.** When
-  several files end up in conflict, each per-file resolution
-  publishes its result to `main` as an ordinary commit; the
-  conflict branch waits in the background and merges back only
-  when the last file is settled.
-- **`Reset` cleanly relabels conflict siblings.** If you wipe the
-  plugin state via the settings-tab `Reset` button, your
-  `*.conflict-from-*` files are renamed to
-  `<file>.unresolved-<original-ts>.<ext>` so they won't collide
-  with a future re-enable.
+  `🔀 N`, ribbon badge, pre-sync confirmation modal listing every
+  pending file.
+- **Multi-file conflict sessions resolve one file at a time.** Each
+  per-file resolution lands on `main` as a regular commit; the
+  conflict branch merges back only when the last file is settled.
+- **`Reset` cleanly relabels siblings.** A wiped plugin state
+  renames `*.conflict-from-*` files to
+  `<file>.unresolved-<original-ts>.<ext>` so a future re-enable
+  starts clean.
 
 ---
 
@@ -88,11 +65,24 @@ mid-range Android devices without OOM crashes.
 
 | Plugin | Engine | Mobile-friendly | Best for |
 |---|---|---|---|
-| **GitHub Easy Sync** (this) | GitHub REST API only | ✅ Large vaults work | Two-way sync without git skills; phones that just need to work |
-| [`obsidian-git`](https://github.com/Vinzent03/obsidian-git) | `isomorphic-git` (or native `git`) | ⚠️ Flaky on large vaults | Full git semantics — branches, rebase, custom hosts |
-| [`github-gitless-sync`](https://github.com/silvanocerza/github-gitless-sync) | GitHub REST API only | ✅ | The original; this plugin is a heavily-refactored fork of it |
-| [`Obsidian-GitHub-Sync`](https://github.com/kevinmkchin/Obsidian-GitHub-Sync) | Bash scripts + `git` | ❌ Desktop only | Simple desktop-only workflows |
-| [`obsidian-github-sync-multi-platform`](https://github.com/thiter/obsidian-github-sync-multi-platform) | Mixed | Partial | Cross-platform attempts with mixed results |
+| **GitHub Easy Sync** (this) | GitHub REST API only | ✅ Large vaults work | Two-way sync without git skills; phones that just need to work; conflicts resolved through plain file operations (no merge markers, no modal dialogs, full edit history preserved). |
+| [`obsidian-git`](https://github.com/Vinzent03/obsidian-git) | `isomorphic-git` (or native `git`) | ⚠️ Flaky on large vaults | Full git semantics — branches, rebase, custom hosts; comfortable users who want native git conflict markers and command-line-level control. |
+| [`github-gitless-sync`](https://github.com/silvanocerza/github-gitless-sync) | GitHub REST API only | ✅ | The original; this plugin is a heavily-refactored fork of it. |
+| [`Obsidian-GitHub-Sync`](https://github.com/kevinmkchin/Obsidian-GitHub-Sync) | Bash scripts + `git` | ❌ Desktop only | Simple desktop-only workflows. |
+| [`obsidian-github-sync-multi-platform`](https://github.com/thiter/obsidian-github-sync-multi-platform) | Mixed | Partial | Cross-platform attempts with mixed results. |
+
+> **The differentiator** is the conflict-resolution model. Other
+> plugins inherit git's native handling: conflict markers
+> (`<<<<<<<` / `=======` / `>>>>>>>`) inserted into the file body,
+> resolved in an editor or terminal. That works on a laptop with a
+> developer at the keyboard; it degrades on mobile, on long-form
+> notes whose preview pane would render the markers as literal
+> text, and on binary files where it doesn't apply at all.
+> GitHub Easy Sync 2.0.1-beta takes a different route — each
+> conflict becomes an ordinary sibling file in the vault, resolved
+> by the file operations every Obsidian user already knows. See
+> [What's new in 2.0.1-beta](#whats-new-in-201-beta) above and
+> [the design rationale](./docs/PSEUDO-MERGE-MODE.md) for details.
 
 ### What this plugin does well
 
@@ -121,7 +111,9 @@ mid-range Android devices without OOM crashes.
   incremental pull, push blob upload, and the find-changes → queue
   bridge. A push interrupted mid-flight (Obsidian closed, phone
   backgrounded, network drop) finishes on the next trigger without
-  duplicating commits.
+  duplicating commits. The conflict-resolution layer adds a
+  matching guarantee for its own multi-step writes — see
+  [What's new in 2.0.1-beta](#whats-new-in-201-beta).
 - **Privacy-conservative defaults.** Plugin `data.json` files
   (which routinely store API tokens) and per-device configs
   (`workspace.json`, `community-plugins.json`) are blocked from
@@ -132,13 +124,18 @@ mid-range Android devices without OOM crashes.
 
 ### What this plugin deliberately doesn't do
 
-- No branches, no merge commits, no rebase, no manual stash. One
-  branch per device, one linear history per repo.
+- No rebase, no manual stash, no force-push UI, no general-purpose
+  branching for user workflows. The plugin creates one private
+  per-device conflict branch when conflicts arise, and merges it
+  back automatically when resolution completes — that's the only
+  branch the user ever sees. `main` stays the only "shared" branch.
 - No non-GitHub hosts (no GitLab, Gitea, Bitbucket, etc.). The REST
   API endpoints are GitHub-specific.
-- No automatic conflict resolution that could lose data — when text
-  files diverge on both sides without a common base, the conflict
-  is surfaced for you to resolve.
+- No silent overwrites on a true conflict. Auto-merge happens when
+  it's safe (text three-way against the last-synced base;
+  plugin-bundle semver), but binary files and overlapping text
+  edits always surface as a sibling file so you see both versions
+  before deciding.
 
 ---
 
@@ -308,6 +305,12 @@ overwrites, no surprise convergence commit.
 > — your edits aren't silently destroyed. Getting step 1 right just
 > means the first sync is a silent no-op instead of a convergence
 > commit, which is the cleanest possible handoff between plugins.
+>
+> If a genuine divergence remains after step 1 — say, both sides
+> edited the same line of the same file — you'll see a `<note>.conflict-from-…md`
+> sibling appear next to the affected file. That's pseudo-merge
+> mode doing its job; see [§Conflict resolution](#conflict-resolution)
+> for what to do with it.
 
 ### 6. Delete the old `.git` directory (optional, recommended on mobile)
 
@@ -411,6 +414,14 @@ reconfiguration needed.
 > reconfigure those mobile plugins by hand — a one-time cost that
 > avoids leaking secrets or overwriting preferences.
 
+> **What happens if both devices changed the same plugin's
+> `data.json` between syncs.** It conflicts like any other file.
+> The plugin writes a sibling next to `data.json` and the affected
+> plugin keeps loading whichever version is at the canonical path;
+> you resolve via [§Conflict resolution](#conflict-resolution).
+> No special handling is needed for config files — they're under
+> the same pseudo-merge model as your notes.
+
 Combined with the empty-vault bootstrap above, this is the fastest
 way to spin up a new device during a migration: empty vault →
 credentials → one Sync click → reload → done.
@@ -419,69 +430,127 @@ credentials → one Sync click → reload → done.
 
 ## Settings reference
 
-### Remote repository
+Settings tab layout matches what you'll see in Obsidian under
+**Settings → GitHub Easy Sync**.
+
+### Remote Repository
 
 - **GitHub token** — fine-grained PAT or classic token with
-  read+write Contents access.
+  read+write Contents access on the repository.
 - **Owner / Repository / Repository branch** — case-sensitive
-  identifiers. The **Test** button verifies all four at once.
+  identifiers.
+- **Test connection** — one-shot read-only probe that verifies all
+  four fields above at once and reports back exactly what's wrong
+  if anything fails (see [Test the connection](#4-test-the-connection)).
 
 ### Sync
 
-- **Device label** — text appended to each commit message
-  (`Sync … (MyMacBook)`). Helps tell which device produced which
-  commit. Also used in conflict-resolution sibling filenames.
-- **Sync strategy** — `Manually` (default) or `On Interval`. Manual
-  means the plugin only acts when you click; Interval polls.
+- **Device label** — text appended to every commit message produced
+  by the plugin, in the lowercase trailing-parenthesis form
+  (`sync (MyMacBook)`, `resolve conflict (MyMacBook)`, etc.). Helps
+  tell which device produced which commit when you have several
+  devices syncing to the same repo. Also used in
+  conflict-resolution sibling filenames
+  (`<note>.conflict-from-MyMacBook-<timestamp>.md`). Default
+  `Obsidian`.
+- **Sync strategy** — `Manually` (default) or `On interval`.
+  *Manually* means the plugin only acts when you click; *on
+  interval* runs a sync automatically every N minutes.
 - **Sync interval** — minutes between automatic syncs when strategy
-  is `On Interval`. Default 5 min.
-- **Sync on startup** — when on, fires one sync when Obsidian
+  is `On interval`. Default 5 min.
+- **Sync on startup** — when on, runs one sync as soon as Obsidian
   finishes loading. Off by default; the plugin is otherwise silent
   on enable.
 - **Auto-commit on interval sync** — governs both interval ticks
-  and the startup pulse. When ON, every tick does a full commit
-  pass (same as a manual click). When OFF (default), ticks only
-  pull and retry pending pushes; your local edits stay
-  uncommitted until you click Sync yourself.
-- **Accumulate offline syncs** — when on, clicks that arrive while
-  a previous push is still in flight are folded into a single
-  larger commit. Off by default (each click is its own commit).
+  and the startup pulse. When **ON**, every tick does a full commit
+  pass (same as a manual click) — your local edits go up
+  automatically. When **OFF** (default), ticks only pull and retry
+  pending pushes; your local edits stay uncommitted until you click
+  Sync yourself.
 - **Auto-canonicalize text files** — when on, text files (`.md`,
-  `.txt`, …) get rewritten locally to LF / no-BOM / trailing-NL
-  on pull and on enqueue. Off by default. Turn it on if you want
+  `.txt`, …) get rewritten locally to LF / no-BOM / trailing-NL on
+  pull and on enqueue. Off by default. Turn on if you want
   canonical text on disk and don't mind a one-commit convergence
   push on first setup against a CRLF-history repo.
-
-### Sync configs
-
-- **Sync configs** — when on, files under `<vault>/.obsidian/` are
-  synced (theme settings, plugin settings, etc.). Off by default;
+- **Accumulate offline syncs into one commit** — when on, Sync
+  clicks that arrive while a previous push is still in flight are
+  folded into a single larger commit. Off by default (each click
+  is its own commit, which preserves more granular history).
+- **Sync configs (Obsidian + plugins)** — when on, files under
+  `<vault>/.obsidian/` are also synced (theme settings, community
+  plugin install state, plugin bundles, etc.). Off by default;
   multi-device users typically don't want one machine's layout
-  overwriting another's.
+  overwriting another's. See
+  [Bonus: cloning plugins](#bonus-cloning-plugins-and-their-settings-to-the-new-device).
+- **Push plugins data.json to GitHub** — when on, the `data.json`
+  files of *other* community plugins are also synced. Off by
+  default — these files frequently store API tokens, account
+  credentials, and license keys. Our own `data.json` is **always**
+  blocked regardless of this toggle. This setting is stored in
+  `<configDir>/.gitignore` rather than per-device data.json, so
+  toggling it on one device propagates to every other device on
+  the next sync (no per-device drift).
 
-### Push plugins data.json
+### Interface
 
-- **Push plugins data.json** — when on, the `data.json` files of
-  other community plugins are also synced. Off by default — these
-  files frequently store API tokens, credentials, and license keys.
-  Our own `data.json` is **always** blocked regardless of this
-  toggle.
-
-### Danger zone
-
-- **Reset plugin state** — wipes credentials, snapshot, push queue,
-  conflict store. Type `RESET` to confirm. Local vault files are
-  not touched. Use after a token leak or for a clean fresh start.
+- **Show status bar item** — shows a `GitHub` indicator in
+  Obsidian's status bar (plus the `🔀 N` conflict counter when
+  there are pending conflicts). On by default.
+- **Show sync ribbon button** — shows a refresh-cw button in the
+  side ribbon that triggers a full sync on click. On by default.
 
 ### Logging
 
 - **Enable logging** — appends every operation to
-  `<vault>/<plugin-id>.log` (e.g. `<vault>/github-easy-sync.log`).
-  Off by default. The log lives at the vault root so you can open
-  it directly in Obsidian. `*.log` is gitignored at the vault root
-  by default — remove that rule if you want the log to sync to
-  GitHub (useful for analysing mobile logs from desktop, but
-  multi-device writes will collide on the same filename).
+  `<vault>/github-easy-sync.log`. Off by default. The log lives at
+  the vault root so you can open it directly in Obsidian. `*.log`
+  is gitignored at the vault root by default — remove that rule if
+  you want the log to sync to GitHub (useful for analysing mobile
+  logs from desktop, but multi-device writes will collide on the
+  same filename).
+- **Clean logs** — truncates the log file to 0 bytes (visible only
+  while logging is on).
+
+### Danger zone
+
+- **Reset plugin** — wipes credentials, snapshot, push queue,
+  conflict store. Type `RESET` to confirm. Local vault files are
+  **not** deleted. Any pending `<note>.conflict-from-*` sibling
+  files are renamed to `<note>.unresolved-<original-timestamp>.<ext>`
+  so they won't collide if you re-enable the plugin later. Use
+  after a suspected token leak or to start clean.
+
+### Settings removed in 2.0.1-beta
+
+A handful of settings present in earlier releases are gone in
+2.0.1-beta. They're listed here so a returning user doesn't waste
+time looking for them:
+
+- **Commit message template** (the field with `{date}`, `{time}`,
+  `{filename}`, `{path}` placeholders) — **removed**. Commit
+  messages are now hardcoded, with `(deviceLabel)` as the only
+  user-tunable part. Five fixed formats: `sync (label)` for a
+  manual sync click, `resolve conflict (label)` when the plugin
+  publishes a closed conflict's content to `main`, `conflict
+  (label)` for intermediate commits on the per-device conflict
+  branch, `final state (label)` for the marker commit immediately
+  before the branch merges back, `merge conflict-branch (label)`
+  for the merge-commit itself, plus `init (label)` for the one-off
+  commit that seeds a brand-new bare repo. Date and time already
+  live in git commit metadata (author / committer timestamps);
+  duplicating them in the message body added no information.
+- **"Sync with GitHub (custom message)…" command** and
+  **"Sync current file with GitHub (custom message)…" command** —
+  **removed**. Same reason as above: hardcoded messages mean
+  there's nothing left to customise per-click. Two commands remain:
+  `Sync with GitHub` and `Sync current file with GitHub`.
+- **Pending-conflicts list in the settings tab** — **removed**.
+  Visibility for unresolved conflicts now lives in three places:
+  the status bar `🔀 N` indicator, the side-ribbon badge, and the
+  pre-sync confirmation modal. The settings tab was a fourth
+  surface that didn't pull its weight — users with an active
+  conflict clicked the status bar or ribbon to open the sibling,
+  not the settings tab.
 
 ---
 
@@ -625,6 +694,21 @@ When something doesn't behave the way you expect:
   the JS runtime aggressively in the background; a paused
   adoption resumes safely on the next foreground click, but the
   one-shot flow is faster.
+- **"Where did my sibling file go after I resolved the conflict?"**
+  — if you accepted the remote version by renaming the sibling
+  *onto* the base (`<note>.conflict-from-…md` → `<note>.md`,
+  overwriting the local version), the sibling appears to vanish
+  because it *became* the base. That's expected — the conflict is
+  now closed and the status-bar `🔀` counter will drop on the next
+  sync. Same outcome if you accepted yours by deleting the
+  sibling: counter drops on the next sync, and the next push lifts
+  your version to GitHub.
+- **`<file>.unresolved-<timestamp>.<ext>` files lying around the
+  vault** — these are leftovers from a previous `Reset` action.
+  Reset renames any pending `*.conflict-from-*` siblings to this
+  form so they don't collide if you re-enable the plugin. They're
+  safe to delete by hand; the plugin doesn't read or otherwise
+  manage them after the rename.
 
 ---
 
