@@ -17,26 +17,26 @@ import { stagingPathFor } from "./atomic-write";
 //   <configDir>/plugins/<self>/.conflicts/
 //     <recordId>/
 //       meta.json          ← ConflictRecord JSON (atomically written)
-//       sibling-content.bin ← raw bytes of the theirs side; permanent
-//                             backup (re-used by per-crash-window
-//                             recovery sweep + as authoritative
-//                             content if the user externally deleted
-//                             the vault sibling)
 //
 // The sibling file itself lives in the vault next to the original:
 //
 //   <basename>.conflict-from-<deviceLabel>-<isoTs>.<ext>
+//
+// During create(), the sibling is staged at vault level as a
+// `.sync-tmp` pre-suffix file (e.g., `note.conflict-from-Phone-...sync-tmp.md`)
+// and atomically renamed to its final name. Crash-recovery is handled
+// by AtomicWriteRecovery.sweep() via ownership dispatch on .sync-tmp.
+// See PSEUDO-MERGE-MODE.md §9 for the full protocol.
 
 const CONFLICTS_DIRNAME = ".conflicts";
 const META_FILE = "meta.json";
 const META_TMP_FILE = "meta.json.tmp";
 // Legacy: pre-Stage-13 ConflictStore wrote a `sibling-content.bin`
-// backup file inside each `<recordDir>` for crash recovery. Stage 13
-// uses vault-level `.sync-bak` staging instead (see create() below)
-// and load() no longer consults the backup at all. Old install dirs
-// may still carry a `sibling-content.bin` artifact; it's harmless
-// dead weight and gets removed by `delete()` along with the rest of
-// the recordDir.
+// backup file inside each `<recordDir>` for crash recovery. Removed
+// when staging moved to vault-level `.sync-tmp` (see create() below).
+// Old install dirs may still carry a `sibling-content.bin` artifact;
+// it's harmless dead weight and gets removed by `delete()` along with
+// the rest of the recordDir.
 
 // Two kinds: modify-vs-modify (both sides edited) and delete-vs-modify
 // (local deleted, remote modified). The third theoretical kind —
@@ -258,14 +258,17 @@ export default class ConflictStore {
     const siblingSha = orphan?.sha ?? (await calculateGitBlobSHA(args.theirsContent));
 
     const recordDir = `${this.conflictsRoot}/${id}`;
-    const stagingPath = stagingPathFor(siblingPath, "bak");
+    const stagingPath = stagingPathFor(siblingPath, "tmp");
 
-    // Stage 13 (Decision #29): vault-level `.sync-bak` staging
-    // replaces the legacy `<recordDir>/sibling-content.bin` backup.
-    // 3-step protocol per PSEUDO-MERGE-MODE.md §"3-step atomic
-    // create protocol":
+    // Vault-level `.sync-tmp` staging (Decision #29; suffix corrected
+    // post-Stage-13 to match semantics — see PSEUDO-MERGE-MODE.md §9).
+    // `.sync-tmp` carries NEW bytes destined for a not-yet-existing
+    // target; `.sync-bak` is reserved for backups of files that
+    // already existed (atomicWriteFile's rollback target). Sibling
+    // registration writes a brand-new file → tmp, not bak.
     //
-    //   1. writeBinary(<sibling>.sync-bak.<ext>, theirsContent)
+    // 3-step protocol:
+    //   1. writeBinary(<sibling>.sync-tmp.<ext>, theirsContent)
     //   2. atomic write meta.json (via persistRecord — tmp + rename)
     //   3. atomic rename staging → siblingPath
     //

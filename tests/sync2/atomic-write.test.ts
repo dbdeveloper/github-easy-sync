@@ -31,13 +31,18 @@ import { calculateGitBlobSHA } from "../../src/utils";
 //   4. afterCommit()  ← snapshot.recordSync, typically
 //   5. remove(<path>.sync-bak)
 //
-// Crash-recovery sweep:
-//   *.sync-tmp                             → delete (junk)
-//   *.sync-bak (no <file>)                 → restore from .sync-bak
-//   *.sync-bak (with <file>):
-//     file SHA matches snapshot.remoteSha  → delete .sync-bak [cleanup race]
-//     mismatch                             → restore from .sync-bak
-//     no snapshot entry                    → restore from .sync-bak (conservative)
+// Crash-recovery sweep (post-Stage-13, suffix semantics corrected):
+//   *.sync-tmp:                           dispatch by ownership via
+//                                         ConflictStore.getBySibling
+//     no record (Path A transient)        → delete (junk)
+//     record + finalPath exists           → delete (Step 3 done, stale)
+//     record + finalPath missing, SHA ok  → rename .sync-tmp → finalPath
+//     record + finalPath missing, SHA bad → delete (record drops later)
+//   *.sync-bak (Path A only, no dispatch):
+//     no <file>                           → restore from .sync-bak
+//     <file> + SHA == snapshot.remoteSha  → delete .sync-bak [cleanup race]
+//     <file> + SHA mismatch               → restore from .sync-bak
+//     <file>, no snapshot entry           → restore from .sync-bak (conservative)
 
 function fixture(): {
   root: string;
@@ -176,7 +181,7 @@ describe("AtomicWriteRecovery.sweep", () => {
     f.cleanup();
   });
 
-  it("orphan .sync-tmp: deleted on sweep (transient write artifact)", async () => {
+  it("orphan .sync-tmp without ConflictStore in scope: dropped (Path A transient)", async () => {
     fs.writeFileSync(path.join(f.root, "x.sync-tmp.md"), "partial");
     const recovery = new AtomicWriteRecovery(
       f.vault as unknown as import("obsidian").Vault,
@@ -385,7 +390,7 @@ describe("AtomicWriteRecovery SHA-verify (Stage 13) — Phase 4 wires sweep agai
     f.cleanup();
   });
 
-  it("N9: sweep finds .sync-bak with SHA matching record.theirsBlobSha → rename to finalPath", async () => {
+  it("N9: sweep finds .sync-tmp with SHA matching record.theirsBlobSha → rename to finalPath", async () => {
     const { default: ConflictStore } = await import(
       "../../src/sync2/conflict-store"
     );
@@ -414,7 +419,7 @@ describe("AtomicWriteRecovery SHA-verify (Stage 13) — Phase 4 wires sweep agai
     });
     // Synthesize the mid-Step-3 crash state.
     const siblingAbs = path.join(f.root, rec.siblingPath);
-    const stagingAbs = path.join(f.root, stagingPathFor(rec.siblingPath, "bak"));
+    const stagingAbs = path.join(f.root, stagingPathFor(rec.siblingPath, "tmp"));
     fs.renameSync(siblingAbs, stagingAbs);
     expect(fs.existsSync(siblingAbs)).toBe(false);
     expect(fs.existsSync(stagingAbs)).toBe(true);
@@ -431,7 +436,7 @@ describe("AtomicWriteRecovery SHA-verify (Stage 13) — Phase 4 wires sweep agai
     expect(fs.readFileSync(siblingAbs, "utf8")).toBe("theirs content\n");
   });
 
-  it("N9b: sweep finds .sync-bak with SHA NOT matching record.theirsBlobSha → drop, leave record for drain Phase B", async () => {
+  it("N9b: sweep finds .sync-tmp with SHA NOT matching record.theirsBlobSha → drop, leave record for drain Phase B", async () => {
     const { default: ConflictStore } = await import(
       "../../src/sync2/conflict-store"
     );
@@ -458,7 +463,7 @@ describe("AtomicWriteRecovery SHA-verify (Stage 13) — Phase 4 wires sweep agai
     // content (SHA differs from record.theirsBlobSha — disk
     // corruption / race / unrelated staging collision).
     const siblingAbs = path.join(f.root, rec.siblingPath);
-    const stagingAbs = path.join(f.root, stagingPathFor(rec.siblingPath, "bak"));
+    const stagingAbs = path.join(f.root, stagingPathFor(rec.siblingPath, "tmp"));
     fs.unlinkSync(siblingAbs);
     fs.writeFileSync(stagingAbs, "corrupted bytes");
 
@@ -477,5 +482,40 @@ describe("AtomicWriteRecovery SHA-verify (Stage 13) — Phase 4 wires sweep agai
     // sweep test).
     expect(fs.existsSync(siblingAbs)).toBe(false);
     expect(conflictStore.get(rec.id)).toBeDefined();
+  });
+
+  it("N9c: .sync-tmp at a path with no ConflictStore record → dropped as Path A transient (even when conflictStore is in scope)", async () => {
+    // Pin the dispatch: presence of conflictStore in the recovery
+    // constructor must NOT cause a Path A transient .sync-tmp (one
+    // whose finalPath is just an ordinary user file, not a sibling)
+    // to be treated as a forward-finalize candidate.
+    const { default: ConflictStore } = await import(
+      "../../src/sync2/conflict-store"
+    );
+    const conflictStore = new ConflictStore({
+      vault: f.vault as unknown as import("obsidian").Vault,
+      configDir: ".obsidian",
+      selfPluginId: "github-easy-sync",
+    });
+    await conflictStore.load();
+    // Place a .sync-tmp at a path that ConflictStore knows nothing
+    // about — e.g., from a crashed atomicWriteFile pull-replace.
+    fs.mkdirSync(path.join(f.root, "Notes"), { recursive: true });
+    fs.writeFileSync(path.join(f.root, "Notes/regular.sync-tmp.md"), "partial");
+
+    const recovery = new AtomicWriteRecovery(
+      f.vault as unknown as import("obsidian").Vault,
+      f.store,
+      conflictStore,
+    );
+    const result = await recovery.sweep();
+    expect(result.cleaned).toBe(1);
+    expect(result.restored).toBe(0);
+    expect(
+      fs.existsSync(path.join(f.root, "Notes/regular.sync-tmp.md")),
+    ).toBe(false);
+    // The "final" path (Notes/regular.md) was never created — drop is
+    // correct because the bytes are transient, not destined.
+    expect(fs.existsSync(path.join(f.root, "Notes/regular.md"))).toBe(false);
   });
 });

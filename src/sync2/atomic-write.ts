@@ -205,36 +205,41 @@ interface ConflictStoreLike {
 }
 
 // Crash-recovery sweep for `atomicWriteFile` AND for ConflictStore's
-// vault-level `.sync-bak` sibling staging. Runs on plugin onload
+// vault-level `.sync-tmp` sibling staging. Runs on plugin onload
 // BEFORE the engine starts touching the vault — walks the tree for
 // any `.sync-tmp` / `.sync-bak` leftovers and reconciles them
 // against the snapshot + conflict stores.
 //
-// `.sync-tmp` files: always safe to drop (transient write artifact).
+// Each suffix now has ONE consistent meaning (see PSEUDO-MERGE-MODE.md
+// §9 for the rationale):
 //
-// `.sync-bak` files: dispatch by ownership. If `conflictStore.
-// getBySibling(finalPath)` returns a record, we treat the staging
-// as a Stage 13 conflict-sibling stage (PSEUDO-MERGE-MODE.md §"Recovery
-// sweep на onload — vault-level `.sync-bak` sweep"):
+//   `.sync-tmp` = NEW bytes staged for a target (existing or new).
+//      Ambiguous between two callsites; dispatch by ownership via
+//      conflictStore.getBySibling(finalPath):
+//        record exists, finalPath exists                    → drop tmp
+//                                                            [Step 3 done,
+//                                                             orphan cleanup]
+//        record exists, finalPath missing, SHA matches      → rename(tmp →
+//                                                             finalPath)
+//                                                            [resume Step 3]
+//        record exists, finalPath missing, SHA mismatches   → drop tmp
+//                                                            [data integrity
+//                                                             > resolution;
+//                                                             record dropped
+//                                                             on next drain
+//                                                             Phase B]
+//        no record (Path A transient new bytes)              → drop tmp
 //
-//   finalPath exists                         → delete bak [Step 3 done,
-//                                              orphan cleanup]
-//   finalPath missing, SHA(bak) === theirsBlobSha → rename(bak → finalPath)
-//                                              [resume Step 3]
-//   finalPath missing, SHA(bak) ≠ theirsBlobSha   → delete bak (data
-//                                              integrity > resolution
-//                                              completeness; record
-//                                              gets dropped on next
-//                                              drain Phase B)
-//
-// Otherwise (no record owns finalPath) the sweep falls through to the
-// existing snapshot-based atomicWriteFile recovery semantics:
-//
-//   finalPath missing                        → rename(bak → finalPath)
-//                                              [restore]
-//   finalPath exists, snapshot.remoteSha === SHA(file) → delete bak
-//                                              [cleanup race]
-//   mismatch / no snapshot                   → restore bak
+//   `.sync-bak` = OLD bytes backed up before an overwrite.
+//      Only produced by atomicWriteFile (Path A); ConflictStore never
+//      writes `.sync-bak`. Recovery is snapshot-based, no ownership
+//      dispatch needed:
+//        finalPath missing                                  → rename(bak
+//                                                             → finalPath)
+//                                                            [restore]
+//        finalPath exists, snapshot.remoteSha === SHA(file) → delete bak
+//                                                            [cleanup race]
+//        mismatch / no snapshot                             → restore bak
 //
 // Returns counts so main.ts can log / surface what was recovered.
 export class AtomicWriteRecovery {
@@ -250,10 +255,39 @@ export class AtomicWriteRecovery {
 
     const { syncTmps, syncBaks } = await this.findCandidates();
 
-    // 1. .sync-tmp: always safe to drop. Either the write was
-    // interrupted before promotion, or someone left stale staging.
-    for (const { stagingPath: tmpPath } of syncTmps) {
+    // 1. .sync-tmp: forward-direction staging. Dispatch by ownership.
+    // Path B (ConflictStore.create) → resume Step 3 by renaming to the
+    // final sibling path if SHA matches the record's theirsBlobSha.
+    // Path A (atomicWriteFile transient) → drop (next sync repeats).
+    for (const { stagingPath: tmpPath, finalPath: originalPath } of syncTmps) {
       try {
+        const conflictRecord = this.conflictStore?.getBySibling(originalPath);
+        if (conflictRecord !== undefined) {
+          const fileExists = await this.vault.adapter.exists(originalPath);
+          if (fileExists) {
+            // Step 3 completed at some point; the staging is stale.
+            await this.vault.adapter.remove(tmpPath);
+            cleaned++;
+            continue;
+          }
+          const bytes = await this.vault.adapter.readBinary(tmpPath);
+          const sha = await calculateGitBlobSHA(bytes);
+          if (sha === conflictRecord.theirsBlobSha) {
+            // Resume the interrupted Step 3.
+            await this.vault.adapter.rename(tmpPath, originalPath);
+            restored++;
+          } else {
+            // SHA mismatch — disk corruption or a stale staging from
+            // some unrelated path that happens to collide. Drop it;
+            // the next drain Phase B drops the record on the missing
+            // sibling.
+            await this.vault.adapter.remove(tmpPath);
+            cleaned++;
+          }
+          continue;
+        }
+        // No ConflictStore record → Path A transient. Always safe to
+        // drop; next sync repeats the operation if still needed.
         await this.vault.adapter.remove(tmpPath);
         cleaned++;
       } catch {
@@ -261,38 +295,11 @@ export class AtomicWriteRecovery {
       }
     }
 
-    // 2. .sync-bak: state-driven recovery. Dispatch by ownership.
+    // 2. .sync-bak: rollback backups, snapshot-based recovery.
+    // Produced only by atomicWriteFile (Path A); ConflictStore never
+    // writes .sync-bak. No ownership dispatch needed.
     for (const { stagingPath: bakPath, finalPath: originalPath } of syncBaks) {
       try {
-        // Stage 13: ConflictStore owns siblings — record-bound
-        // recovery uses theirsBlobSha as the integrity witness.
-        const conflictRecord = this.conflictStore?.getBySibling(originalPath);
-        if (conflictRecord !== undefined) {
-          const fileExists = await this.vault.adapter.exists(originalPath);
-          if (fileExists) {
-            // Step 3 completed at some point; the staging is stale.
-            await this.vault.adapter.remove(bakPath);
-            cleaned++;
-            continue;
-          }
-          const bytes = await this.vault.adapter.readBinary(bakPath);
-          const sha = await calculateGitBlobSHA(bytes);
-          if (sha === conflictRecord.theirsBlobSha) {
-            // Resume the interrupted Step 3.
-            await this.vault.adapter.rename(bakPath, originalPath);
-            restored++;
-          } else {
-            // SHA mismatch — disk corruption or a stale staging from
-            // some unrelated path that happens to collide. Drop it;
-            // the next drain Phase B drops the record on the missing
-            // sibling.
-            await this.vault.adapter.remove(bakPath);
-            cleaned++;
-          }
-          continue;
-        }
-
-        // Fall-through: atomicWriteFile-style snapshot-based recovery.
         const fileExists = await this.vault.adapter.exists(originalPath);
         if (!fileExists) {
           // Crash between step 2 and step 3: only backup survived.

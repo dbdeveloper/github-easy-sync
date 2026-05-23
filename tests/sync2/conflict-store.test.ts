@@ -181,8 +181,9 @@ describe("ConflictStore", () => {
       // meta.json persisted; tmp atomic-write artifact cleaned.
       expect(fs.existsSync(path.join(dir, "meta.json"))).toBe(true);
       expect(fs.existsSync(path.join(dir, "meta.json.tmp"))).toBe(false);
-      // Stage 13: sibling staging lives in the vault as a `.sync-bak`
-      // pre-suffix file, then atomically renamed to the final
+      // Sibling staging lives in the vault as a `.sync-tmp` pre-suffix
+      // file (NEW bytes destined for a brand-new sibling — semantically
+      // a "tmp", not a "bak"), then atomically renamed to the final
       // siblingPath. No legacy `sibling-content.bin` backup inside
       // the recordDir.
       expect(fs.existsSync(path.join(dir, "sibling-content.bin"))).toBe(false);
@@ -360,7 +361,7 @@ describe("ConflictStore", () => {
       // from meta.json; the missing sibling becomes a drain Phase B
       // drop signal. (Pre-Stage-13 also had a `sibling-content.bin`
       // backup file inside recordDir; that artifact is gone now —
-      // vault-level `.sync-bak` staging is the new mechanism and
+      // vault-level `.sync-tmp` staging is the new mechanism and
       // it's already been renamed to the final siblingPath by the
       // time create() returns.)
       await f.store.load();
