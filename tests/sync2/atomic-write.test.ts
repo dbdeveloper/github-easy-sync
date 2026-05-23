@@ -96,8 +96,8 @@ describe("atomicWriteFile", () => {
       bytesOf("hello\n"),
     );
     expect(readText(f.root, "Notes/note.md")).toBe("hello\n");
-    expect(fs.existsSync(path.join(f.root, "Notes/note.md.sync-tmp"))).toBe(false);
-    expect(fs.existsSync(path.join(f.root, "Notes/note.md.sync-bak"))).toBe(false);
+    expect(fs.existsSync(path.join(f.root, "Notes/note.sync-tmp.md"))).toBe(false);
+    expect(fs.existsSync(path.join(f.root, "Notes/note.sync-bak.md"))).toBe(false);
   });
 
   it("existing file: replaces content; old version backed up then cleaned", async () => {
@@ -108,8 +108,8 @@ describe("atomicWriteFile", () => {
       bytesOf("v2\n"),
     );
     expect(readText(f.root, "x.md")).toBe("v2\n");
-    expect(fs.existsSync(path.join(f.root, "x.md.sync-tmp"))).toBe(false);
-    expect(fs.existsSync(path.join(f.root, "x.md.sync-bak"))).toBe(false);
+    expect(fs.existsSync(path.join(f.root, "x.sync-tmp.md"))).toBe(false);
+    expect(fs.existsSync(path.join(f.root, "x.sync-bak.md"))).toBe(false);
   });
 
   it("afterCommit runs after the file is in place but before backup cleanup", async () => {
@@ -129,13 +129,13 @@ describe("atomicWriteFile", () => {
       async () => {
         observed.push({
           fileContent: readText(f.root, "x.md"),
-          bakExists: fs.existsSync(path.join(f.root, "x.md.sync-bak")),
+          bakExists: fs.existsSync(path.join(f.root, "x.sync-bak.md")),
         });
       },
     );
     expect(observed).toEqual([{ fileContent: "v2", bakExists: true }]);
     // Post-afterCommit: cleanup ran.
-    expect(fs.existsSync(path.join(f.root, "x.md.sync-bak"))).toBe(false);
+    expect(fs.existsSync(path.join(f.root, "x.sync-bak.md"))).toBe(false);
   });
 
   it("stale .sync-bak from a previous crash is overwritten by the rename-aside step", async () => {
@@ -143,25 +143,25 @@ describe("atomicWriteFile", () => {
     // from a previous crash sits next to it. atomicWriteFile must
     // not throw on the rename(file → bak) collision.
     fs.writeFileSync(path.join(f.root, "x.md"), "current");
-    fs.writeFileSync(path.join(f.root, "x.md.sync-bak"), "leftover");
+    fs.writeFileSync(path.join(f.root, "x.sync-bak.md"), "leftover");
     await atomicWriteFile(
       f.vault as unknown as import("obsidian").Vault,
       "x.md",
       bytesOf("v3"),
     );
     expect(readText(f.root, "x.md")).toBe("v3");
-    expect(fs.existsSync(path.join(f.root, "x.md.sync-bak"))).toBe(false);
+    expect(fs.existsSync(path.join(f.root, "x.sync-bak.md"))).toBe(false);
   });
 
   it("stale .sync-tmp from a previous crash is silently overwritten", async () => {
-    fs.writeFileSync(path.join(f.root, "x.md.sync-tmp"), "old partial");
+    fs.writeFileSync(path.join(f.root, "x.sync-tmp.md"), "old partial");
     await atomicWriteFile(
       f.vault as unknown as import("obsidian").Vault,
       "x.md",
       bytesOf("fresh"),
     );
     expect(readText(f.root, "x.md")).toBe("fresh");
-    expect(fs.existsSync(path.join(f.root, "x.md.sync-tmp"))).toBe(false);
+    expect(fs.existsSync(path.join(f.root, "x.sync-tmp.md"))).toBe(false);
   });
 });
 
@@ -177,7 +177,7 @@ describe("AtomicWriteRecovery.sweep", () => {
   });
 
   it("orphan .sync-tmp: deleted on sweep (transient write artifact)", async () => {
-    fs.writeFileSync(path.join(f.root, "x.md.sync-tmp"), "partial");
+    fs.writeFileSync(path.join(f.root, "x.sync-tmp.md"), "partial");
     const recovery = new AtomicWriteRecovery(
       f.vault as unknown as import("obsidian").Vault,
       f.store,
@@ -185,13 +185,13 @@ describe("AtomicWriteRecovery.sweep", () => {
     const result = await recovery.sweep();
     expect(result.cleaned).toBe(1);
     expect(result.restored).toBe(0);
-    expect(fs.existsSync(path.join(f.root, "x.md.sync-tmp"))).toBe(false);
+    expect(fs.existsSync(path.join(f.root, "x.sync-tmp.md"))).toBe(false);
   });
 
   it("only .sync-bak (no original): restored to canonical path", async () => {
     // Crash between step 2 (rename → bak) and step 3 (rename tmp →
     // file): backup is the only intact copy.
-    fs.writeFileSync(path.join(f.root, "x.md.sync-bak"), "previous");
+    fs.writeFileSync(path.join(f.root, "x.sync-bak.md"), "previous");
     const recovery = new AtomicWriteRecovery(
       f.vault as unknown as import("obsidian").Vault,
       f.store,
@@ -200,7 +200,7 @@ describe("AtomicWriteRecovery.sweep", () => {
     expect(result.cleaned).toBe(0);
     expect(result.restored).toBe(1);
     expect(readText(f.root, "x.md")).toBe("previous");
-    expect(fs.existsSync(path.join(f.root, "x.md.sync-bak"))).toBe(false);
+    expect(fs.existsSync(path.join(f.root, "x.sync-bak.md"))).toBe(false);
   });
 
   it("both .sync-bak AND original, file matches snapshot: backup is cleaned up", async () => {
@@ -209,7 +209,7 @@ describe("AtomicWriteRecovery.sweep", () => {
     // cleanup didn't run. Recovery detects the SHA match and drops
     // the backup.
     fs.writeFileSync(path.join(f.root, "x.md"), "v2");
-    fs.writeFileSync(path.join(f.root, "x.md.sync-bak"), "v1");
+    fs.writeFileSync(path.join(f.root, "x.sync-bak.md"), "v1");
     f.store.set("x.md", {
       path: "x.md",
       remoteSha: await shaOf("v2"),
@@ -224,7 +224,7 @@ describe("AtomicWriteRecovery.sweep", () => {
     expect(result.cleaned).toBe(1);
     expect(result.restored).toBe(0);
     expect(readText(f.root, "x.md")).toBe("v2");
-    expect(fs.existsSync(path.join(f.root, "x.md.sync-bak"))).toBe(false);
+    expect(fs.existsSync(path.join(f.root, "x.sync-bak.md"))).toBe(false);
   });
 
   it("both files exist, file mismatches snapshot: restore backup", async () => {
@@ -232,7 +232,7 @@ describe("AtomicWriteRecovery.sweep", () => {
     // (recordSync): file is new bytes, snapshot still has OLD sha.
     // The mismatch tells us we can't trust the install — restore.
     fs.writeFileSync(path.join(f.root, "x.md"), "newPartialOrNotCommitted");
-    fs.writeFileSync(path.join(f.root, "x.md.sync-bak"), "previous-good");
+    fs.writeFileSync(path.join(f.root, "x.sync-bak.md"), "previous-good");
     f.store.set("x.md", {
       path: "x.md",
       remoteSha: await shaOf("previous-good"),
@@ -247,13 +247,13 @@ describe("AtomicWriteRecovery.sweep", () => {
     expect(result.cleaned).toBe(0);
     expect(result.restored).toBe(1);
     expect(readText(f.root, "x.md")).toBe("previous-good");
-    expect(fs.existsSync(path.join(f.root, "x.md.sync-bak"))).toBe(false);
+    expect(fs.existsSync(path.join(f.root, "x.sync-bak.md"))).toBe(false);
   });
 
   it("both files exist, no snapshot entry: conservative restore", async () => {
     // We can't verify; backup is the trustable copy.
     fs.writeFileSync(path.join(f.root, "x.md"), "unverified");
-    fs.writeFileSync(path.join(f.root, "x.md.sync-bak"), "known-good");
+    fs.writeFileSync(path.join(f.root, "x.sync-bak.md"), "known-good");
     const recovery = new AtomicWriteRecovery(
       f.vault as unknown as import("obsidian").Vault,
       f.store,
@@ -267,17 +267,17 @@ describe("AtomicWriteRecovery.sweep", () => {
   it("recursive walk: finds artifacts deep in subfolders", async () => {
     // Real vaults have nested folders; sweep must reach them all.
     fs.mkdirSync(path.join(f.root, "Notes/Sub/Deep"), { recursive: true });
-    fs.writeFileSync(path.join(f.root, "Notes/Sub/Deep/a.md.sync-tmp"), "x");
-    fs.writeFileSync(path.join(f.root, "Notes/Sub/b.md.sync-bak"), "y");
+    fs.writeFileSync(path.join(f.root, "Notes/Sub/Deep/a.sync-tmp.md"), "x");
+    fs.writeFileSync(path.join(f.root, "Notes/Sub/b.sync-bak.md"), "y");
     const recovery = new AtomicWriteRecovery(
       f.vault as unknown as import("obsidian").Vault,
       f.store,
     );
     const result = await recovery.sweep();
-    expect(result.cleaned).toBe(1); // a.md.sync-tmp
-    expect(result.restored).toBe(1); // b.md.sync-bak → b.md
+    expect(result.cleaned).toBe(1); // a.sync-tmp.md
+    expect(result.restored).toBe(1); // b.sync-bak.md → b.md
     expect(
-      fs.existsSync(path.join(f.root, "Notes/Sub/Deep/a.md.sync-tmp")),
+      fs.existsSync(path.join(f.root, "Notes/Sub/Deep/a.sync-tmp.md")),
     ).toBe(false);
     expect(readText(f.root, "Notes/Sub/b.md")).toBe("y");
   });

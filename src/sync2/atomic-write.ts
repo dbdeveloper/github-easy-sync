@@ -75,14 +75,72 @@ export function stagingPathFor(
   return stem + suffix + ext;
 }
 
+// Inverse of stagingPathFor: tries to recognize `stagingPath` as a
+// `.sync-bak` / `.sync-tmp` staging file and returns its target final
+// path. Returns null if `stagingPath` doesn't match the staging shape
+// (regular user file). Used by AtomicWriteRecovery.sweep when walking
+// the vault for orphan staging entries — we can't determine "is this
+// a staging file?" by suffix alone because the pre-suffix form
+// (`note.sync-bak.md`) doesn't end in `.sync-bak`.
+//
+// Recognition logic:
+//   1. Pre-suffix form: `<stem>.sync-bak.<ext>` — look for the literal
+//      `.sync-bak.` infix in the filename portion (after the last
+//      slash). The portion after the infix is a single extension
+//      segment with no further slashes.
+//   2. Suffix form: `<file>.sync-bak` — filename ends in `.sync-bak`
+//      with no further extension (hidden file or extensionless).
+// Both forms reconstruct the final path by removing the suffix.
+export function parseStagingPath(
+  stagingPath: string,
+): { finalPath: string; which: "bak" | "tmp" } | null {
+  const candidates: Array<{ suffix: string; which: "bak" | "tmp" }> = [
+    { suffix: SYNC_BAK_SUFFIX, which: "bak" },
+    { suffix: SYNC_TMP_SUFFIX, which: "tmp" },
+  ];
+  const slashIdx = stagingPath.lastIndexOf("/");
+  const fileStart = slashIdx + 1;
+  for (const { suffix, which } of candidates) {
+    // Pre-suffix form: look for the LAST `.sync-bak.` inside the
+    // filename portion. The matched position must be > fileStart
+    // (don't allow zero-length stem) and the segment after must
+    // contain no `/` AND at least one character.
+    const infix = `${suffix}.`;
+    const infixIdx = stagingPath.lastIndexOf(infix);
+    if (infixIdx > fileStart) {
+      const afterStart = infixIdx + infix.length;
+      const after = stagingPath.slice(afterStart);
+      if (after.length > 0 && !after.includes("/")) {
+        const finalPath =
+          stagingPath.slice(0, infixIdx) + stagingPath.slice(infixIdx + suffix.length);
+        return { finalPath, which };
+      }
+    }
+    // Suffix form: filename ends in `.sync-bak` (no extension after).
+    if (
+      stagingPath.endsWith(suffix) &&
+      stagingPath.length > fileStart + suffix.length
+    ) {
+      const finalPath = stagingPath.slice(0, -suffix.length);
+      return { finalPath, which };
+    }
+  }
+  return null;
+}
+
 export async function atomicWriteFile(
   vault: Vault,
   path: string,
   bytes: ArrayBuffer,
   afterCommit?: () => Promise<void>,
 ): Promise<void> {
-  const tmpPath = `${path}${SYNC_TMP_SUFFIX}`;
-  const bakPath = `${path}${SYNC_BAK_SUFFIX}`;
+  // Stage 13: pre-suffix staging paths so Obsidian's file explorer
+  // still recognizes the staging file by extension (a `.md.sync-tmp`
+  // file is hidden under "Show all file types: false" but a
+  // `note.sync-tmp.md` stays visible). See PSEUDO-MERGE-MODE.md
+  // §"Naming convention для staging файлів — `.sync-bak` як pre-suffix".
+  const tmpPath = stagingPathFor(path, "tmp");
+  const bakPath = stagingPathFor(path, "bak");
 
   // Step 1: stage new bytes in .sync-tmp. A previous crash may have
   // left a stale .sync-tmp behind — overwrite silently; the file is
@@ -169,7 +227,7 @@ export class AtomicWriteRecovery {
 
     // 1. .sync-tmp: always safe to drop. Either the write was
     // interrupted before promotion, or someone left stale staging.
-    for (const tmpPath of syncTmps) {
+    for (const { stagingPath: tmpPath } of syncTmps) {
       try {
         await this.vault.adapter.remove(tmpPath);
         cleaned++;
@@ -179,8 +237,7 @@ export class AtomicWriteRecovery {
     }
 
     // 2. .sync-bak: state-driven recovery.
-    for (const bakPath of syncBaks) {
-      const originalPath = bakPath.slice(0, -SYNC_BAK_SUFFIX.length);
+    for (const { stagingPath: bakPath, finalPath: originalPath } of syncBaks) {
       try {
         const fileExists = await this.vault.adapter.exists(originalPath);
         if (!fileExists) {
@@ -224,15 +281,17 @@ export class AtomicWriteRecovery {
     return { cleaned, restored };
   }
 
-  // Recursively walk the vault for *.sync-tmp / *.sync-bak files.
-  // Splits the result into two lists so the sweep can process them
-  // in order.
+  // Recursively walk the vault for `.sync-tmp` / `.sync-bak` staging
+  // files. Both pre-suffix form (`note.sync-bak.md`) and suffix form
+  // (`.gitignore.sync-bak`) are recognized via `parseStagingPath`,
+  // which encapsulates the inverse of `stagingPathFor`. Files that
+  // don't match either form are normal user files and skipped.
   private async findCandidates(): Promise<{
-    syncTmps: string[];
-    syncBaks: string[];
+    syncTmps: Array<{ stagingPath: string; finalPath: string }>;
+    syncBaks: Array<{ stagingPath: string; finalPath: string }>;
   }> {
-    const syncTmps: string[] = [];
-    const syncBaks: string[] = [];
+    const syncTmps: Array<{ stagingPath: string; finalPath: string }> = [];
+    const syncBaks: Array<{ stagingPath: string; finalPath: string }> = [];
     const stack: string[] = [""];
     while (stack.length > 0) {
       const dir = stack.pop() as string;
@@ -243,8 +302,11 @@ export class AtomicWriteRecovery {
         continue;
       }
       for (const file of listing.files) {
-        if (file.endsWith(SYNC_TMP_SUFFIX)) syncTmps.push(file);
-        else if (file.endsWith(SYNC_BAK_SUFFIX)) syncBaks.push(file);
+        const parsed = parseStagingPath(file);
+        if (parsed === null) continue;
+        const entry = { stagingPath: file, finalPath: parsed.finalPath };
+        if (parsed.which === "tmp") syncTmps.push(entry);
+        else syncBaks.push(entry);
       }
       stack.push(...listing.folders);
     }
