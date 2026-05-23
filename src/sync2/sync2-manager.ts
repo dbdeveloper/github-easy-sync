@@ -1524,6 +1524,65 @@ export class Sync2Manager {
     });
   }
 
+  // Stage 13 Phase B side-batch synthesis. Per PSEUDO-MERGE-MODE.md
+  // §"Phase B — path-close sweep", when evaluateConflictState closes
+  // a path (all records for it dropped), drain synthesizes a side-
+  // batch carrying the live vault state for that path to main.
+  // The batch flows through the normal processBatch loop as a
+  // synthetic batch (meta.synthetic=true → "resolve conflict (...)"
+  // commit message; never merged with user batches).
+  //
+  // Dedup: if the user already has a non-attempted, non-synthetic
+  // pending batch touching the closed path, skip — the user batch's
+  // content already covers it. processBatch's no-op-tree-skip would
+  // drop the duplicate anyway, but skipping here keeps the queue
+  // minimal.
+  private async synthesizeResolutionSideBatches(
+    resolvedPaths: Set<string>,
+  ): Promise<void> {
+    const userPaths = await this.collectPathsInPendingUserBatches();
+    for (const closedPath of resolvedPaths) {
+      if (userPaths.has(closedPath)) continue;
+      const exists = await this.vault.adapter.exists(closedPath);
+      let content: Uint8Array | null = null;
+      let contentSha: string | null = null;
+      if (exists) {
+        const buf = await this.vault.adapter.readBinary(closedPath);
+        content = new Uint8Array(buf);
+        contentSha = await calculateGitBlobSHA(buf);
+      }
+      await this.queue.enqueueSynthetic({
+        path: closedPath,
+        content,
+        contentSha,
+        parentCommitSha: this.store.getLastSyncCommitSha() ?? "",
+        parentTreeSha: this.store.getLastSyncTreeSha() ?? "",
+      });
+    }
+  }
+
+  // Collect paths covered by pending user batches (not synthetic,
+  // not attempted, not in-progress). Used by Phase B side-batch
+  // synthesis to avoid pushing the same content twice when the
+  // user's own batch already covers a resolved path.
+  private async collectPathsInPendingUserBatches(): Promise<Set<string>> {
+    const result = new Set<string>();
+    const ids = await this.queue.list();
+    for (const id of ids) {
+      try {
+        const batch = await this.queue.read(id);
+        if (batch.synthetic) continue;
+        if (batch.attempted) continue;
+        if (batch.inProgress) continue;
+        for (const p of batch.files) result.add(p);
+        for (const p of batch.deletions) result.add(p);
+      } catch {
+        // Unreadable batch — skip; processBatch retry handles it.
+      }
+    }
+    return result;
+  }
+
   // Finalize the active conflict branch back into main when every
   // record in the ConflictStore has been resolved. Manual
   // merge-commit on main with parents=[main.head, branch.head] +
@@ -1753,11 +1812,29 @@ export class Sync2Manager {
       // active conflicts, drain skips the sweep entirely — its
       // latency stays at parity with 2.0.0-beta.
       if (this.conflictStore && this.conflictStore.getAll().length > 0) {
-        await evaluateConflictState(
+        const evalResult = await evaluateConflictState(
           this.conflictStore,
           this.vault,
           this.now,
         );
+        // Stage 13 Phase B side-batch synthesis (PSEUDO-MERGE-MODE.md
+        // §"Phase B — path-close sweep"). For each path the classifier
+        // closed (all records gone), synthesize a side-batch that
+        // propagates the live vault state to main as an explicit
+        // `resolve conflict ({deviceLabel})` commit. The synthetic
+        // batch flows through the regular queue.list() loop below,
+        // gets `meta.synthetic=true`, and skips mergeIntoLatestPending
+        // so user edits never fold into it.
+        //
+        // Dedup against user batches: if the user already has a
+        // pending batch covering the closed path, the user batch's
+        // content takes precedence — skipping synthesis here avoids
+        // pushing the same bytes twice. processBatch's no-op-tree-skip
+        // would silently drop the duplicate commit anyway, but
+        // skipping at this layer keeps the queue cleaner.
+        if (evalResult.pathsResolved.size > 0) {
+          await this.synthesizeResolutionSideBatches(evalResult.pathsResolved);
+        }
       }
 
       await this.bootstrapIfNeeded(progress);
