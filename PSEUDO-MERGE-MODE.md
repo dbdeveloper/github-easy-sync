@@ -1869,17 +1869,29 @@ in the Stage 13 pivot notice).
 | 9 | Commit-template removal (Decision #36) | (deferred) | (this commit) | ✅ GREEN |
 | 10 | Visibility 4→3 point (settings-tab badge) | (deferred) | (this commit) | ✅ GREEN |
 
-**Status snapshot (last update: 2026-05-23):** **Stage 13 fully
-complete.** All 10 main groups GREEN + Group 9 follow-on (drop
-meta.json `commitMessage`) + Group 4 migration (atomicWriteFile +
-sweep + gitignore patterns) + ConflictStore migration to vault-level
+**Status snapshot (last update: 2026-05-23):** **Stage 13 main
+scope complete; advisor-review gaps closed.** Most recent
+additions:
+- enqueueSynthetic wired into drain Phase B path-close (was
+  dark code; spec'd flow now actually invoked)
+- MOCK_PLATFORM=mobile paired coverage for ConflictStore.create
+  Stage 13 `.sync-bak` flow
+
+All 10 main groups GREEN + Group 9 follow-on (drop meta.json
+`commitMessage`) + Group 4 migration (atomicWriteFile + sweep +
+gitignore patterns) + ConflictStore migration to vault-level
 `.sync-bak` (drops `sibling-content.bin` backup) + SHA-verify
 wired into `AtomicWriteRecovery.sweep` against
-`record.theirsBlobSha` (N9/N9b activated and GREEN).
+`record.theirsBlobSha` (N9/N9b activated and GREEN) +
+enqueueSynthetic production wiring + mobile-platform paired tests.
 
-Test suite state: **503 passed, 0 RED, 0 todo.** Build clean.
+Test suite state (unit): **507 passed, 0 RED, 0 todo.** Build clean.
 
-No follow-on work outstanding for Stage 13.
+Integration suite (~106 tests against real GitHub) validation
+in progress. Pre-wiring baseline showed 1 failure in
+`edit-while-in-conflict.test.ts` (audit-flagged for REWRITE).
+Re-run with current HEAD pending — results will determine
+whether additional follow-on is needed.
 
 **Discipline:**
 - Write tests against the **Phase 4 API surface** (locked via stubs in
