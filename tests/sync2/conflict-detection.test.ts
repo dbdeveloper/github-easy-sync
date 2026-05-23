@@ -6,7 +6,8 @@ import {
   type PluginJsContext,
 } from "../../src/sync2/conflict-detection";
 
-// Pseudo-merge conflict-detection tests (PSEUDO-MERGE-MODE.md, 5b).
+// Auto-merge dispatch tests. See src/sync2/conflict-detection.ts
+// + docs/PSEUDO-MERGE-MODE.md §7 for the dispatch table.
 
 const CONFIG_DIR = ".obsidian";
 

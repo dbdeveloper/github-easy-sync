@@ -121,10 +121,8 @@ describe.skipIf(!integrationEnabled())(
           "ours version\n",
         );
 
-        // Branch commit messages use the Stage 13 hardcoded format
-        // `conflict ({deviceLabel})` — see src/sync2/commit-message.ts
-        // (Decision #36). Pre-Stage-13 the message embedded the
-        // vault path + kind ("Conflict snapshot: <path> (<kind>)").
+        // Branch commit messages use the hardcoded format
+        // `conflict ({deviceLabel})` — see src/sync2/commit-message.ts.
         const messages = await getBranchCommitMessages(cb!.name);
         expect(messages.some((m) => m.startsWith("conflict ("))).toBe(true);
 

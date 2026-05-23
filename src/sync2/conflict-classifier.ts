@@ -6,21 +6,14 @@ import { Vault } from "obsidian";
 import { calculateGitBlobSHA } from "../utils";
 import ConflictStore, { ConflictRecord } from "./conflict-store";
 
-// Pseudo-merge ConflictState classifier (PSEUDO-MERGE-MODE.md, stage 3).
-//
-// Single algorithm, per-ConflictRecord classification. Reads the live
-// vault + ConflictStore record cache to derive (baseExists,
-// siblingExists, baseSha, siblingSha) and decides one of four
-// outcomes (Decision below) or no-op. modify-vs-delete is NOT a
+// Per-ConflictRecord classifier. Implements Phase A of
+// `evaluateConflictState` per docs/PSEUDO-MERGE-MODE.md §5 (drain-start
+// pseudocode). Reads the live vault + ConflictStore record cache to
+// derive (baseExists, siblingExists, baseSha, siblingSha) and decides
+// one of three outcomes (Decision below). modify-vs-delete is NOT a
 // conflict kind — it auto-resolves at push-time in favor of local
 // modify (see conflict-detection.ts → attemptAutoMerge's "modify-
 // wins" outcome); the classifier never sees it.
-//
-// Per spec §"Trigger points" this is invoked from 4 places:
-//   - drain-start sweep (Sync2Manager.drain)
-//   - drain-end sweep   (Sync2Manager.drain)
-//   - UI op on conflict-related view
-//   - ConflictWatcher fast-path hit (vault.on event)
 
 // ── Decision (output of the pure classify() function) ─────────────────
 
@@ -38,15 +31,6 @@ export type Decision =
   // baseSha content to main on path-close.
   | { type: "accept-theirs" };
 
-// `delete-wins-cascade` was removed in Stage 13 (Decision #30 in
-// PSEUDO-MERGE-MODE.md). The old behavior — "user deletes base →
-// engine cascade-deletes every sibling for the path" — broke the
-// mobile delete-then-rename workflow because the cascade fired
-// between the user's two ops. Stage 13: row 3 returns noop; deletion
-// now requires the user to remove EVERY sibling for the path too
-// (or rename one onto the base, which removes both the sibling and
-// reuses the now-converged base).
-
 // Pure classifier. No I/O. All inputs are already-fetched stat/hash
 // values.
 export function classify(
@@ -57,9 +41,7 @@ export function classify(
   siblingExists: boolean,
   siblingSha: string | null,
 ): Decision {
-  // kind is currently informational only — classify() doesn't branch
-  // on it. Stage 13 unified the two remaining kinds (modify-vs-modify
-  // and delete-vs-modify) under a single rule set.
+  // `kind` is observational — classify() does not branch on it.
   void record.kind;
 
   // !siblingExists → accept ours regardless of kind. Both
@@ -73,9 +55,12 @@ export function classify(
   // siblingExists from here on.
 
   if (!baseExists) {
-    // Stage 13 (Decision #30): user deleted base, sibling alive —
-    // wait for the user to do the rest. Sibling stays; record stays.
-    // No cascade. This unblocks delete-then-rename on mobile.
+    // User deleted base, sibling alive — wait. Sibling and record
+    // both stay. Engine never cascade-deletes siblings on bare
+    // base-deletion; the user must remove every sibling for the
+    // path too (or rename one onto the base). This is what enables
+    // the mobile delete-then-rename workflow; see
+    // docs/PSEUDO-MERGE-MODE.md §6.2.
     return { type: "noop" };
   }
 
@@ -145,10 +130,6 @@ export async function evaluateConflictState(
     const baseStat = await vault.adapter.stat(vaultPath);
     const baseExists = baseStat !== null && baseStat.type === "file";
     const baseSize = baseExists ? baseStat!.size : null;
-
-    // Stage 13 (Decision #30): the path-level Row 3 cascade is gone.
-    // Records with `!baseExists` no longer trigger an engine-driven
-    // sibling sweep; per-record classify() returns noop instead.
 
     // Lazy base SHA: computed (or cache-hit) on first record that
     // needs it. After computation it's cached in `baseShaCached` for

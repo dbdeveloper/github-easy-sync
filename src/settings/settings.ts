@@ -41,10 +41,9 @@ export interface GitHubSyncSettings {
 
   enableLogging: boolean;
 
-  // Stage 13 (Decision #36): the `commitMessage` template field is
-  // gone. Commit messages are hardcoded via formatX helpers in
-  // src/sync2/commit-message.ts. The only user-tunable component of
-  // a sync2 commit is `deviceLabel` below (the trailing suffix).
+  // No commit-message template field. Commit messages are hardcoded
+  // via formatX helpers in src/sync2/commit-message.ts; `deviceLabel`
+  // below is the only user-tunable component (the trailing suffix).
 
   // When sync2 is offline (last push failed) and this is true,
   // subsequent Sync clicks fold into the latest pending batch

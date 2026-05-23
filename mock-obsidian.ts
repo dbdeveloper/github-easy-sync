@@ -147,7 +147,7 @@ export class Vault {
   }
 
   // Subscribe to vault events. ConflictWatcher relies on this for
-  // its delete/modify/rename triggers — Stage 4 tests fire events
+  // its delete/modify/rename triggers — tests fire events
   // synchronously via the test helper `fireEvent` below.
   on(event: string, cb: (...args: unknown[]) => void): EventRef {
     const ref = { event, cb };

@@ -244,9 +244,8 @@ describe("TreeBuilder", () => {
     });
     const { batch } = await f.builder.buildTreeEntries(id);
     expect(batch.id).toBe(id);
-    // Stage 13 Group 9 follow-on: batch.commitMessage no longer
-    // exists; processBatch derives the message from synthetic +
-    // deviceLabel at push time.
+    // batch.commitMessage is not persisted; processBatch derives
+    // the message from synthetic + deviceLabel at push time.
     expect(batch.synthetic).toBe(false);
     expect(batch.parentCommitSha).toBe("abc");
     expect(batch.parentTreeSha).toBe("def");

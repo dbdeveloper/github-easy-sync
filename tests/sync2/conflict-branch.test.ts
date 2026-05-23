@@ -5,8 +5,8 @@ import {
   CONFLICT_BRANCH_PREFIX,
 } from "../../src/sync2/conflict-branch";
 
-// Pseudo-merge conflict-branch naming tests
-// (PSEUDO-MERGE-MODE.md §"Branch naming + lifecycle", stage 7a).
+// Conflict-branch naming tests. See src/sync2/conflict-branch.ts
+// + docs/PSEUDO-MERGE-MODE.md §4.3.
 
 describe("buildConflictBranchName", () => {
   const TS = Date.UTC(2026, 4, 20, 14, 30, 22, 847);

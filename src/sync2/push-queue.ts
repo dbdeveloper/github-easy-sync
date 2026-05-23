@@ -50,15 +50,11 @@ function newBatchId(now: Date = new Date()): string {
 export type EnqueueMeta = {
   parentCommitSha: string | null;
   parentTreeSha: string | null;
-  // Stage 13 (Phase 4 implementation): marks Phase B-synthesized
-  // resolution side-batches. mergeIntoLatestPending must skip these
-  // so user edits never fold into resolution commits. Default false
-  // (user-driven batches). See PSEUDO-MERGE-MODE.md §"Commit message
-  // formats (Stage 13 — hardcoded)" + §"EnqueueMeta schema".
-  //
-  // Optional during the Stage 13 migration: existing callsites and
-  // batches without the field default to `false` via defensive
-  // coercion in readMeta (added in Phase 4 alongside actual wiring).
+  // Marks Phase B-synthesized resolution side-batches.
+  // mergeIntoLatestPending must skip these so user edits never fold
+  // into resolution commits. Default false (user-driven batches);
+  // legacy meta.json without the field is coerced to false in
+  // readMeta. See docs/PSEUDO-MERGE-MODE.md §10 Scenario E.
   synthetic?: boolean;
 };
 
@@ -135,13 +131,14 @@ export default class PushQueue {
     return id;
   }
 
-  // Stage 13 — Phase B side-batch synthesis. Phase 4 Group 1
-  // implementation of the contract documented in PSEUDO-MERGE-MODE.md
-  // §"PushQueue.enqueueSynthetic — API contract":
+  // Phase B side-batch synthesis. Used by drain when
+  // evaluateConflictState closes a path; see
+  // docs/PSEUDO-MERGE-MODE.md §5 (drain pseudocode) and §10 Scenario
+  // E for how each per-path closure becomes its own commit on main.
   //
-  //   - Single path per synthetic batch. Phase B creates one per
-  //     closed path so each resolution is a discrete commit on main
-  //     (preserve-all-commits principle).
+  //   - Single path per synthetic batch — Phase B creates one per
+  //     closed path so each resolution is a discrete commit
+  //     (preserve-all-commits, see §4.4).
   //   - synthetic: true persisted in meta.json. mergeIntoLatestPending
   //     skips these so user edits never fold into a resolution batch.
   //   - content: Uint8Array → push file content. null → push deletion.
@@ -150,10 +147,6 @@ export default class PushQueue {
   //   - Does NOT merge with existing pending batches — each Phase B
   //     closure is its own batch even if a synthetic one already
   //     exists for the same path.
-  //   - commitMessage is left empty; processBatch derives the actual
-  //     message inline from `meta.synthetic` + deviceLabel (Decision
-  //     #36 in PSEUDO-MERGE-MODE.md). Group 9 removes the
-  //     commitMessage field from the schema entirely.
   async enqueueSynthetic(args: {
     path: string;
     content: Uint8Array | null;
@@ -383,11 +376,10 @@ export default class PushQueue {
         `${batchDir}/${ATTEMPTED_FILE}`,
       );
       if (attempted) continue;
-      // Stage 13: synthetic batches (Phase B resolution side-batches)
-      // never fold with user edits. Provenance stays clean — user
-      // changes go into their own batch, even if a synthetic one is
-      // the youngest pending entry. See Decision #36 in
-      // PSEUDO-MERGE-MODE.md.
+      // Synthetic batches (Phase B resolution side-batches) never
+      // fold with user edits — provenance stays clean. User changes
+      // go into their own batch even if a synthetic one is the
+      // youngest pending entry.
       const meta = await this.readMeta(batchDir);
       if (meta.synthetic) continue;
       target = ids[i];
@@ -446,11 +438,6 @@ export default class PushQueue {
       JSON.stringify(raw),
     );
   }
-
-  // `updateCommitMessage` removed in Stage 13 Group 9 follow-on
-  // (Decision #36). Commit messages are derived at processBatch time
-  // from `batch.synthetic` + `deviceLabel` — there's no persisted
-  // template to refresh after an accumulate-merge.
 
   // Read a single file's bytes from inside the batch's vault/ snapshot.
   // Used by Sync2Manager during conflict reconciliation to obtain the
@@ -606,9 +593,8 @@ export default class PushQueue {
       ...meta,
       uploadedBlobs: meta.uploadedBlobs ?? {},
       fileMtimes: meta.fileMtimes ?? {},
-      // Persist explicit boolean. Pre-Stage-13 batches without this
-      // field deserialize as `false` via the readMeta default — see
-      // §"EnqueueMeta schema (Stage 13)" in PSEUDO-MERGE-MODE.md.
+      // Persist explicit boolean. Legacy batches without this field
+      // deserialize as `false` via the readMeta default.
       synthetic: meta.synthetic === true,
     };
     await this.vault.adapter.write(

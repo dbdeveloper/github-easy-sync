@@ -8,13 +8,12 @@ import ConflictStore from "../../src/sync2/conflict-store";
 import { evaluateConflictState } from "../../src/sync2/conflict-classifier";
 import { timed } from "./perf-helpers";
 
-// P5 — classifier sweep at scale (PSEUDO-MERGE-MODE.md §"Open
-// questions" #3). Drain-start sweep will call
+// P5 — classifier sweep at scale. Drain-start sweep calls
 // evaluateConflictState() once per drain, walking every
-// ConflictRecord in the store. The question is whether the per-
-// record (mtime, size) → cached siblingSha watermark is fast
-// enough at N=100…1000 records on mobile-class hardware, or whether
-// we need a different bucketing structure.
+// ConflictRecord in the store. This benchmark confirms that the
+// per-record (mtime, size) → cached siblingSha watermark stays
+// fast enough at N=100…1000 records on mobile-class hardware
+// without a different bucketing structure.
 //
 // This is a self-contained local benchmark — no GitHub network, no
 // real client. It builds N records on a tmpfs vault, then times two

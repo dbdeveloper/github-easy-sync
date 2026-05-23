@@ -10,8 +10,9 @@ import {
 import { mergeText } from "./three-way-merge";
 import { ConflictKind } from "./conflict-store";
 
-// Pseudo-merge conflict-detection helpers
-// (PSEUDO-MERGE-MODE.md §"Auto-merge attempt").
+// Auto-merge dispatch helpers. See docs/PSEUDO-MERGE-MODE.md §7 for
+// the dispatch table (text 3-way / plugin-js semver / binary always-
+// register / modify-vs-delete short-circuit).
 //
 // Pure functions. No vault/network I/O. Wired into
 // `Sync2Manager.applyRemoteAddOrModify` (pull side) and

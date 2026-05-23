@@ -4,11 +4,9 @@
 
 import { App, Modal } from "obsidian";
 
-// Pseudo-merge stage 10 — pre-sync confirmation modal
-// (PSEUDO-MERGE-MODE.md §"4-точкове попередження" #2).
-//
-// Fires before EVERY manual sync click while ConflictStore has at
-// least one active record. Spec text:
+// Pre-sync confirmation modal — one of three visibility surfaces
+// for pending conflicts. Fires before EVERY manual sync click while
+// ConflictStore has at least one active record:
 //
 //   "N file(s) still in conflict. [resolve] [sync anyway]"
 //
@@ -16,16 +14,14 @@ import { App, Modal } from "obsidian";
 // changed their mind mid-click). Returns the user's chosen action:
 //
 //   - "resolve"     — user wants to act on the conflicts now;
-//                     caller opens the first sibling in the editor
-//                     (Diff2 widget when it lands in stage 2 of
-//                     the doc hierarchy).
+//                     caller opens the first sibling in the editor.
 //   - "sync-anyway" — user accepts the warning; sync proceeds.
 //   - "cancel"      — bail; sync skipped.
 //
 // Modal is fired by manual sync() / syncCurrentFile() only.
-// Background drains (interval tick, watchdog, onload startup)
-// skip the modal — they're not user-driven and a blocking dialog
-// would surprise the user.
+// Background drains (interval tick, watchdog, onload startup) skip
+// the modal — they're not user-driven and a blocking dialog would
+// surprise the user.
 
 export type PreSyncDecision = "resolve" | "sync-anyway" | "cancel";
 

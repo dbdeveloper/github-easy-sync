@@ -29,14 +29,11 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    // Stage 13 (Decision #21 revision): the settings-tab "Pending
-    // conflicts" header + record list was removed. Visibility for
-    // unresolved conflicts now lives in three places: status bar,
-    // pre-sync modal, ribbon badge. The settings-tab variant was a
-    // detail surface that didn't pull its weight — users with a
-    // conflict click the status bar / ribbon to open the sibling,
-    // not the settings tab. Detailed conflict list will live in
-    // Diff2 (stage 2) as a dedicated UI surface.
+    // Visibility for unresolved conflicts lives in three places:
+    // status bar, pre-sync modal, ribbon badge. The settings tab
+    // does NOT carry a conflict list — users with a conflict click
+    // the status bar or ribbon to open the sibling, not the
+    // settings tab.
 
     // ── Remote repository ────────────────────────────────────────────
     new Setting(containerEl).setName("Remote Repository").setHeading();
@@ -287,12 +284,11 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     // ── Device identity ─────────────────────────────────────────────
     new Setting(containerEl).setName("Sync").setHeading();
 
-    // Both commit-message inputs render a live preview directly
-    // Stage 13: commit-message template input removed (Decision #36).
-    // Hardcoded formats live in src/sync2/commit-message.ts. The
-    // device label is the only user-tunable component now — it
-    // appears as the trailing " (label)" suffix on every sync2
-    // commit. Preview shows the user what that looks like.
+    // No commit-message template input. Hardcoded formats live in
+    // src/sync2/commit-message.ts; the device label is the only
+    // user-tunable component, appearing as the trailing " (label)"
+    // suffix on every sync2 commit. The live preview below shows
+    // the user what that looks like.
     const previews: Array<() => void> = [];
     const renderDeviceLabelPreview = (): string =>
       formatSyncMessage(this.plugin.settings.deviceLabel ?? "Obsidian");
@@ -396,11 +392,6 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
       });
-
-    // Stage 13 (Decision #36): the "Commit message" template input
-    // is gone. Commit messages are hardcoded — see
-    // src/sync2/commit-message.ts. Device label above is the only
-    // user-tunable component of every sync2 commit.
 
     new Setting(containerEl)
       .setName("Auto-canonicalize text files")

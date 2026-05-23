@@ -246,9 +246,9 @@ export default class GitHubSyncPlugin extends Plugin {
       await queue.clearAll();
     }
     if (this.conflictStore) {
-      // Decision #22: rename vault sibling files BEFORE dropping the
-      // record index, so a future re-enable doesn't collide with the
-      // user's leftover conflict-from artifacts.
+      // Rename vault sibling files BEFORE dropping the record index,
+      // so a future re-enable doesn't collide with the user's
+      // leftover conflict-from artifacts.
       await this.conflictStore.renameVaultSiblingsToUnresolved();
       await this.conflictStore.clearAll();
     }
@@ -269,11 +269,10 @@ export default class GitHubSyncPlugin extends Plugin {
       lastSyncCommitSha: store.getLastSyncCommitSha(),
       paths: store.paths().length,
     });
-    // (Stage 13 wire-up: AtomicWriteRecovery sweep moved down to AFTER
-    // ConflictStore.load so the sweep can resolve `.sync-bak` files
-    // owned by conflict records via record.theirsBlobSha SHA-verify,
-    // not just snapshot-based reasoning. See block after conflictStore
-    // construction below.)
+    // AtomicWriteRecovery sweep runs AFTER ConflictStore.load (see
+    // block below) so the sweep can resolve `.sync-tmp` staging
+    // files owned by conflict records via record.theirsBlobSha
+    // SHA-verify, not just snapshot-based reasoning.
     const gi = new GI(vaultRoot);
     const queue = new PushQueue({
       vault: this.app.vault,
@@ -322,7 +321,7 @@ export default class GitHubSyncPlugin extends Plugin {
     await conflictStore.load();
     this.conflictStore = conflictStore;
     // Crash-recovery sweep for atomic-write artifacts AND for
-    // ConflictStore vault-level `.sync-bak` siblings. Runs BEFORE the
+    // ConflictStore vault-level `.sync-tmp` staging siblings. Runs BEFORE the
     // engine starts touching the vault so any leftover staging from a
     // previous crash is reconciled against the snapshot + conflict
     // stores before findChanges or drain sees them.
@@ -337,11 +336,11 @@ export default class GitHubSyncPlugin extends Plugin {
     } catch (err) {
       await this.logger.error("Atomic-write recovery sweep failed", `${err}`);
     }
-    // Stage 13 wire-up (PSEUDO-MERGE-MODE.md §"Counter formula +
-    // vault.on listeners role"): ConflictCounter owns the count
-    // formula + debounced recompute; ConflictWatcher just calls
-    // counter.markDirty() on relevant vault events; the counter
-    // notifies UI surfaces via subscribe().
+    // ConflictCounter owns the count formula + debounced recompute;
+    // ConflictWatcher just calls counter.markDirty() on relevant
+    // vault events; the counter notifies UI surfaces via
+    // subscribe(). See docs/PSEUDO-MERGE-MODE.md §5 for the layer
+    // separation.
     const conflictCounter = new ConflictCounter({
       vault: this.app.vault,
       store: conflictStore,
@@ -374,8 +373,8 @@ export default class GitHubSyncPlugin extends Plugin {
       selfPluginId: manifest.id,
       // Label read live from settings so the user can change it in
       // the settings tab and the next sync picks up the new value —
-      // no plugin reload needed. Stage 13: commitMessage template is
-      // gone (Decision #36); messages are hardcoded via commit-message.ts.
+      // no plugin reload needed. Commit messages themselves are
+      // hardcoded in src/sync2/commit-message.ts.
       deviceLabel: () => this.settings.deviceLabel ?? "Obsidian",
       // Remote identity read live so the manager catches a mid-session
       // settings change (user edits the repo coords in the settings
@@ -549,12 +548,11 @@ export default class GitHubSyncPlugin extends Plugin {
     return false;
   }
 
-  // Refresh every visibility surface (status bar, ribbon badge,
-  // settings tab) from the current ConflictCounter value. The
-  // counter applies the Stage 13 formula (excludes records with
-  // !siblingExists and records where siblingSha == baseSha) so the
-  // UI badge reflects what the user actually still has to resolve,
-  // not the raw record count.
+  // Refresh every visibility surface (status bar, ribbon badge)
+  // from the current ConflictCounter value. The counter formula
+  // (excludes records with !siblingExists and records where
+  // siblingSha == baseSha) reflects what the user actually still
+  // has to resolve, not the raw record count.
   refreshConflictUI(): void {
     const count = this.conflictCounter?.getValue() ?? 0;
     this.conflictStatusIndicator?.refresh(count);
@@ -604,10 +602,10 @@ export default class GitHubSyncPlugin extends Plugin {
     if (this.statusBarItem) return;
     this.statusBarItem = this.addStatusBarItem();
     this.updateStatusBarItem();
-    // Stage 10 — conflict-count indicator lives in its own
-    // addStatusBarItem element so user themes can style it
-    // independently. Click opens the first sibling in the editor
-    // (same shortcut the pre-sync modal's "Resolve" button uses).
+    // Conflict-count indicator lives in its own addStatusBarItem
+    // element so user themes can style it independently. Click
+    // opens the first sibling in the editor (same shortcut the
+    // pre-sync modal's "Resolve" button uses).
     if (!this.conflictStatusIndicator) {
       const indicatorParent = this.addStatusBarItem();
       this.conflictStatusIndicator = new ConflictStatusIndicator(

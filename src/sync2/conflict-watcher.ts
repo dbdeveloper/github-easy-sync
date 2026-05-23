@@ -6,28 +6,21 @@ import { Vault, TAbstractFile, EventRef } from "obsidian";
 import ConflictStore from "./conflict-store";
 import { ConflictCounter } from "./conflict-counter";
 
-// Pseudo-merge Stage 13 ConflictWatcher (PSEUDO-MERGE-MODE.md
-// §"Counter formula + vault.on listeners role").
+// ConflictWatcher. Subscribes to `vault.on('delete' | 'modify' |
+// 'rename')` and, on each event, runs an O(1) fast-path Set check
+// — is the touched path in ConflictStore as a base path OR a
+// sibling path? If yes, calls `counter.markDirty()`. If no (99% of
+// real vault traffic), bails out immediately.
 //
-// Subscribes to `vault.on('delete' | 'modify' | 'rename')` and, on
-// each event, runs the O(1) fast-path Set check — is the touched
-// path in ConflictStore as a base path OR a sibling path? If yes,
-// calls `counter.markDirty()`. If no (99% of real vault traffic),
-// bails out immediately.
+// The watcher is READ-ONLY: it does NOT mutate the store, does NOT
+// call evaluateConflictState, does NOT delete files. All resolution
+// happens at drain-start (the single point of state mutation
+// described in docs/PSEUDO-MERGE-MODE.md §5). The watcher's only
+// job is to keep the UI counter reactive — when the user deletes a
+// sibling, the badge updates before the next [Sync] click.
 //
-// Stage 13 pivot: the watcher is READ-ONLY. It does NOT mutate the
-// store, does NOT call evaluateConflictState, does NOT delete files.
-// All resolution happens at drain-start (single point of state
-// mutation). The watcher's only job is to keep the UI counter
-// reactive — when the user deletes a sibling, the badge updates
-// before the next [Sync] click.
-//
-// Why this is the right architecture: pre-Stage-13, listeners
-// mutated the store via evaluateConflictState. That produced
-// mid-drain races (the 2026-05-21 mobile incident class) because
-// the drain itself wrote siblings which then re-triggered the
-// listener. Stage 13 separates concerns: drain owns mutations,
-// listener owns UI freshness, counter owns the formula.
+// The strict separation prevents the mid-drain races that arise when
+// the same listener mutates state the drain is also writing.
 
 export interface ConflictWatcherDeps {
   vault: Vault;

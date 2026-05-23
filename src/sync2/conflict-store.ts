@@ -6,11 +6,11 @@ import { Vault } from "obsidian";
 import { calculateGitBlobSHA } from "../utils";
 import { stagingPathFor } from "./atomic-write";
 
-// Pseudo-merge ConflictStore (PSEUDO-MERGE-MODE.md, stage 2).
-//
-// Single source of truth for every active conflict on this device.
-// `inConflictFiles` is derived on the fly from the records here —
-// callers must NOT keep a parallel persistent set.
+// ConflictStore — a single source of truth for every active conflict
+// on this device. `inConflictFiles` is derived on the fly from the
+// records here; callers must NOT keep a parallel persistent set.
+// See docs/PSEUDO-MERGE-MODE.md §4.2 for the sibling-file pattern
+// and §9.4 for the create() protocol.
 //
 // On-disk layout (one folder per record):
 //
@@ -26,17 +26,10 @@ import { stagingPathFor } from "./atomic-write";
 // `.sync-tmp` pre-suffix file (e.g., `note.conflict-from-Phone-...sync-tmp.md`)
 // and atomically renamed to its final name. Crash-recovery is handled
 // by AtomicWriteRecovery.sweep() via ownership dispatch on .sync-tmp.
-// See PSEUDO-MERGE-MODE.md §9 for the full protocol.
 
 const CONFLICTS_DIRNAME = ".conflicts";
 const META_FILE = "meta.json";
 const META_TMP_FILE = "meta.json.tmp";
-// Legacy: pre-Stage-13 ConflictStore wrote a `sibling-content.bin`
-// backup file inside each `<recordDir>` for crash recovery. Removed
-// when staging moved to vault-level `.sync-tmp` (see create() below).
-// Old install dirs may still carry a `sibling-content.bin` artifact;
-// it's harmless dead weight and gets removed by `delete()` along with
-// the rest of the recordDir.
 
 // Two kinds: modify-vs-modify (both sides edited) and delete-vs-modify
 // (local deleted, remote modified). The third theoretical kind —
@@ -54,7 +47,7 @@ export interface ConflictRecord {
   vaultPath: string;
   kind: ConflictKind;
 
-  // ── Immutable identity (set at create; never updated) ──────────────
+  // ── Immutable identity (set at creation; never updated) ──────────────
   // Used for dedup at create() — the same (vaultPath, theirsBlobSha)
   // pair returns the existing record instead of spawning a duplicate.
   // `oursBlobSha` is null only for kind=delete-vs-modify (local
@@ -69,17 +62,16 @@ export interface ConflictRecord {
   siblingPath: string;
   // mtime + size act as a watermark: when stat() shows them unchanged,
   // siblingSha is trusted as-is and no read+hash happens
-  // (findChanges-style cache, see PSEUDO-MERGE-MODE.md §"Mtime + size
-  // cache"). On change → re-read + re-hash, then refresh all three
-  // fields together.
+  // (findChanges-style cache). On change → re-read + re-hash, then
+  // refresh all three fields together.
   siblingMtime: number;
   siblingSize: number;
   siblingSha: string;
 
   // ── Base location + content cache ──────────────────────────────────
   // All three null when the base file does not exist on disk
-  // (kind=delete-vs-modify initial state OR after user deleted base
-  // in any kind). Otherwise treated identically to sibling cache.
+  // (kind=delete-vs-modify initial state OR after the user deleted base
+  // in any kind). Otherwise, treated identically to sibling cache.
   baseMtime: number | null;
   baseSize: number | null;
   baseSha: string | null;
@@ -120,7 +112,7 @@ export interface CreateArgs {
 }
 
 // Optional partial update for cache fields. Used by classifier
-// when stat reveals user-edited sibling or base. Routed through the
+// when stat reveals a user-edited sibling or base. Routed through the
 // metaWriteQueue to serialize concurrent updates.
 export interface CacheUpdate {
   siblingMtime?: number;
@@ -164,23 +156,17 @@ export default class ConflictStore {
   // recovery sweep. Idempotent — re-running after vault mutations
   // refreshes the index without leaking stale entries.
   //
-  // Recovery semantics (Stage 13 — PSEUDO-MERGE-MODE.md §"Що
-  // видаляється з ConflictStore.load() (Stage 13)" + Decision #31):
-  //   - meta.json missing      → step-1 crash, rmdir recordDir
-  //   - meta.json corrupt JSON → skip (don't rmdir; let user notice)
+  // Recovery semantics for in-progress create() steps that crashed:
+  //   - meta.json missing       → step-1 crash, rmdir recordDir
+  //   - meta.json corrupt JSON  → skip (don't rmdir; let user notice)
   //   - else                    → index normally
   //
-  // load() does NOT touch the vault filesystem. Missing vault siblings
-  // (user deleted them externally) are NOT restored from the
-  // `sibling-content.bin` backup. The drain-start Phase B sweep
-  // sees `!siblingExists` on each affected record and drops it on
-  // the next sync — that's the resolution signal.
-  //
-  // Pre-Stage-13 behavior auto-restored deleted siblings on load(),
-  // which caused the 2026-05-21 mobile incident: user wiped sibling
-  // files in the file explorer, plugin restart resurrected them,
-  // conflicts never closed. Decision #31 made the load() pure
-  // metadata read.
+  // load() does NOT touch the vault filesystem (see
+  // docs/PSEUDO-MERGE-MODE.md §9.7). Missing vault siblings — including
+  // ones the user deleted externally — are NOT resurrected here.
+  // The drain-start Phase B sweep sees `!siblingExists` on each
+  // affected record and drops it on the next sync; that's the
+  // resolution signal.
   async load(): Promise<void> {
     this.records.clear();
     this.byPath.clear();
@@ -208,39 +194,32 @@ export default class ConflictStore {
         record = null;
       }
       if (record === null) continue;
-      // Stage 13: do NOT consult the vault filesystem here. The record
-      // gets indexed exactly as persisted. Drain-start Phase B is the
-      // authoritative reconciliation point.
+      // Do NOT consult the vault filesystem here — the record is
+      // indexed exactly as persisted. Drain-start Phase B is the
+      // authoritative reconciliation point (§9.7 of the spec).
       this.indexRecord(record);
     }
   }
 
-  // Create a new conflict record using the 3-step atomic protocol.
+  // Create a new conflict record using the 3-step atomic protocol
+  // documented in docs/PSEUDO-MERGE-MODE.md §9.4 (Path B):
   //
-  //   1. mkdir recordDir + write sibling-content.bin (backup first)
-  //   2. atomic write of meta.json via .tmp + rename
-  //   3. write vault sibling
-  //
-  // The order is "record-first": a crash before step 2 leaves no
-  // index entry (orphan dir gets reaped on next load); a crash
-  // between step 2 and step 3 leaves recoverable state (load
-  // rewrites the sibling from the backup); a crash after step 3 is
-  // a fully successful create.
+  //   1. writeBinary(<sibling>.sync-tmp.<ext>, theirsContent)
+  //   2. atomic write of meta.json via .tmp + rename (persistRecord)
+  //   3. atomic rename staging → siblingPath
   //
   // Dedup: callers retry on the same (vaultPath, theirsBlobSha) freely.
   // If a record with that pair already exists, this returns it without
-  // touching disk.
+  // touching the disk.
   async create(args: CreateArgs): Promise<ConflictRecord> {
     const existing = this.findDuplicate(args.vaultPath, args.theirsBlobSha);
     if (existing) return existing;
 
-    // Stage 13 (Decision #33): filesystem-orphan adoption. Scan the
-    // parent directory of vaultPath for `<stem>.conflict-from-*<ext>`
-    // files whose content SHA matches theirsBlobSha. Match → adopt
+    // Filesystem-orphan adoption: scan the parent directory of
+    // vaultPath for `<stem>.conflict-from-*<ext>` files whose
+    // content SHA matches theirsBlobSha. Match → adopt
     // the orphan: build the record pointing at the existing file and
-    // skip the vault writeBinary in step 3 below. Closes the
-    // 2026-05-21 mobile incident root cause #2 (4 phantom duplicate
-    // `.gitignore.conflict-from-*` siblings spawned across retries).
+    // skip the vault writeBinary in step 3 below.
     const orphan = await this.findOrphanSibling(
       args.vaultPath,
       args.theirsBlobSha,
@@ -260,17 +239,12 @@ export default class ConflictStore {
     const recordDir = `${this.conflictsRoot}/${id}`;
     const stagingPath = stagingPathFor(siblingPath, "tmp");
 
-    // Vault-level `.sync-tmp` staging (Decision #29; suffix corrected
-    // post-Stage-13 to match semantics — see PSEUDO-MERGE-MODE.md §9).
-    // `.sync-tmp` carries NEW bytes destined for a not-yet-existing
-    // target; `.sync-bak` is reserved for backups of files that
-    // already existed (atomicWriteFile's rollback target). Sibling
-    // registration writes a brand-new file → tmp, not bak.
-    //
-    // 3-step protocol:
-    //   1. writeBinary(<sibling>.sync-tmp.<ext>, theirsContent)
-    //   2. atomic write meta.json (via persistRecord — tmp + rename)
-    //   3. atomic rename staging → siblingPath
+    // Vault-level `.sync-tmp` staging — `.sync-tmp` carries NEW bytes
+    // destined for a not-yet-existing target. (`.sync-bak` is the
+    // rollback-target suffix used by atomicWriteFile for backups of
+    // files that already existed; sibling registration writes a
+    // brand-new file so it uses tmp, not bak. See
+    // docs/PSEUDO-MERGE-MODE.md §9.1 for the suffix roles.)
     //
     // Adoption skips Steps 1 + 3: the sibling file already lives at
     // siblingPath, no need to stage or rename.
@@ -284,7 +258,7 @@ export default class ConflictStore {
     }
 
     // ── Step 2: persist meta.json ──────────────────────────────────
-    // Build the record. siblingMtime/Size get final values in step 3
+    // Build the record. siblingMtime/Size gets final values in step 3
     // after the rename lands; for now we seed with the size of the
     // bytes we just wrote.
     const record: ConflictRecord = {
@@ -309,7 +283,7 @@ export default class ConflictStore {
     // ── Step 3: atomic rename staging → siblingPath (skip for adoption)
     if (!orphan) {
       // Capacitor's rename throws on existing destination — clean any
-      // stale file (e.g., the orphan-adoption path was checked but a
+      // stale file (e.g., the orphan-adoption path was checked, but a
       // bytes-identical sibling appeared between then and now) before
       // rename. Cross-platform-safe.
       if (await this.vault.adapter.exists(siblingPath)) {
@@ -319,8 +293,8 @@ export default class ConflictStore {
     }
 
     // Index the record NOW, before the optional stat refresh. If the
-    // refresh throws (it's best-effort cache hygiene, not a
-    // correctness step) the record still lands in the in-memory index
+    // refresh throws (it's a best-effort cache hygiene, not a
+    // correctness step), the record still lands in the in-memory index
     // so future create() calls with the same identity short-circuit
     // via findDuplicate instead of spawning another orphan record.
     this.indexRecord(record);
@@ -338,7 +312,7 @@ export default class ConflictStore {
       }
     } catch {
       // Swallowed: the record is already indexed; stat refresh is
-      // strictly an optimisation.
+      // strictly an optimization.
     }
     return record;
   }
@@ -442,8 +416,9 @@ export default class ConflictStore {
   //
   // Does NOT touch vault sibling files — that's the caller's job via
   // renameVaultSiblingsToUnresolved() when the trigger is Reset
-  // (Decision #22), or no-op when the trigger is repo switch (vault
-  // siblings stay as live conflicts against the new remote).
+  // — siblings get renamed via renameVaultSiblingsToUnresolved()
+  // before clearAll() — or no-op when the trigger is repo switch.
+  // (Vault siblings stay as live conflicts against the new remote.)
   async clearAll(): Promise<void> {
     this.records.clear();
     this.byPath.clear();
@@ -453,11 +428,11 @@ export default class ConflictStore {
     }
   }
 
-  // Reset-only (PSEUDO-MERGE-MODE.md Decision #22 + §"Multi-device"):
-  // walk the vault for sibling files matching `*.conflict-from-*` and
-  // rename each to `<stem>.unresolved-<original-ts>.<ext>`. Decouples
-  // the rename from clearAll so the repo-switch path can wipe records
-  // without disturbing user-visible files. Returns count renamed.
+  // Reset-only: walk the vault for sibling files matching
+  // `*.conflict-from-*` and rename each to
+  // `<stem>.unresolved-<original-ts>.<ext>`. Decouples the rename
+  // from clearAll so the repo-switch path can wipe records without
+  // disturbing user-visible files. Returns count renamed.
   //
   // Mobile/Capacitor safety: rename throws if destination exists, so
   // we skip silently when a stale `.unresolved-*` artifact is already
@@ -534,8 +509,8 @@ export default class ConflictStore {
   }
 
   // Derived inConflictFiles set, computed on every call. Cheap because
-  // it's just the byPath keys. PSEUDO-MERGE-MODE.md §"Стан per-device"
-  // dictates that this is NOT persisted separately.
+  // it's just the byPath keys. NOT persisted separately — records
+  // are the single source of truth.
   pathSet(): Set<string> {
     return new Set(this.byPath.keys());
   }
@@ -591,7 +566,7 @@ export default class ConflictStore {
     // Capacitor's adapter.rename on iOS/Android does NOT overwrite an
     // existing destination — it throws "Destination file already
     // exists". This bit users on the second persistRecord call inside
-    // create() (after the sibling write refreshes mtime/size) and
+    // create() (after the sibling writing refreshes mtime/size) and
     // produced phantom duplicate conflict records because indexRecord
     // never ran. Explicit remove before rename keeps the protocol
     // portable across desktop + mobile.
@@ -662,14 +637,14 @@ export function buildSiblingPath(
   return `${dir}${stem}.conflict-from-${safeLabel}-${iso}${ext}`;
 }
 
-// Reset-time helper (PSEUDO-MERGE-MODE.md Decision #22): given a
-// sibling filename of the shape `<stem>.conflict-from-<label>-<isoTs><ext>`
-// produced by buildSiblingPath, return the rewritten "unresolved" form
-// `<stem>.unresolved-<isoTs><ext>` — dropping the device label so the
-// rename survives across plugin re-enables on different devices. The
-// `<isoTs>` segment is anchored on buildSiblingPath's exact shape
-// (YYYY-MM-DDTHH-MM-SSZ); names that don't match return null so the
-// reset walker leaves unrelated files alone.
+// Reset-time helper: given a sibling filename of the shape
+// `<stem>.conflict-from-<label>-<isoTs><ext>` produced by
+// buildSiblingPath, return the rewritten "unresolved" form
+// `<stem>.unresolved-<isoTs><ext>` — dropping the device label so
+// the rename survives across plugin re-enables on different
+// devices. The `<isoTs>` segment is anchored on buildSiblingPath's
+// exact shape (YYYY-MM-DDTHH-MM-SSZ); names that don't match
+// return null so the reset walker leaves unrelated files alone.
 export function unresolvedNameFor(filename: string): string | null {
   const m = filename.match(
     /^(.+?)\.conflict-from-.+-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)(\..+)?$/,

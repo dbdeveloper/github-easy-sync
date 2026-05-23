@@ -153,9 +153,9 @@ export async function createSync2Client(
     selfPluginId: SELF_PLUGIN_ID,
   });
   await conflictStore.load();
-  // Stage 13 wire-up: ConflictCounter + counter-only ConflictWatcher.
-  // The watcher's only side effect is `counter.markDirty()` on
-  // relevant vault events. Production main.ts wires identically.
+  // ConflictCounter + counter-only ConflictWatcher. The watcher's
+  // only side effect is `counter.markDirty()` on relevant vault
+  // events. Production main.ts wires identically.
   const conflictCounter = new ConflictCounter({
     vault,
     store: conflictStore,
@@ -180,8 +180,8 @@ export async function createSync2Client(
     selfPluginId: SELF_PLUGIN_ID,
     // Pass through live getter so I-series tests can mutate
     // `settings.deviceLabel` between syncs and the next push picks
-    // up the new value. Stage 13: no commitMessage template — see
-    // src/sync2/commit-message.ts.
+    // up the new value. (No commitMessage template; see
+    // src/sync2/commit-message.ts.)
     deviceLabel: () => settings.deviceLabel ?? "sync2-int-test",
     remoteIdentity: () => ({
       owner: settings.githubOwner,

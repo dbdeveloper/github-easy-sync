@@ -19,13 +19,13 @@ import ConflictStore, {
 import { calculateGitBlobSHA } from "../../src/utils";
 import { Vault } from "../../mock-obsidian";
 
-// Pseudo-merge ConflictStore tests (PSEUDO-MERGE-MODE.md, stage 2).
+// ConflictStore tests. See src/sync2/conflict-store.ts +
+// docs/PSEUDO-MERGE-MODE.md §4.2 + §9.4 for the contract.
 //
 // Covers:
 //   - 3-step atomic create + per-crash-window recovery sweep
 //   - Dedup by (vaultPath, theirsBlobSha)
 //   - Defensive coercion on load
-//   - kind=modify-vs-delete uses 0-byte sibling + .deleted suffix
 //   - updateCache through metaWriteQueue
 //   - delete + clearAll do NOT touch vault siblings
 
@@ -172,7 +172,7 @@ describe("ConflictStore", () => {
   }
 
   describe("create", () => {
-    it("writes meta.json + vault sibling (no sibling-content.bin under Stage 13) for modify-vs-modify", async () => {
+    it("modify-vs-modify: persists meta.json and lands sibling at final path", async () => {
       await f.store.load();
       writeVaultFile(f.root, "Notes/note.md", "local content\n");
       const rec = await f.store.create(baseArgs());
@@ -181,12 +181,8 @@ describe("ConflictStore", () => {
       // meta.json persisted; tmp atomic-write artifact cleaned.
       expect(fs.existsSync(path.join(dir, "meta.json"))).toBe(true);
       expect(fs.existsSync(path.join(dir, "meta.json.tmp"))).toBe(false);
-      // Sibling staging lives in the vault as a `.sync-tmp` pre-suffix
-      // file (NEW bytes destined for a brand-new sibling — semantically
-      // a "tmp", not a "bak"), then atomically renamed to the final
-      // siblingPath. No legacy `sibling-content.bin` backup inside
-      // the recordDir.
-      expect(fs.existsSync(path.join(dir, "sibling-content.bin"))).toBe(false);
+      // Sibling staging is renamed from `.sync-tmp` pre-suffix to its
+      // final siblingPath atomically (see §9.4).
       expect(fs.existsSync(path.join(f.root, rec.siblingPath))).toBe(true);
       expect(readVaultText(f.root, rec.siblingPath)).toBe("theirs content\n");
     });
@@ -269,26 +265,17 @@ describe("ConflictStore", () => {
       expect(f.store.getAll().length).toBe(2);
     });
 
-    // ─── Stage 13 Phase 3 RED test (Group 7: filesystem-orphan adoption) ─
+    // ─── Filesystem-orphan adoption ────────────────────────────────────
     //
-    // 2026-05-21 mobile incident root cause #2: ConflictStore.create
-    // only de-duplicated against IN-MEMORY records. Orphan sibling
-    // files in the vault (left over from a previous plugin version,
-    // manual cleanup of `.conflicts/`, or any other path that left a
-    // sibling without a record) were ignored — create() spawned a
-    // FRESH sibling with timestamp, so the user saw 4 phantom
-    // duplicate `.gitignore.conflict-from-MacBook-*` files.
-    //
-    // Decision #33 in PSEUDO-MERGE-MODE.md: create() scans the
-    // parent directory of vaultPath for `<stem>.conflict-from-*<ext>`
-    // matching theirsBlobSha. Match → adopt the orphan: create a
-    // record that points at the EXISTING file; no new write.
-    //
-    // Currently FAILS: store.create() unconditionally writes a new
-    // sibling with a fresh timestamped name. The orphan remains
-    // alongside, and the new record points at the new file.
-    // Phase 4 Group 7 adds the directory scan + adoption path.
-    it("N11 (Stage 13): create() adopts an existing orphan sibling matching theirsBlobSha", async () => {
+    // create() must de-duplicate against orphan sibling files in
+    // the vault (left over from a previous plugin version, manual
+    // cleanup of `.conflicts/`, etc.), not only against in-memory
+    // records. When create() finds an orphan
+    // `<stem>.conflict-from-*<ext>` matching theirsBlobSha, it
+    // adopts it: the new record points at the EXISTING file and
+    // no new sibling is written. Without this, repeated
+    // registrations spawn phantom duplicate siblings.
+    it("create() adopts an existing orphan sibling matching theirsBlobSha", async () => {
       await f.store.load();
       writeVaultFile(f.root, "Notes/note.md", "local content\n");
 
@@ -298,9 +285,9 @@ describe("ConflictStore", () => {
       const orphanPath = "Notes/note.conflict-from-OldDevice-2026-01-01T00-00-00Z.md";
       writeVaultFile(f.root, orphanPath, "theirs content\n");
 
-      // Compute the SHA of the orphan's content. Phase 4 spec calls
-      // calculateGitBlobSHA on each candidate orphan; we precompute
-      // the expected match key here.
+      // Compute the SHA of the orphan's content. create() hashes
+      // each candidate orphan and compares against theirsBlobSha;
+      // we precompute the expected match key here.
       const orphanContent = new TextEncoder().encode("theirs content\n");
       const orphanSha = await calculateGitBlobSHA(
         orphanContent.buffer.slice(
@@ -337,12 +324,12 @@ describe("ConflictStore", () => {
   });
 
   describe("crash recovery on load", () => {
-    it("step-1 crash (recordDir + sibling-content.bin but no meta.json) → rmdir recordDir", async () => {
-      // Synthesize the on-disk state a step-1 crash would have left.
+    it("recordDir without meta.json → rmdir on load (step-1 crash recovery)", async () => {
+      // Synthesize the on-disk state a step-1 crash would have left:
+      // recordDir exists but meta.json was never written.
       const orphanId = "11111111-1111-1111-1111-000000000001";
       const orphanDir = path.join(f.conflictsRoot, orphanId);
       fs.mkdirSync(orphanDir, { recursive: true });
-      fs.writeFileSync(path.join(orphanDir, "sibling-content.bin"), "leaked");
 
       await f.store.load();
 
@@ -350,20 +337,12 @@ describe("ConflictStore", () => {
       expect(f.store.getAll().length).toBe(0);
     });
 
-    // Pre-Stage-13 "step-3 crash re-emits sibling from backup" test
-    // was deleted in Phase 4 Group 3 alongside the implementation
-    // change. Stage 13 load() does NOT touch the vault filesystem;
-    // backup re-emission is gone. N10 (immediately below) is the
-    // new contract.
-
     it("step-3 done then user externally deletes vault sibling → record stays indexed", async () => {
-      // Stage 13: load() never resurrects vault content. Record loads
-      // from meta.json; the missing sibling becomes a drain Phase B
-      // drop signal. (Pre-Stage-13 also had a `sibling-content.bin`
-      // backup file inside recordDir; that artifact is gone now —
-      // vault-level `.sync-tmp` staging is the new mechanism and
-      // it's already been renamed to the final siblingPath by the
-      // time create() returns.)
+      // load() never resurrects vault content. The record loads from
+      // meta.json; the missing sibling becomes a drain Phase B drop
+      // signal on the next sync. Vault-level `.sync-tmp` staging is
+      // already renamed to the final siblingPath by the time
+      // create() returns — there is no backup file to re-emit from.
       await f.store.load();
       writeVaultFile(f.root, "Notes/note.md", "local\n");
       const rec = await f.store.create(baseArgs());
@@ -381,17 +360,15 @@ describe("ConflictStore", () => {
       expect(fs.existsSync(path.join(f.root, rec.siblingPath))).toBe(false);
     });
 
-    // ─── Stage 13 RED test (Group 3: drop auto-restore) → GREEN ─────
+    // ─── load() does NOT auto-restore deleted siblings ───────────────
     //
-    // 2026-05-21 mobile incident root cause: pre-Stage-13 load() saw
-    // a missing vault sibling and re-emitted it from the backup file
-    // inside `.conflicts/<id>/`. User-deleted siblings kept
-    // resurrecting on plugin restart; conflicts never closed.
-    //
-    // Decision #31 in PSEUDO-MERGE-MODE.md: load() does NOT restore
-    // siblings from backup. Missing sibling = resolution signal →
-    // drain Phase B drops the record on the next sync.
-    it("N10 (Stage 13): missing vault sibling at load() does NOT restore from backup", async () => {
+    // If load() resurrected a vault sibling the user had
+    // intentionally deleted, the user's resolution action would be
+    // silently undone on every plugin restart. load() reads
+    // meta.json only; missing siblings stay missing and become a
+    // drain Phase B drop signal on the next sync (see
+    // docs/PSEUDO-MERGE-MODE.md §9.7).
+    it("missing vault sibling at load() does NOT restore from backup", async () => {
       // Land a fully created record.
       await f.store.load();
       writeVaultFile(f.root, "Notes/note.md", "local content\n");
@@ -399,18 +376,14 @@ describe("ConflictStore", () => {
       const siblingAbs = path.join(f.root, rec.siblingPath);
       expect(fs.existsSync(siblingAbs)).toBe(true);
 
-      // User deletes the vault sibling externally (file explorer /
-      // CLI / another device's sync). Backup file in .conflicts/
-      // <id>/ stays intact (Phase 4 will repurpose it — for now
-      // it's just an artifact).
+      // User deletes the vault sibling externally (file explorer,
+      // CLI, another device's sync, etc.).
       fs.unlinkSync(siblingAbs);
       expect(fs.existsSync(siblingAbs)).toBe(false);
 
-      // Fresh load() — under Stage 13, this MUST leave the vault
-      // sibling missing. The record may stay indexed (drain Phase
-      // B will drop it on next sync) OR the orphan record may also
-      // be cleaned up at load. Phase 4 picks one; this test asserts
-      // only the critical invariant: the vault file stays gone.
+      // Fresh load() — the vault sibling MUST stay missing. (Drain
+      // Phase B drops the record on the next sync; this test asserts
+      // only the critical invariant that load() never resurrects.)
       const recoveryStore = new ConflictStore({
         vault: f.vault as unknown as import("obsidian").Vault,
         configDir: CONFIG_DIR,
@@ -429,7 +402,6 @@ describe("ConflictStore", () => {
       const orphanDir = path.join(f.conflictsRoot, orphanId);
       fs.mkdirSync(orphanDir, { recursive: true });
       fs.writeFileSync(path.join(orphanDir, "meta.json"), "not-json{");
-      fs.writeFileSync(path.join(orphanDir, "sibling-content.bin"), "");
 
       await f.store.load();
 
@@ -493,8 +465,7 @@ describe("ConflictStore", () => {
           anotherUnknown: { nested: true },
         }),
       );
-      // Backup + vault sibling so step-3 recovery doesn't fire.
-      fs.writeFileSync(path.join(dir, "sibling-content.bin"), "");
+      // Vault sibling so step-3 recovery doesn't fire.
       writeVaultFile(f.root, siblingPath, "");
 
       await f.store.load();
@@ -532,7 +503,6 @@ describe("ConflictStore", () => {
           lastEvaluated: null,
         }),
       );
-      fs.writeFileSync(path.join(dir, "sibling-content.bin"), "");
       writeVaultFile(f.root, siblingPath, "");
 
       await f.store.load();
@@ -674,7 +644,8 @@ describe("ConflictStore", () => {
     });
   });
 
-  // Decision #22 — Reset → rename vault siblings to *.unresolved-*
+  // Reset → rename vault siblings to *.unresolved-* so a re-enable
+  // doesn't collide with leftover `conflict-from-*` artifacts.
   describe("renameVaultSiblingsToUnresolved", () => {
     it("renames a regular file's sibling and leaves the base untouched", async () => {
       await f.store.load();

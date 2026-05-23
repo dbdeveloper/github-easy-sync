@@ -93,7 +93,9 @@ describe("MOCK_PLATFORM", () => {
     expect(await vault.adapter.read("b.txt")).toBe("from-a");
   });
 
-  // Pattern that Phase 3 tests should use for any rename-touching code.
+  // Pattern for paired desktop/mobile coverage of rename-touching
+  // code. Any test exercising adapter.rename should parametrise
+  // like this so a Capacitor-only regression cannot slip through.
   describe.each([{ platform: "desktop" as const }, { platform: "mobile" as const }])(
     "describe.each pattern (under $platform)",
     ({ platform }) => {
@@ -108,16 +110,14 @@ describe("MOCK_PLATFORM", () => {
   );
 });
 
-// Stage 13 ConflictStore.create migration test — paired desktop/mobile
-// coverage of the new 3-step `.sync-bak` flow. Closes the gap from
-// advisor review: the migrated ConflictStore.create rewrite was
-// verified only under Node fs (desktop semantics) until now. Under
+// ConflictStore.create paired desktop/mobile coverage. Under
 // `MOCK_PLATFORM=mobile`, Step 3's atomic rename of staging →
-// siblingPath must use the explicit-remove-before-rename pattern, and
-// Step 2's persistRecord must do the same for meta.json. Both are
-// already coded that way — this test verifies the wiring end-to-end.
+// siblingPath uses the explicit-remove-before-rename pattern that
+// Capacitor requires, and Step 2's persistRecord does the same for
+// meta.json. This test verifies the wiring end-to-end on both
+// platforms.
 describe.each([{ platform: "desktop" as const }, { platform: "mobile" as const }])(
-  "ConflictStore.create (Stage 13 .sync-bak flow) — under $platform",
+  "ConflictStore.create (.sync-tmp staging flow) — under $platform",
   ({ platform }) => {
     let tmp: string;
     let vault: Vault;
@@ -166,7 +166,7 @@ describe.each([{ platform: "desktop" as const }, { platform: "mobile" as const }
       });
 
       const siblingAbs = path.join(tmp, rec.siblingPath);
-      const stagingAbs = path.join(tmp, stagingPathFor(rec.siblingPath, "bak"));
+      const stagingAbs = path.join(tmp, stagingPathFor(rec.siblingPath, "tmp"));
 
       // Step 3 renamed staging → final. Final exists with theirs
       // content; staging is gone.
@@ -241,19 +241,15 @@ describe.each([{ platform: "desktop" as const }, { platform: "mobile" as const }
       expect(store.getByPath("Notes/note.md")).toHaveLength(2);
     });
 
-    // N13 from Phase 2 audit: the mobile-shaped delete-then-rename
-    // workflow that motivated Decision #30 (classifier row 3 → noop).
-    // Pre-Stage-13 the engine cascade-deleted siblings the moment
-    // base went missing, leaving no time for the rename half of
-    // "accept theirs via mobile file manager". Stage 13 row 3 returns
-    // noop; sibling stays alive until the user touches it.
-    //
-    // Mobile-specific because Capacitor's rename throws on existing
-    // destination — the workflow must be: delete base FIRST, THEN
-    // rename sibling onto base. Desktop would tolerate atomic rename-
-    // overwrite, but we verify the mobile-portable path works under
-    // both platforms.
-    it("N13: delete-base-then-rename-sibling workflow resolves to accept-theirs", async () => {
+    // Mobile-shaped delete-then-rename workflow. Capacitor's rename
+    // throws on existing destination, so the workflow must be:
+    // delete base FIRST, then rename sibling onto base. The
+    // classifier's `!base + sibling` → noop rule keeps the sibling
+    // alive between the two steps so the workflow can complete
+    // (see docs/PSEUDO-MERGE-MODE.md §6.2). Desktop tolerates
+    // atomic rename-overwrite, but we verify the mobile-portable
+    // path works under both platforms.
+    it("delete-base-then-rename-sibling workflow resolves to accept-theirs", async () => {
       // Need to dynamic-import because conflict-classifier pulls in
       // the obsidian alias chain that fails at module-eval otherwise.
       const { evaluateConflictState } = await import(
@@ -261,8 +257,8 @@ describe.each([{ platform: "desktop" as const }, { platform: "mobile" as const }
       );
 
       // Setup: vault base + sibling + record (the post-conflict-
-      // detection state). Use store.create() so the full Stage 13
-      // `.sync-bak` flow runs and lands the sibling at its final
+      // detection state). Use store.create() so the full 3-step
+      // `.sync-tmp` flow runs and lands the sibling at its final
       // path.
       fs.mkdirSync(path.join(tmp, "Notes"), { recursive: true });
       fs.writeFileSync(path.join(tmp, "Notes/note.md"), "ours\n");
@@ -286,14 +282,14 @@ describe.each([{ platform: "desktop" as const }, { platform: "mobile" as const }
       expect(fs.existsSync(baseAbs)).toBe(true);
 
       // Workflow: user wants "accept theirs".
-      //   Step 1: delete base (would cascade-kill sibling pre-Stage-13).
+      //   Step 1: delete base.
       //   Step 2: rename sibling → base path.
-      // Between steps, NO classifier sweep fires (production listeners
-      // are read-only — they only mark counter dirty, not mutate
-      // store).
+      // Between steps, NO classifier sweep fires (production
+      // listeners are read-only — they only mark counter dirty,
+      // not mutate store).
       fs.unlinkSync(baseAbs);
       expect(fs.existsSync(baseAbs)).toBe(false);
-      // Sibling still alive — Stage 13 row 3 → noop means engine
+      // Sibling still alive — `!base + sibling` → noop means engine
       // doesn't react to bare base-deletion.
       expect(fs.existsSync(siblingAbs)).toBe(true);
 

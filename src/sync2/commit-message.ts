@@ -2,21 +2,12 @@
 // Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
 // AGPL-3.0 — see LICENSE.
 
-// Stage 13 (Decision #36): hardcoded commit-message formats.
-//
-// Pre-Stage-13 commit messages were user-template-driven: settings
-// had a "Commit message" field with `{date}` / `{time}` placeholders,
-// rendered via `applyTemplate` and suffixed with `(deviceLabel)`
-// via `appendDeviceSuffix`. Stage 13 drops the whole templating
-// system — every commit message is now a hardcoded string with
-// `{deviceLabel}` as the only substitution. See PSEUDO-MERGE-MODE.md
-// §"Commit message formats (Stage 13 — hardcoded)".
-//
-// Why drop templates: provenance + multi-device disambiguation are
-// the only useful signals, both delivered by `(deviceLabel)`. Date
-// and time come for free from git commit metadata (authorDate /
-// committerDate). Power-user customization was unused and added
-// surface area for bugs.
+// Hardcoded commit-message formats. Every message is a fixed string
+// with `{deviceLabel}` as the only substitution; date and time are
+// already carried by git commit metadata (authorDate /
+// committerDate) and don't need to live in the message body.
+// Provenance + multi-device disambiguation are the only useful
+// signals, both delivered by the trailing `(deviceLabel)`.
 
 // Sentinel used wherever sync2 needs a stand-in for an unknown device
 // — both at READ time (parseDeviceSuffix on a commit with no trailing
@@ -98,12 +89,11 @@ export function commitMessageForBatch(
 // off any commit message produced by sync2. Falls back to
 // UNKNOWN_DEVICE_LABEL for hand-edited or non-sync2 commits.
 //
-// This survives from the pre-Stage-13 commit-templates module
-// because the suffix shape didn't change — every Stage 13 formatX
-// function above appends `(safeLabel(...))` so the regex still
-// matches. Used by sync2-manager to identify the foreign device on
-// an existing commit (for the multi-device "who pushed this?"
-// observability log line).
+// Every formatX function above appends `(safeLabel(...))` so this
+// regex matches all sync2-produced messages uniformly. Used by
+// sync2-manager to identify the foreign device on an existing
+// commit (for the multi-device "who pushed this?" observability
+// log line).
 export function parseDeviceSuffix(message: string): string {
   const m = /\s\(([^()]+)\)\s*$/.exec(message);
   return m ? m[1] : UNKNOWN_DEVICE_LABEL;

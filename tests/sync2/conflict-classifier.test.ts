@@ -19,8 +19,8 @@ import {
 } from "../../src/sync2/conflict-classifier";
 import { Vault } from "../../mock-obsidian";
 
-// Pseudo-merge ConflictState classifier tests
-// (PSEUDO-MERGE-MODE.md, stage 3).
+// Conflict-state classifier tests. See src/sync2/conflict-classifier.ts
+// + docs/PSEUDO-MERGE-MODE.md §5 for the classifier's role.
 //
 // Two layers:
 //   1. classify() — pure function tested with literal inputs against
@@ -88,10 +88,11 @@ describe("classify (pure)", () => {
   // resolves at push time via attemptAutoMerge's "modify-wins"
   // branch. Former rows 2, 4, 10, 11, 12 dropped with the kind.
 
-  // ─── Row 3: REMOVED in Stage 13 (Decision #30 — see N12 below) ─────
-  // The "user deletes base on modify-vs-modify → cascade delete every
-  // sibling" behavior is gone. Classifier now returns noop for this
-  // input (covered by N12 at the bottom of this describe block).
+  // ─── Row 3 (!base + sibling) returns noop ──────────────────────────
+  // The classifier returns noop when the base is deleted but a
+  // sibling is still alive — the user must remove every sibling
+  // for the path too (or rename one onto the base). Covered by
+  // the test at the bottom of this describe block.
 
   // ─── Row 5: sibling, !base, delete-vs-modify → initial state, noop ─
 
@@ -172,21 +173,14 @@ describe("classify (pure)", () => {
     expect(d).toEqual({ type: "noop" });
   });
 
-  // ─── Stage 13 Phase 3 RED test (Group 2: row 3 noop) ──────────────
+  // ─── Row 3 noop pin ────────────────────────────────────────────────
   //
-  // PSEUDO-MERGE-MODE.md Decision #30: classifier row 3
-  // (`!baseExists + modify-vs-modify`) → `noop` (was `delete-wins-cascade`).
-  // The cascade-delete that engine used to do when the user
-  // deleted base is gone — under Stage 13 deletion requires the
-  // user to remove EVERY sibling for the path too.
-  //
-  // This unblocks the mobile delete-then-rename workflow that the
-  // cascade was breaking (2026-05-21 incident).
-  //
-  // Currently FAILS against the existing classifier (returns
-  // delete-wins-cascade). Phase 4 Group 2 swaps row 3 to noop and
-  // deletes the old `Row 3: delete-wins-cascade` test above.
-  it("N12 (Stage 13): Row 3 sibling exists, !base, modify-vs-modify → noop (NOT delete-wins-cascade)", () => {
+  // `!baseExists + modify-vs-modify` returns noop: the engine never
+  // cascade-deletes siblings on bare base-deletion. The user must
+  // remove every sibling for the path too. This is what enables the
+  // mobile delete-then-rename workflow (see
+  // docs/PSEUDO-MERGE-MODE.md §6.2).
+  it("Row 3 sibling exists, !base, modify-vs-modify → noop (NOT delete-wins-cascade)", () => {
     const d = classify(
       rec({ kind: "modify-vs-modify", oursBlobSha: "o", theirsBlobSha: "t" }),
       false, // baseExists
@@ -332,13 +326,12 @@ describe("evaluateConflictState (orchestrator)", () => {
     ).toBe("theirs-content\n");
   });
 
-  it("user deletes base on modify-vs-modify (Stage 13 — Decision #30) → noop, records + siblings stay", async () => {
-    // Replaces the old "case 3 cascade" test. Stage 13 no longer
-    // cascade-deletes siblings when the user removes base. The user
-    // must explicitly resolve EACH sibling (delete it or rename it
-    // onto base). Verified at the orchestrator level here; the pure
-    // classifier-level assertion is N12 in the `classify (pure)`
-    // describe block above.
+  it("user deletes base on modify-vs-modify → noop, records + siblings stay", async () => {
+    // Orchestrator-level pin: the engine does NOT cascade-delete
+    // siblings when the user removes the base file. The user must
+    // explicitly resolve EACH sibling (delete it or rename it onto
+    // base). The pure-classifier pin for the same rule is in the
+    // `classify (pure)` describe block above.
     writeVaultFile(f.root, "Notes/note.md", "ours\n");
     const a = await createBaseConflict({ theirsBlobSha: "sha-A" });
     const b = await createBaseConflict({
@@ -524,19 +517,13 @@ describe("evaluateConflictState (orchestrator)", () => {
     expect(result.recordsRefreshed).toEqual([]);
   });
 
-  // N14 from Phase 2 audit: pull-side coincidental SHA match.
-  // Documented edge case in PSEUDO-MERGE-MODE.md §"Edge case:
-  // pull-side new-sibling coincidentally matches base" — when a
-  // pull-side conflict registers a sibling whose SHA happens to
-  // equal the current base SHA (e.g., remote was reverted to
-  // match local independently), the next drain Phase A SHA-match
-  // cleanup auto-resolves with NO user action.
-  //
-  // Mechanically identical to the user-driven case 6 above
-  // ("user copies sibling onto base"), but framed as a pull-side
-  // entry point — the assertion is "engine spawned + then engine
-  // cleaned, with zero user intervention".
-  it("N14: pull-side coincidental SHA match → next sweep auto-cleans (no user action)", async () => {
+  // Pull-side coincidental SHA match: a pull-side conflict
+  // registers a sibling whose SHA happens to equal the current base
+  // SHA (e.g., remote was reverted on another device to match
+  // local). The next drain Phase A SHA-match cleanup auto-resolves
+  // with NO user action — mechanically identical to the user-driven
+  // case 6 above, but framed as a pull-side entry point.
+  it("pull-side coincidental SHA match → next sweep auto-cleans (no user action)", async () => {
     writeVaultFile(f.root, "Notes/note.md", "shared content\n");
     // Mimic pull-side conflict registration where theirsContent
     // happens to equal current base content (e.g., remote was

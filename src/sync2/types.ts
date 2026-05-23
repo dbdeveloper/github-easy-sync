@@ -53,15 +53,14 @@ export type QueueBatch = {
   // user's rule "in-progress OR failed batch is blocked from
   // merges; new sync clicks create a new batch instead".
   attempted: boolean;
-  // Stage 13 (Decision #36 follow-on): `commitMessage` is no longer
-  // persisted. processBatch derives the message inline from
-  // `synthetic` + the current `deviceLabel` setting via
-  // `commitMessageForBatch` in src/sync2/commit-message.ts.
-  //
   // True for Phase B side-batches synthesized from drain conflict-
-  // resolution (push to main as "resolve conflict ({label})").
-  // False for user-driven batches from syncAll / syncFile (push as
-  // "sync ({label})").
+  // resolution (push to main as "resolve conflict ({label})"); false
+  // for user-driven batches from syncAll / syncFile (push as "sync
+  // ({label})"). processBatch derives the message inline from this
+  // field + the current `deviceLabel` setting via
+  // `commitMessageForBatch` in src/sync2/commit-message.ts; no
+  // template is persisted. See docs/PSEUDO-MERGE-MODE.md §10 Scenario
+  // E for how synthetic side-batches arise.
   synthetic: boolean;
   // Snapshot of the parent commit SHA at enqueue time. Used as the
   // first-pick parent; if the remote has moved since, the runner
@@ -96,5 +95,3 @@ export type QueueBatch = {
   fileMtimes: Record<string, number>;
 };
 
-// CommitMessagePlaceholders removed in Stage 13 (Decision #36 —
-// templates gone, hardcoded `formatX` functions in commit-message.ts).

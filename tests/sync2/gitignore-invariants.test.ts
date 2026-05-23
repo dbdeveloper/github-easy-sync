@@ -234,8 +234,8 @@ describe("GitignoreInvariants.enforce", () => {
       stat.mtimeMs,
     );
 
-    // Next enforce() reads + splices + compares (Stage 13 no longer
-    // short-circuits on mtime/hash). Splice produces the same content
+    // Next enforce() reads + splices + compares (there is no
+    // mtime/hash short-circuit). Splice produces the same content
     // → no rewrite. Test verifies the post-splice equality short-
     // circuit holds for canonical content.
     const before = fs.readFileSync(cdPath, "utf8");
@@ -256,25 +256,14 @@ describe("GitignoreInvariants.enforce", () => {
     expect(store2.getInvariantState().selfPluginGitignore).toBeDefined();
   });
 
-  // ─── Stage 13 Phase 3 RED test (Group 8: gitignore always-write) ────
+  // ─── enforce() applies new canonical block on plugin upgrade ────────
   //
-  // Bug observed on mobile 2026-05-21: after plugin upgrade introduced
-  // new canonical block lines (e.g., `*.sync-bak*` / `*.sync-tmp*`),
-  // the on-disk gitignore stayed pinned to the previous canonical
-  // because enforce() short-circuited on mtime cache hit (file
-  // unchanged externally → mtime matched recorded → enforce returned
-  // without comparing content against the CURRENT canonical block).
-  //
-  // Decision in PSEUDO-MERGE-MODE.md §"Що змінюється в коді (Phase 4,
-  // окремо від цього доку)": GitignoreInvariants.enforce drops the
-  // mtime / hash short-circuits — always reads, always splices,
-  // always compares spliced output to current content. Writes only
-  // when output differs.
-  //
-  // Currently FAILS: short-circuit at line 278 in
-  // src/sync2/gitignore-invariants.ts returns early, never reads
-  // content, never re-splices. The new canonical block never lands.
-  it("N15 (Stage 13): enforce applies a new canonical block even when mtime matches recorded", async () => {
+  // GitignoreInvariants.enforce always reads, splices, and compares
+  // against the current canonical constant. There is no
+  // mtime/hash short-circuit, so a plugin upgrade that introduces
+  // new canonical-block lines reaches the on-disk gitignore even
+  // when the user's file mtime hasn't changed.
+  it("enforce applies a new canonical block even when mtime matches recorded", async () => {
     const cdPath = cdGitignore(f.root);
 
     // Plant a STALE on-disk gitignore: structured like a canonical
@@ -308,10 +297,10 @@ describe("GitignoreInvariants.enforce", () => {
       hash: staleHash,
     });
 
-    // Call enforce(). Under Stage 13 it must re-splice the file
-    // and rewrite to current canonical (which is wider than
-    // staleBody — contains workspace.json + workspace-mobile.json
-    // + community-plugins.json invariants that staleBody omits).
+    // enforce() must re-splice the file and rewrite to current
+    // canonical (which is wider than staleBody — contains
+    // workspace.json + workspace-mobile.json + community-plugins.json
+    // invariants that staleBody omits).
     await f.inv.enforce();
 
     const after = fs.readFileSync(cdPath, "utf8");

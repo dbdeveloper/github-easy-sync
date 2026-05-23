@@ -1,14 +1,7 @@
-// Phase 3 Group 5 RED tests for the Stage 13 ConflictCounter
-// (Phase 1.7 stub at src/sync2/conflict-counter.ts).
-//
-// All tests in this file currently FAIL with "Not implemented" —
-// proper RED state. Phase 4 Group 5 fills in the bodies (per
-// PSEUDO-MERGE-MODE.md §"ConflictCounter — dirty-flag + subscribers
-// contract" and §"Counter formula + vault.on listeners role") and
-// turns these GREEN.
-//
-// Tests exercise the Phase 4 API surface, not the current
-// implementation — advisor's pitfall warning.
+// Unit tests for ConflictCounter — the UI-side count formula +
+// debounced recompute machinery. See src/sync2/conflict-counter.ts
+// for the contract and docs/PSEUDO-MERGE-MODE.md §5 for the
+// architectural role.
 
 import {
   describe,
@@ -100,7 +93,7 @@ function baseArgs(over: Partial<CreateArgs> = {}): CreateArgs {
   };
 }
 
-describe("ConflictCounter (Stage 13)", () => {
+describe("ConflictCounter", () => {
   let f: ReturnType<typeof fixture>;
 
   beforeEach(() => {
@@ -111,9 +104,9 @@ describe("ConflictCounter (Stage 13)", () => {
     fs.rmSync(f.root, { recursive: true, force: true });
   });
 
-  // ─── N1: markDirty coalesces ────────────────────────────────────────
+  // ─── markDirty coalesces ────────────────────────────────────────────
 
-  it("N1: markDirty x10 in the same tick schedules at most one recompute", async () => {
+  it("markDirty x10 in the same tick schedules at most one recompute", async () => {
     await f.store.load();
     writeVaultFile(f.root, "Notes/note.md", "local\n");
     // Create a record so the counter has something to recompute.
@@ -128,7 +121,7 @@ describe("ConflictCounter (Stage 13)", () => {
     expect(f.scheduler.pending()).toBeLessThanOrEqual(1);
   });
 
-  it("N1b: flush makes getValue reflect the live recomputed count", async () => {
+  it("flush makes getValue reflect the live recomputed count", async () => {
     await f.store.load();
     writeVaultFile(f.root, "Notes/note.md", "local\n");
     const rec = await f.store.create(baseArgs());
@@ -148,9 +141,9 @@ describe("ConflictCounter (Stage 13)", () => {
     expect(f.counter.getValue()).toBe(1);
   });
 
-  // ─── N2: subscribe semantics ────────────────────────────────────────
+  // ─── subscribe semantics ────────────────────────────────────────────
 
-  it("N2: subscribe callback fires only on a value CHANGE, never on a no-op recompute", async () => {
+  it("subscribe callback fires only on a value CHANGE, never on a no-op recompute", async () => {
     await f.store.load();
     writeVaultFile(f.root, "Notes/note.md", "local\n");
     await f.store.create(baseArgs());
@@ -173,7 +166,7 @@ describe("ConflictCounter (Stage 13)", () => {
     unsubscribe();
   });
 
-  it("N2b: subscribe unsubscribe stops further callbacks", async () => {
+  it("subscribe unsubscribe stops further callbacks", async () => {
     await f.store.load();
     writeVaultFile(f.root, "Notes/note.md", "local\n");
     await f.store.create(baseArgs());
@@ -200,9 +193,9 @@ describe("ConflictCounter (Stage 13)", () => {
     expect(calls).toEqual([1]);
   });
 
-  // ─── N3: flush() forces immediate recompute ─────────────────────────
+  // ─── flush() forces immediate recompute ─────────────────────────────
 
-  it("N3: flush() forces immediate recompute, bypassing microtask debounce", async () => {
+  it("flush() forces immediate recompute, bypassing microtask debounce", async () => {
     await f.store.load();
     writeVaultFile(f.root, "Notes/note.md", "local\n");
     await f.store.create(baseArgs());
@@ -215,16 +208,16 @@ describe("ConflictCounter (Stage 13)", () => {
     expect(f.counter.getValue()).toBe(1);
   });
 
-  // ─── N4: Counter formula edge cases ─────────────────────────────────
+  // ─── Counter formula edge cases ─────────────────────────────────────
 
-  it("N4: empty store → count is 0", async () => {
+  it("empty store → count is 0", async () => {
     await f.store.load();
     f.counter.markDirty();
     await f.counter.flush();
     expect(f.counter.getValue()).toBe(0);
   });
 
-  it("N4: record with !siblingExists → NOT counted (will be resolved on next drain)", async () => {
+  it("record with !siblingExists → NOT counted (will be resolved on next drain)", async () => {
     await f.store.load();
     writeVaultFile(f.root, "Notes/note.md", "local\n");
     const rec = await f.store.create(baseArgs());
@@ -238,7 +231,7 @@ describe("ConflictCounter (Stage 13)", () => {
     expect(f.counter.getValue()).toBe(0);
   });
 
-  it("N4: record with !baseExists, siblingExists → COUNTED (base gone, sibling alone)", async () => {
+  it("record with !baseExists, siblingExists → COUNTED (base gone, sibling alone)", async () => {
     await f.store.load();
     writeVaultFile(f.root, "Notes/note.md", "local\n");
     await f.store.create(baseArgs());
@@ -251,7 +244,7 @@ describe("ConflictCounter (Stage 13)", () => {
     expect(f.counter.getValue()).toBe(1);
   });
 
-  it("N4: record with siblingSha == baseSha → NOT counted (Phase A will auto-clean)", async () => {
+  it("record with siblingSha == baseSha → NOT counted (Phase A will auto-clean)", async () => {
     await f.store.load();
     writeVaultFile(f.root, "Notes/note.md", "theirs\n");
     // Create with default args, then push base cache to match sibling.
@@ -271,7 +264,7 @@ describe("ConflictCounter (Stage 13)", () => {
     expect(f.counter.getValue()).toBe(0);
   });
 
-  it("N4: multiple records with mixed states are counted independently", async () => {
+  it("multiple records with mixed states are counted independently", async () => {
     await f.store.load();
     writeVaultFile(f.root, "a.md", "local-a\n");
     writeVaultFile(f.root, "b.md", "local-b\n");
@@ -294,9 +287,9 @@ describe("ConflictCounter (Stage 13)", () => {
     expect(f.counter.getValue()).toBe(2);
   });
 
-  // ─── N18: bulk vault events coalesce ────────────────────────────────
+  // ─── bulk vault events coalesce ─────────────────────────────────────
 
-  it("N18: 100 markDirty calls in tight loop produce a single scheduled recompute", async () => {
+  it("100 markDirty calls in tight loop produce a single scheduled recompute", async () => {
     await f.store.load();
     writeVaultFile(f.root, "Notes/note.md", "local\n");
     await f.store.create(baseArgs());
@@ -309,7 +302,7 @@ describe("ConflictCounter (Stage 13)", () => {
     expect(f.scheduler.pending()).toBe(1);
   });
 
-  it("N18b: bulk markDirty before any subscriber → still only one callback fire after subscribe + flush", async () => {
+  it("bulk markDirty before any subscriber → still only one callback fire after subscribe + flush", async () => {
     await f.store.load();
     writeVaultFile(f.root, "Notes/note.md", "local\n");
     await f.store.create(baseArgs());

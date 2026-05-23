@@ -1,14 +1,9 @@
-// Pseudo-merge Stage 13 ConflictWatcher tests (PSEUDO-MERGE-MODE.md
-// §"Counter formula + vault.on listeners role").
+// ConflictWatcher tests. See src/sync2/conflict-watcher.ts +
+// docs/PSEUDO-MERGE-MODE.md §5 — the watcher is READ-ONLY and its
+// only side effect is calling `counter.markDirty()` on relevant
+// vault events.
 //
-// Stage 13 made the watcher READ-ONLY: it just calls
-// `counter.markDirty()` on relevant vault events and does nothing
-// else. The pre-Stage-13 tests (chain serialization, pause/resume,
-// onError, end-to-end record resolution from listener) all assumed
-// the watcher mutated the store — they're deleted because the
-// premise no longer holds.
-//
-// What survives:
+// What's covered:
 //   - start()/stop() register & unregister listeners; idempotent
 //   - handle() on irrelevant path → no markDirty call
 //   - handle() on base or sibling path → markDirty called
@@ -87,7 +82,7 @@ function baseArgs(over: Partial<CreateArgs> = {}): CreateArgs {
   };
 }
 
-describe("ConflictWatcher (Stage 13 — counter-only)", () => {
+describe("ConflictWatcher (counter-only listener)", () => {
   let f: ReturnType<typeof fixture>;
 
   beforeEach(() => {

@@ -499,9 +499,8 @@ describe("Sync2Manager.syncAll — basic flow", () => {
 
     await f.manager.syncAll();
 
-    // Stage 13 (Decision #36): templates gone. Every user-driven
-    // sync commit is `sync ({deviceLabel})` — see
-    // src/sync2/commit-message.ts.
+    // Every user-driven sync commit is `sync ({deviceLabel})` —
+    // see src/sync2/commit-message.ts.
     expect(f.client.state.lastCommit?.message).toBe("sync (test-device)");
   });
 
@@ -690,9 +689,9 @@ describe("Sync2Manager.syncAll — basic flow", () => {
 
     await f.manager.resumeQueue();
 
-    // Two commits, in order. Stage 13 Group 9 follow-on: both messages
-    // are derived from synthetic=false + deviceLabel; the batches no
-    // longer carry distinct commitMessage values.
+    // Two commits, in order. Both messages are derived from
+    // synthetic=false + deviceLabel — batches do not carry distinct
+    // commitMessage values.
     const commits = f.client.calls.filter((c) => c.op === "createCommit");
     expect(commits).toHaveLength(2);
     expect((commits[0].args as { message: string }).message).toBe(
@@ -728,9 +727,8 @@ describe("Sync2Manager.syncAll — basic flow", () => {
 
     const commits = f.client.calls.filter((c) => c.op === "createCommit");
     expect(commits).toHaveLength(1);
-    // Stage 13 (Decision #36): syncFile uses the same hardcoded
-    // `sync ({deviceLabel})` format as syncAll — no per-file
-    // templating, no shared template field.
+    // syncFile uses the same hardcoded `sync ({deviceLabel})`
+    // format as syncAll — no per-file templating.
     expect((commits[0].args as { message: string }).message).toBe(
       "sync (test-device)",
     );
@@ -1797,9 +1795,9 @@ describe("Sync2Manager.syncAll — basic flow", () => {
 
       const commits = f.client.calls.filter((c) => c.op === "createCommit");
       expect(commits).toHaveLength(1);
-      // Stage 13 Group 9 follow-on: commit message is derived at push
-      // time from batch.synthetic (false here) + the manager's
-      // deviceLabel ("test-device") — no batch-level commitMessage.
+      // Commit message is derived at push time from batch.synthetic
+      // (false here) + the manager's deviceLabel ("test-device") —
+      // no batch-level commitMessage.
       expect((commits[0].args as { message: string }).message).toBe(
         "sync (test-device)",
       );

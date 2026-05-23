@@ -2,42 +2,37 @@
 // Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
 // AGPL-3.0 — see LICENSE.
 
-// Pseudo-merge Stage 13 conflict counter — Phase 4 Group 5
-// implementation of the contract from PSEUDO-MERGE-MODE.md
-// §"ConflictCounter — dirty-flag + subscribers contract" and
-// §"Counter formula + vault.on listeners role".
+// ConflictCounter — read-only UI counter for the conflict status
+// indicators (status bar + ribbon). Reactive to vault.on events
+// via ConflictWatcher; never mutates store. See
+// docs/PSEUDO-MERGE-MODE.md §5 for the layer separation.
 //
-// Contract summary (binding):
-//
-//   - vault.on listeners are READ-ONLY. They call markDirty() on
-//     relevant events (paths in ConflictStore.siblingPaths ∪
-//     ConflictStore.basePaths). Listeners NEVER mutate the store,
-//     NEVER call evaluateConflictState, NEVER delete files.
+// Contract:
 //
 //   - markDirty() is O(1): sets dirty flag, schedules at most ONE
 //     debounced recompute via the supplied microtask scheduler.
 //     Multiple back-to-back calls coalesce into one scheduled task.
 //
-//   - getValue() is O(1): returns the CACHED count. Callers that need
-//     a guaranteed-fresh value await flush() first.
+//   - getValue() is O(1): returns the CACHED count. Callers that
+//     need a guaranteed-fresh value await flush() first.
 //
-//   - flush() is async: runs the recompute INLINE (does NOT wait for
-//     the scheduler to fire). Loops until quiescent (dirty cleared
-//     and no in-flight recompute). Used by drain at start/end and
-//     by tests.
+//   - flush() is async: runs the recompute INLINE (does NOT wait
+//     for the scheduler to fire). Loops until quiescent (dirty
+//     cleared and no in-flight recompute). Used by drain at start
+//     and by tests.
 //
 //   - subscribe(cb) registers a callback that fires after each
 //     recompute, but ONLY if the value CHANGED. Returns an
-//     unsubscribe function. Subscribers used by status bar +
-//     ribbon for reactive UI.
+//     unsubscribe function. Used by status bar + ribbon for
+//     reactive UI.
 //
-// Recompute formula (from §"Counter formula"):
+// Recompute formula:
 //   count = 0
 //   for record in store.records:
 //     if !exists(record.siblingPath): continue   // dropped on next drain
 //     if !exists(record.vaultPath):    count++   // base gone, sibling alone
 //     if record.siblingSha != record.baseSha: count++  // SHA mismatch
-//     // siblingSha == baseSha: not counted (Phase A auto-cleans)
+//     // siblingSha == baseSha: not counted (drain Phase A auto-cleans)
 
 import { Vault } from "obsidian";
 import ConflictStore from "./conflict-store";

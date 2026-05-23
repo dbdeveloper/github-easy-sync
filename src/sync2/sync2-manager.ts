@@ -221,12 +221,12 @@ export interface Sync2ManagerDeps {
   // invocations. Optional: tests that don't care leave it out and
   // sweeps still run inline via evaluateConflictState directly.
   conflictWatcher?: ConflictWatcher;
-  // Stage 13 sweep-skip optimization (advisor concern #3). When
-  // wired, drain consults counter.consumeSweepRequest() before
-  // running evaluateConflictState — skips the sweep entirely on
-  // idle drains where no vault events touched conflict-relevant
-  // paths since the previous drain. Optional: when omitted, drain
-  // falls back to "always sweep if records exist" semantics.
+  // Sweep-skip optimization. When wired, drain consults
+  // counter.consumeSweepRequest() before running
+  // evaluateConflictState — skips the sweep entirely on idle drains
+  // where no vault events touched conflict-relevant paths since the
+  // previous drain. Optional: when omitted, drain falls back to
+  // "always sweep if records exist" semantics.
   conflictCounter?: ConflictCounter;
   // UI hook for queue-drain progress. main.ts wires this to a long-
   // lived Notice; tests omit it. Returns a handle whose update()
@@ -468,9 +468,9 @@ export class Sync2Manager {
         return;
       }
 
-      // Stage 13 (Decision #36 follow-on): no commitMessage passed —
-      // processBatch derives `sync ({deviceLabel})` at push time from
-      // batch.synthetic + current deviceLabel setting.
+      // No commitMessage passed — processBatch derives
+      // `sync ({deviceLabel})` at push time from batch.synthetic +
+      // current deviceLabel setting via commitMessageForBatch.
       const enqueued = await this.enqueueOrMerge([change], {
         parentCommitSha: this.store.getLastSyncCommitSha(),
         parentTreeSha: this.store.getLastSyncTreeSha(),
@@ -1345,19 +1345,15 @@ export class Sync2Manager {
       kind: args.kind,
     });
     // Push ours' version to the per-device conflict branch so the
-    // user's pre-conflict state is preserved as a server-side commit
-    // (PSEUDO-MERGE-MODE.md §"Архітектура push: split-push у
-    // processBatch" step 4). Eager: branch is created at current
-    // main HEAD on the first conflict registration of the session,
-    // each subsequent conflict appends one commit. For
-    // delete-vs-modify, ours was "delete" → tree entry is sha:null.
+    // user's pre-conflict state is preserved as a server-side
+    // commit (see docs/PSEUDO-MERGE-MODE.md §4.3 + §10 Scenario E).
+    // Eager: branch is created at current main HEAD on the first
+    // conflict registration of the session, each subsequent
+    // conflict appends one commit. For delete-vs-modify, ours was
+    // "delete" → tree entry is sha:null.
     const branchContent = args.kind === "delete-vs-modify" ? null : await this.readLocalBytesForBranchPush(args.vaultPath);
     await this.pushConflictPathsToBranch(
       [{ path: args.vaultPath, content: branchContent }],
-      // Stage 13: hardcoded `conflict ({deviceLabel})` — Decision #36.
-      // Pre-Stage-13 the message embedded the vault path + kind for
-      // debugging; git commit metadata + the branch diff carry the
-      // path now, and `kind` is informational only.
       formatConflictMessage(this.deviceLabel()),
     );
 
@@ -1407,13 +1403,13 @@ export class Sync2Manager {
   }
 
   // Push N conflict-path entries to the per-device conflict branch
-  // as a single commit. Eager-create the branch at current main HEAD
-  // when this is the first conflict of the session; otherwise append
-  // to the existing branch head. `base_tree` for the new commit is
-  // ALWAYS current main.tree — that's the "rebase forward" rule from
-  // PSEUDO-MERGE-MODE.md §"Архітектура push: split-push у processBatch".
-  // It keeps the branch trivially merge-able back to main on finalize:
-  // branch.tree == main.tree + (only the conflict paths overridden).
+  // as a single commit. Eager-create the branch at current main
+  // HEAD when this is the first conflict of the session; otherwise
+  // append to the existing branch head. `base_tree` for the new
+  // commit is ALWAYS current main.tree — the "rebase forward"
+  // rule — so the branch stays trivially merge-able back to main
+  // on finalize: branch.tree == main.tree + (only the conflict
+  // paths overridden). See docs/PSEUDO-MERGE-MODE.md §4.3.
   //
   // Each `entries[i].content` is the bytes that go on the branch:
   //   - ArrayBuffer → uploaded as a blob; tree entry references the
@@ -1534,13 +1530,13 @@ export class Sync2Manager {
     });
   }
 
-  // Stage 13 Phase B side-batch synthesis. Per PSEUDO-MERGE-MODE.md
-  // §"Phase B — path-close sweep", when evaluateConflictState closes
+  // Phase B side-batch synthesis. When evaluateConflictState closes
   // a path (all records for it dropped), drain synthesizes a side-
-  // batch carrying the live vault state for that path to main.
-  // The batch flows through the normal processBatch loop as a
-  // synthetic batch (meta.synthetic=true → "resolve conflict (...)"
-  // commit message; never merged with user batches).
+  // batch carrying the live vault state for that path to main. The
+  // batch flows through the normal processBatch loop as a synthetic
+  // batch (meta.synthetic=true → "resolve conflict (...)" commit
+  // message; never merged with user batches). See
+  // docs/PSEUDO-MERGE-MODE.md §10 Scenario E for a worked example.
   //
   // Dedup: if the user already has a non-attempted, non-synthetic
   // pending batch touching the closed path, skip — the user batch's
@@ -1616,10 +1612,10 @@ export class Sync2Manager {
     });
     const mainTreeSha = mainCommit.tree.sha;
 
-    // Stage 13: hardcoded `merge conflict-branch ({deviceLabel})` —
-    // Decision #36. Pre-Stage-13 embedded the branch name; that's
-    // discoverable from the merge-commit's second parent SHA and the
-    // (still-deleted) ref shows up in the Network graph as a tip.
+    // Hardcoded `merge conflict-branch ({deviceLabel})`. The branch
+    // name itself is discoverable from the merge-commit's second
+    // parent SHA, and the (still-deleted) ref shows up in the
+    // Network graph as a tip.
     const message = formatMergeConflictBranchMessage(this.deviceLabel());
     const mergeCommit = await this.client.createCommit({
       message,
@@ -1745,11 +1741,9 @@ export class Sync2Manager {
     if (this.accumulateOfflineSyncs) {
       const target = await this.queue.mergeIntoLatestPending(changes);
       if (target !== null) {
-        // Stage 13: commit messages are hardcoded so there's no
-        // "template re-render" to refresh on accumulate-merge. The
-        // existing batch's commitMessage already reads
-        // `sync ({deviceLabel})` — same as what `meta` carries —
-        // so no rewrite needed.
+        // Commit messages are hardcoded, so accumulate-merge does
+        // not need a "template re-render" — the existing batch's
+        // derived message stays correct.
         return changes.length;
       }
     }
@@ -1759,9 +1753,9 @@ export class Sync2Manager {
 
   private fullSyncMeta(): EnqueueMeta {
     return {
-      // Stage 13 (Decision #36 follow-on): commitMessage no longer
-      // persisted. processBatch derives `sync ({deviceLabel})` from
-      // batch.synthetic + the current setting at push time.
+      // commitMessage is not persisted; processBatch derives
+      // `sync ({deviceLabel})` from batch.synthetic + the current
+      // setting at push time.
       parentCommitSha: this.store.getLastSyncCommitSha(),
       parentTreeSha: this.store.getLastSyncTreeSha(),
     };
@@ -1808,20 +1802,13 @@ export class Sync2Manager {
       // bootstrapIfNeeded short-circuits in O(1) when
       // lastSyncCommitSha !== null, so the click-path callers pay
       // nothing for this defensive call.
-      // Stage 13 drain-start sweep — the ONLY point of state
-      // mutation for conflict resolution (PSEUDO-MERGE-MODE.md
-      // §"Архітектура push: split-push у processBatch (β)").
+      // Drain-start sweep — the ONLY point of state mutation for
+      // conflict resolution. See docs/PSEUDO-MERGE-MODE.md §5 for
+      // the layer separation: ConflictWatcher is counter-only
+      // (read-only), drain owns all store mutations.
       //
-      // ConflictWatcher no longer needs pause/resume: under Stage 13
-      // it's a counter-only listener that calls
-      // `counter.markDirty()`, never mutates the store. Drain owns
-      // all store mutations.
-      //
-      // The guard `if (store.records.length > 0)` is the 90%-case
-      // optimization (Decision #26): on a clean device with no
-      // active conflicts, drain skips the sweep entirely — its
-      // latency stays at parity with 2.0.0-beta.
-      // Guard: skip sweep when no records exist (90% of drains). Also
+      // Guard: skip sweep when no records exist (90% of drains keep
+      // drain latency at parity with the no-conflict baseline). Also
       // skip when a wired ConflictCounter reports no sweep-relevant
       // vault events since the last drain (idle drain). When the
       // counter isn't wired, default to "always sweep if records
@@ -1839,14 +1826,14 @@ export class Sync2Manager {
           this.vault,
           this.now,
         );
-        // Stage 13 Phase B side-batch synthesis (PSEUDO-MERGE-MODE.md
-        // §"Phase B — path-close sweep"). For each path the classifier
+        // Phase B side-batch synthesis. For each path the classifier
         // closed (all records gone), synthesize a side-batch that
         // propagates the live vault state to main as an explicit
         // `resolve conflict ({deviceLabel})` commit. The synthetic
         // batch flows through the regular queue.list() loop below,
         // gets `meta.synthetic=true`, and skips mergeIntoLatestPending
-        // so user edits never fold into it.
+        // so user edits never fold into it. See
+        // docs/PSEUDO-MERGE-MODE.md §10 Scenario E.
         //
         // Dedup against user batches: if the user already has a
         // pending batch covering the closed path, the user batch's
@@ -1892,15 +1879,13 @@ export class Sync2Manager {
         );
         pushedAnyBatch = true;
       }
-      // Stage 13: drain-end sweep removed. Listeners are read-only,
-      // so the pre-Stage-13 "events queued during pause, recovered at
-      // drain-end" pattern no longer applies. State that changed
-      // DURING drain (sibling writes from our own conflict
+      // No drain-end sweep. Listeners are read-only, so state that
+      // changed DURING drain (sibling writes from our own conflict
       // registration, user mid-drain edits) is picked up at the
-      // start of the NEXT drain — accepted latency trade-off for the
-      // simpler model (PSEUDO-MERGE-MODE.md §"Архітектура push").
+      // start of the NEXT drain — an accepted latency trade-off for
+      // the single-mutation-point model in §5 of the spec.
       //
-      // Conflict-branch finalize hook (pseudo-merge stage 7b). Runs
+      // Conflict-branch finalize hook. Runs
       // once per drain when the queue is empty: if the active
       // conflict-branch state holds AND every record in the
       // ConflictStore has been resolved, merge the branch back into
@@ -1941,8 +1926,8 @@ export class Sync2Manager {
       }
     } finally {
       this.running = false;
-      // Stage 13: no resume — listener is read-only and was never
-      // paused. Drain doesn't own the listener lifecycle.
+      // No listener resume — ConflictWatcher is read-only and was
+      // never paused. Drain doesn't own listener lifecycle.
     }
   }
 
@@ -2030,8 +2015,8 @@ export class Sync2Manager {
         }
       }
 
-      // Split-push partition (PSEUDO-MERGE-MODE.md §"Архітектура
-      // push: split-push у processBatch", stage 7c).
+      // Split-push partition. See docs/PSEUDO-MERGE-MODE.md §8
+      // (edit-while-in-conflict).
       //
       // After reconcile / case-3 re-target settles, walk the batch
       // looking for paths that are now in the ConflictStore — they
@@ -2063,11 +2048,10 @@ export class Sync2Manager {
           }
           await this.pushConflictPathsToBranch(
             branchEntries,
-            // Stage 13: same hardcoded `conflict ({deviceLabel})` as
-            // the initial registration commit on the branch — Decision
-            // #36. The branch log shows a uniform sequence of conflict
-            // commits with no per-commit metadata in the message
-            // itself.
+            // Same hardcoded `conflict ({deviceLabel})` as the
+            // initial registration commit. The branch log shows a
+            // uniform sequence of conflict commits with no
+            // per-commit metadata in the message itself.
             formatConflictMessage(this.deviceLabel()),
           );
           for (const p of conflictPaths) {
@@ -2141,9 +2125,9 @@ export class Sync2Manager {
           { commitSha, treeSha: newTreeSha },
         );
       } else {
-        // Stage 13 (Decision #36 follow-on): message derived inline
-        // from batch.synthetic + current deviceLabel setting. No
-        // persisted commitMessage on the batch.
+        // Commit message derived inline from batch.synthetic +
+        // current deviceLabel setting. No persisted commitMessage
+        // on the batch.
         commitSha = await this.client.createCommit({
           message: commitMessageForBatch(batch.synthetic, this.deviceLabel()),
           treeSha: newTreeSha,
@@ -2211,7 +2195,6 @@ export class Sync2Manager {
     const path = this.invariants?.rootPath ?? ".gitignore";
     const buf = await this.vault.adapter.readBinary(path);
     const content = arrayBufferToBase64(buf);
-    // Stage 13: hardcoded `init ({deviceLabel})` — Decision #36.
     const message = formatInitMessage(this.deviceLabel());
     await this.logger.info(`Sync2 seed bare repo`, { path, message });
     const seed = await this.client.createFile({

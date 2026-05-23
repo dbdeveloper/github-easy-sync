@@ -305,15 +305,11 @@ describe("AtomicWriteRecovery.sweep", () => {
   });
 });
 
-// ─── Stage 13 Phase 3 RED tests (Group 4: .sync-bak migration) ─────────
+// ─── stagingPathFor — pre-suffix insertion algorithm ──────────────────
 //
-// stagingPathFor() — pre-suffix insertion algorithm (PSEUDO-MERGE-MODE.md
-// §"Naming convention для staging файлів — `.sync-bak` як pre-suffix").
-//
-// All currently FAIL with "Not implemented" — proper RED state from
-// Phase 1.7 stub. Phase 4 Group 4 implementation fills in the body.
-describe("stagingPathFor (Stage 13)", () => {
-  it("N8: normal file → inserts .sync-bak before the extension", () => {
+// See docs/PSEUDO-MERGE-MODE.md §9.2 for the naming convention.
+describe("stagingPathFor", () => {
+  it("normal file → inserts .sync-bak before the extension", () => {
     expect(stagingPathFor("Folder/note.md")).toBe("Folder/note.sync-bak.md");
     expect(stagingPathFor("Plugins/foo/manifest.json")).toBe(
       "Plugins/foo/manifest.sync-bak.json",
@@ -323,7 +319,7 @@ describe("stagingPathFor (Stage 13)", () => {
     );
   });
 
-  it("N8b: hidden file with no extension → appends .sync-bak (no insertion)", () => {
+  it("hidden file with no extension → appends .sync-bak (no insertion)", () => {
     expect(stagingPathFor(".gitignore")).toBe(".gitignore.sync-bak");
     expect(stagingPathFor(".obsidian/.gitignore")).toBe(
       ".obsidian/.gitignore.sync-bak",
@@ -331,17 +327,17 @@ describe("stagingPathFor (Stage 13)", () => {
     expect(stagingPathFor(".editorconfig")).toBe(".editorconfig.sync-bak");
   });
 
-  it("N8c: extensionless file → appends .sync-bak (no insertion)", () => {
+  it("extensionless file → appends .sync-bak (no insertion)", () => {
     expect(stagingPathFor("README")).toBe("README.sync-bak");
     expect(stagingPathFor("Folder/Makefile")).toBe("Folder/Makefile.sync-bak");
   });
 
-  it("N8d: file with multiple dots in name → insertion uses LAST extension", () => {
+  it("file with multiple dots in name → insertion uses LAST extension", () => {
     expect(stagingPathFor("Folder/file.tar.gz")).toBe(
       "Folder/file.tar.sync-bak.gz",
     );
-    // Conflict-from sibling shape from ConflictStore — Phase 4 ConflictStore
-    // staging calls this with sibling paths exactly like this.
+    // Conflict-from sibling shape from ConflictStore.create; this is
+    // the path shape that ConflictStore calls stagingPathFor with.
     expect(
       stagingPathFor("Folder/note.conflict-from-Phone-2026-05-22T15-30-00Z.md"),
     ).toBe(
@@ -349,7 +345,7 @@ describe("stagingPathFor (Stage 13)", () => {
     );
   });
 
-  it("N8e: `which='tmp'` variant uses .sync-tmp pre-suffix", () => {
+  it("`which='tmp'` variant uses .sync-tmp pre-suffix", () => {
     expect(stagingPathFor("Folder/note.md", "tmp")).toBe(
       "Folder/note.sync-tmp.md",
     );
@@ -357,28 +353,18 @@ describe("stagingPathFor (Stage 13)", () => {
   });
 });
 
-// ─── Stage 13 Phase 3 RED tests (Group 4: SHA-verify on recovery) ──────
+// ─── AtomicWriteRecovery SHA-verify (ConflictStore-owned siblings) ─────
 //
-// AtomicWriteRecovery.sweep must validate `.sync-bak` content SHA against
-// the ConflictStore record's `theirsBlobSha` (when one exists) before
-// promoting it to finalPath. Corrupted / mismatched staging is dropped
-// + logged; record is left for next drain Phase B to clean up. See
-// PSEUDO-MERGE-MODE.md §"Recovery sweep на onload — vault-level
-// `.sync-bak` sweep" → matrix row "SHA(`.sync-bak`) ≠ theirsBlobSha".
-//
-// Phase 4 Group 4 wires sweep against ConflictStore. For now the sweep
-// only consults SnapshotStore; the integration with ConflictStore +
-// SHA-verify is new behavior.
-//
-// Skipped here — N9 requires the full Phase 4 wiring of sweep
-// against ConflictStore. RED-test ergonomics dictate: file an it.todo
-// placeholder so Phase 4 implementer doesn't miss this. Active
-// assertion lives in the Group 4 implementation commit.
-describe("AtomicWriteRecovery SHA-verify (Stage 13) — Phase 4 wires sweep against ConflictStore", () => {
+// sweep must validate `.sync-tmp` content SHA against the
+// ConflictStore record's `theirsBlobSha` (when one exists) before
+// promoting it to finalPath. Corrupted / mismatched staging is
+// dropped + logged; the record is left for the next drain Phase B
+// to clean up. See docs/PSEUDO-MERGE-MODE.md §9.5.
+describe("AtomicWriteRecovery SHA-verify (ConflictStore-owned siblings)", () => {
   // Fixture that wires AtomicWriteRecovery against both SnapshotStore
   // and ConflictStore so sweep can dispatch by ownership. We plant
   // a ConflictStore record manually (via create + remove final), then
-  // place a `.sync-bak` staging file and exercise the sweep.
+  // place a `.sync-tmp` staging file and exercise the sweep.
 
   let f: ReturnType<typeof fixture>;
 
@@ -390,7 +376,7 @@ describe("AtomicWriteRecovery SHA-verify (Stage 13) — Phase 4 wires sweep agai
     f.cleanup();
   });
 
-  it("N9: sweep finds .sync-tmp with SHA matching record.theirsBlobSha → rename to finalPath", async () => {
+  it("sweep finds .sync-tmp with SHA matching record.theirsBlobSha → rename to finalPath", async () => {
     const { default: ConflictStore } = await import(
       "../../src/sync2/conflict-store"
     );
@@ -436,7 +422,7 @@ describe("AtomicWriteRecovery SHA-verify (Stage 13) — Phase 4 wires sweep agai
     expect(fs.readFileSync(siblingAbs, "utf8")).toBe("theirs content\n");
   });
 
-  it("N9b: sweep finds .sync-tmp with SHA NOT matching record.theirsBlobSha → drop, leave record for drain Phase B", async () => {
+  it("sweep finds .sync-tmp with SHA NOT matching record.theirsBlobSha → drop, leave record for drain Phase B", async () => {
     const { default: ConflictStore } = await import(
       "../../src/sync2/conflict-store"
     );
@@ -484,7 +470,7 @@ describe("AtomicWriteRecovery SHA-verify (Stage 13) — Phase 4 wires sweep agai
     expect(conflictStore.get(rec.id)).toBeDefined();
   });
 
-  it("N9c: .sync-tmp at a path with no ConflictStore record → dropped as Path A transient (even when conflictStore is in scope)", async () => {
+  it(".sync-tmp at a path with no ConflictStore record → dropped as Path A transient (even when conflictStore is in scope)", async () => {
     // Pin the dispatch: presence of conflictStore in the recovery
     // constructor must NOT cause a Path A transient .sync-tmp (one
     // whose finalPath is just an ordinary user file, not a sibling)

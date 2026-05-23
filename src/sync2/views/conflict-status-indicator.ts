@@ -2,9 +2,10 @@
 // Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
 // AGPL-3.0 — see LICENSE.
 
-// Pseudo-merge stage 10 — persistent status-bar indicator that
-// surfaces the pending-conflict count. Spec
-// (PSEUDO-MERGE-MODE.md §"4-точкове попередження користувачу" #1):
+// Persistent status-bar indicator that surfaces the pending-conflict
+// count — one of three visibility surfaces (status bar, ribbon
+// badge, pre-sync modal) so users notice unresolved conflicts before
+// the next sync.
 //
 //   🔀 3 files — not visible on other devices
 //

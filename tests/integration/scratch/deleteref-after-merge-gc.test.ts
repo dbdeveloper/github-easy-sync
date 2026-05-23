@@ -15,11 +15,11 @@ import * as os from "os";
 import * as path from "path";
 import * as crypto from "crypto";
 
-// PSEUDO-MERGE-MODE.md §"Open questions" #2 (stage 7a empirical
-// check): after we createCommit a merge with branch.head as a
-// parent and then deleteReference the branch — does GitHub GC the
-// branch's commits, or does merge-commit reachability keep them
-// alive?
+// Empirical check that backs docs/PSEUDO-MERGE-MODE.md §2.3
+// (reachability) on GitHub's actual server behaviour: after we
+// createCommit a merge with branch.head as a parent and then
+// deleteReference the branch — does GitHub GC the branch's
+// commits, or does merge-commit reachability keep them alive?
 //
 // Standard git: an object is reachable iff any ref points at it OR
 // it's an ancestor of something reachable. A merge commit on main

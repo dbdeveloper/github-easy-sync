@@ -378,21 +378,16 @@ describe("PushQueue", () => {
     });
   });
 
-  // ─── Stage 13 Phase 3 RED tests (Group 1: synthetic-batch foundation) ──
+  // ─── enqueueSynthetic — Phase B side-batch foundation ──────────────
   //
-  // These tests target the Phase 4 API surface locked in Phase 1.7
-  // (`PushQueue.enqueueSynthetic` stub at push-queue.ts). They currently
-  // FAIL with "Not implemented" (proper RED state). Phase 4 Group 1
-  // implementation fills in the bodies and turns these GREEN.
-  //
-  // Contract under test (PSEUDO-MERGE-MODE.md §"PushQueue.enqueueSynthetic
-  // — API contract" + §"EnqueueMeta schema (Stage 13)"):
+  // Contract:
   //   - Single path per synthetic batch.
   //   - `synthetic: true` in meta.json so mergeIntoLatestPending skips it.
   //   - Never folds with subsequent user mergeIntoLatestPending calls.
   //   - Returns batch id (timestamp-based, same format as enqueue()).
-  describe("enqueueSynthetic (Stage 13)", () => {
-    it("N5: creates batch with synthetic=true and returns id (content variant)", async () => {
+  // See src/sync2/push-queue.ts for the full API doc.
+  describe("enqueueSynthetic", () => {
+    it("creates batch with synthetic=true and returns id (content variant)", async () => {
       const content = new TextEncoder().encode("resolved theirs\n");
       const id = await f.queue.enqueueSynthetic({
         path: "Notes/note.md",
@@ -424,7 +419,7 @@ describe("PushQueue", () => {
       expect(meta.parentTreeSha).toBe("parent-tree-sha");
     });
 
-    it("N5b: content=null variant records a deletion in deleted-paths.txt", async () => {
+    it("content=null variant records a deletion in deleted-paths.txt", async () => {
       const id = await f.queue.enqueueSynthetic({
         path: "Notes/gone.md",
         content: null,
@@ -455,7 +450,7 @@ describe("PushQueue", () => {
       expect(meta.synthetic).toBe(true);
     });
 
-    it("N6: mergeIntoLatestPending returns null when only pending batch is synthetic", async () => {
+    it("mergeIntoLatestPending returns null when only pending batch is synthetic", async () => {
       // Phase B-style: synthetic batch sits in queue, drain hasn't
       // processed it yet (e.g., offline). User changes nothing; calls
       // sync again. enqueueOrMerge → mergeIntoLatestPending must NOT
@@ -475,7 +470,7 @@ describe("PushQueue", () => {
       expect(target).toBeNull();
     });
 
-    it("N7: mergeIntoLatestPending picks the user batch, skipping the synthetic batch", async () => {
+    it("mergeIntoLatestPending picks the user batch, skipping the synthetic batch", async () => {
       // Two batches sit in queue: a user batch (older) and a synthetic
       // batch (younger). enqueueOrMerge should fold subsequent user
       // changes into the USER batch, even though the synthetic one is

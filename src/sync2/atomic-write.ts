@@ -28,8 +28,6 @@ import type SnapshotStore from "./snapshot-store";
 export const SYNC_TMP_SUFFIX = ".sync-tmp";
 export const SYNC_BAK_SUFFIX = ".sync-bak";
 
-// Stage 13: pre-suffix staging path. Phase 4 Group 4 implementation.
-//
 // Computes the staging path for a target file by inserting `.sync-bak`
 // (or `.sync-tmp` if `which="tmp"`) BEFORE the file extension instead
 // of appending after it. This preserves the original extension's
@@ -37,8 +35,8 @@ export const SYNC_BAK_SUFFIX = ".sync-bak";
 // hidden under "Show all file types: false" but a `note.sync-bak.md`
 // is still indexed as markdown).
 //
-// Examples (from PSEUDO-MERGE-MODE.md §"Naming convention для staging
-// файлів — `.sync-bak` як pre-suffix"):
+// See docs/PSEUDO-MERGE-MODE.md §9.2 for the naming convention.
+// Examples:
 //   - "Folder/note.md"                  → "Folder/note.sync-bak.md"
 //   - "Plugins/foo/manifest.json"       → "Plugins/foo/manifest.sync-bak.json"
 //   - ".gitignore"                      → ".gitignore.sync-bak"
@@ -134,11 +132,11 @@ export async function atomicWriteFile(
   bytes: ArrayBuffer,
   afterCommit?: () => Promise<void>,
 ): Promise<void> {
-  // Stage 13: pre-suffix staging paths so Obsidian's file explorer
-  // still recognizes the staging file by extension (a `.md.sync-tmp`
+  // Pre-suffix staging paths so Obsidian's file explorer still
+  // recognizes the staging file by extension (a `.md.sync-tmp`
   // file is hidden under "Show all file types: false" but a
-  // `note.sync-tmp.md` stays visible). See PSEUDO-MERGE-MODE.md
-  // §"Naming convention для staging файлів — `.sync-bak` як pre-suffix".
+  // `note.sync-tmp.md` stays visible). See stagingPathFor above
+  // and docs/PSEUDO-MERGE-MODE.md §9.2.
   const tmpPath = stagingPathFor(path, "tmp");
   const bakPath = stagingPathFor(path, "bak");
 
@@ -210,8 +208,8 @@ interface ConflictStoreLike {
 // any `.sync-tmp` / `.sync-bak` leftovers and reconciles them
 // against the snapshot + conflict stores.
 //
-// Each suffix now has ONE consistent meaning (see PSEUDO-MERGE-MODE.md
-// §9 for the rationale):
+// Each suffix has ONE consistent meaning (see
+// docs/PSEUDO-MERGE-MODE.md §9 for the full rationale):
 //
 //   `.sync-tmp` = NEW bytes staged for a target (existing or new).
 //      Ambiguous between two callsites; dispatch by ownership via

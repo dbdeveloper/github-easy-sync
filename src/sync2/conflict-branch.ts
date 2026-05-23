@@ -2,9 +2,9 @@
 // Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
 // AGPL-3.0 — see LICENSE.
 
-// Pseudo-merge conflict-branch naming helper
-// (PSEUDO-MERGE-MODE.md §"Branch naming + lifecycle", stage 7a;
-// Decision #19).
+// Conflict-branch naming helper. See docs/PSEUDO-MERGE-MODE.md §4.3
+// for the per-device branch lifecycle and §10 Scenarios A–E for the
+// shape of the names in context.
 //
 // Pure function. Returns a bare branch name (no `refs/heads/`
 // prefix) with the shape:

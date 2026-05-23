@@ -122,12 +122,10 @@ describe.skipIf(!integrationEnabled())(
         );
         expect(await readRemoteFile(branch, "note.md")).toBe("theirs\n");
 
-        // Branch head advanced to a new commit. Stage 13 uses a
-        // uniform `conflict ({deviceLabel})` commit message for
-        // every commit on the conflict-branch (initial registration
-        // + edit-while-in-conflict pushes). Pre-Stage-13 the latter
-        // had a distinct "Edit-while-in-conflict:" prefix; Decision
-        // #36 removed all template differentiation.
+        // Branch head advanced to a new commit. Every commit on the
+        // conflict-branch — initial registration and
+        // edit-while-in-conflict pushes alike — uses the same
+        // hardcoded `conflict ({deviceLabel})` message.
         const updatedCb = (
           client.store as unknown as {
             data: { conflictBranch: { name: string; head: string } | null };
