@@ -1439,7 +1439,7 @@ export class Sync2Manager {
     // 2. Resolve / create the conflict branch.
     let cb = this.store.getConflictBranch();
     if (cb === null) {
-      // Eager creation: name = easy-sync-conflicts-{label}-{ts}-{mmm}.
+      // Eager creation: name = github-easy-sync-conflicts-{label}-{ts}-{mmm}.
       // On the rare 422 "Reference already exists" (cross-device
       // sub-second collision on the default label), re-generate
       // with a freshly-clocked now() — millisecond resolution makes

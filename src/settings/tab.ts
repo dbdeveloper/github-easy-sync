@@ -534,7 +534,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       .setName("Enable logging")
       .setDesc(
         `Persist logs to <vault>/${logFileNameFor(manifest.id)}. Useful for bug reports. ` +
-        "To view this log file, make sure that Settings > Files and links > Show all file types is enabled. " +
+        "To view this log file, make sure that Settings (Options) > Files and links > Show all file types is enabled. " +
         "Turning logging off deletes the file from the vault.",
       )
       .addToggle((toggle) => {

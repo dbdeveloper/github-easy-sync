@@ -246,6 +246,10 @@ export default class GitHubSyncPlugin extends Plugin {
       await queue.clearAll();
     }
     if (this.conflictStore) {
+      // Decision #22: rename vault sibling files BEFORE dropping the
+      // record index, so a future re-enable doesn't collide with the
+      // user's leftover conflict-from artifacts.
+      await this.conflictStore.renameVaultSiblingsToUnresolved();
       await this.conflictStore.clearAll();
     }
     this.settings = Object.assign({}, DEFAULT_SETTINGS);

@@ -118,8 +118,18 @@ const ROOT_RECOMMENDED_DEFAULTS = `# Recommended defaults — feel free to edit.
 
 # OS noise
 .DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
 Thumbs.db
+ehthumbs.db
 desktop.ini
+
+# Trash can and deleted files
+$RECYCLE.BIN/
+.trash/
+.trashed-*
 
 # Editor/backup junk
 *~

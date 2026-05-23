@@ -3,16 +3,17 @@
 // AGPL-3.0 — see LICENSE.
 
 // Pseudo-merge conflict-branch naming helper
-// (PSEUDO-MERGE-MODE.md §"Branch naming + lifecycle", stage 7a).
+// (PSEUDO-MERGE-MODE.md §"Branch naming + lifecycle", stage 7a;
+// Decision #19).
 //
 // Pure function. Returns a bare branch name (no `refs/heads/`
 // prefix) with the shape:
 //
-//   easy-sync-conflicts-<deviceLabel>-<YYYYMMDDHHMMSS>-<mmm>
+//   <plugin-id>-conflicts-<deviceLabel>-<YYYYMMDDHHMMSS>-<mmm>
 //
-// Examples:
-//   easy-sync-conflicts-Obsidian-20260520143022-847
-//   easy-sync-conflicts-Phone-20260601090015-003
+// Examples (with plugin id "github-easy-sync"):
+//   github-easy-sync-conflicts-Obsidian-20260520143022-847
+//   github-easy-sync-conflicts-Phone-20260601090015-003
 //
 // The msec suffix guards against cross-device sub-second collisions
 // (two devices, both with the default `"Obsidian"` label, hitting
@@ -20,7 +21,9 @@
 // edge, callers re-generate with a freshly-clocked now() — the
 // chance of a second collision is vanishingly small.
 
-export const CONFLICT_BRANCH_PREFIX = "easy-sync-conflicts-";
+import manifest from "../../manifest.json";
+
+export const CONFLICT_BRANCH_PREFIX = `${manifest.id}-conflicts-`;
 
 // Sanitize a device label for safe inclusion in a git branch name.
 // git accepts a wide ASCII set but disallows: space, tilde, caret,
