@@ -32,12 +32,12 @@ appears, a one-paragraph refresher is provided before it is used.
 
 ---
 
-## 1. The Problem: Vault Synchronisation Without git
+## 1. The Problem: Vault Synchronization Without git
 
 Consider a writer who keeps a vault of Markdown notes in Obsidian on a
 laptop and on a phone. The same file, `Notes/idea.md`, lives on both
 devices. On the laptop, the writer adds a line to the file. Later, on
-the phone, with no recent network synchronisation in between, the
+the phone, with no recent network synchronization in between, the
 writer adds a different line. Both devices then attempt to publish
 their version to a shared GitHub repository.
 
@@ -218,15 +218,15 @@ state has nowhere to live except a parallel data structure the user
 cannot see.
 
 **Option C: Refuse the push and tell the user to fix it somewhere
-else.** This is the safest option but it stalls all other
-synchronisation. The user cannot push *any* file, including ones
+else.** This is the safest option, but it stalls all other
+synchronization. The user cannot push *any* file, including ones
 entirely unrelated to the conflict, until the conflict is resolved.
 For a vault of hundreds of notes, this is unacceptable.
 
 Pseudo-merge mode takes a fourth path: it converts the conflict into
 *two ordinary files in the vault* — the local version under its
 original name, and the remote version under a sibling name — and
-moves on. Synchronisation of unrelated files continues immediately.
+moves on. Synchronization of unrelated files continues immediately.
 The user resolves the conflict at their leisure, with the same file
 operations they already use every day in Obsidian's file explorer.
 
@@ -236,7 +236,7 @@ operations they already use every day in Obsidian's file explorer.
 
 > *How can a divergent file be brought into the vault without showing
 > raw merge markers, without launching a modal dialog, and without
-> blocking the rest of the synchronisation?*
+> blocking the rest of the synchronization?*
 
 The answer has three moving parts:
 
@@ -286,10 +286,10 @@ Notes/
 ```
 
 The original file is **not** overwritten. The local version of
-`idea.md` continues to be the file the user sees in their notes list,
+`idea.md` continues to be the file the user sees in their note list,
 opens, edits, and ultimately publishes — until they decide otherwise.
-The sibling is a peer artefact, fully visible in Obsidian's file
-explorer, and the user can open it, read it, copy parts of it,
+The sibling is a peer artifact, fully visible in Obsidian's file
+explorer. The user can open it, read it, copy parts of it,
 delete it, or rename it on top of `idea.md`, all using the standard
 file operations they already know.
 
@@ -316,7 +316,7 @@ github-easy-sync-conflicts-<deviceLabel>-<YYYYMMDDHHMMSS>-<mmm>
 For example, `github-easy-sync-conflicts-Laptop-20260508153022-847`.
 The local version of the conflicting file is pushed to this branch;
 unrelated files in the same sync continue to flow to `main`. From
-the perspective of any other device synchronising against the same
+the perspective of any other device synchronizing against the same
 repository, the conflict branch is invisible — only `main` matters
 for incoming pulls. The conflict therefore stays strictly *private to
 the device that detected it* until the user explicitly resolves it.
@@ -376,7 +376,7 @@ sequence of intermediate versions that led to the final resolution.
 Nothing about the resolution erases the journey to it. This contrasts
 with several competing approaches — e.g., squash-merge workflows or
 "resolve in place and discard the working copies" — where the only
-artefact preserved is the outcome, not the path. Pseudo-merge mode
+artifact preserved is the outcome, not the path. Pseudo-merge mode
 treats the repository as a durable archive of the user's actual
 edits, not as a presentation layer for their final state.
 
@@ -386,9 +386,9 @@ device with pending local edits produces a distinct commit, regardless
 of whether the affected paths are in conflict. The repository thus
 holds, in addition to the conflict-resolution history described
 above, the full per-click commit log of the user's normal
-synchronisation activity. The setting can be enabled for users who
+synchronization activity. The setting can be enabled for users who
 prefer fewer commits at the cost of less granular history; the
-default favours preservation.
+default favors preservation.
 
 ---
 
@@ -398,7 +398,7 @@ default favours preservation.
 > three concerns — pushing changes, reflecting them in the UI, and
 > resolving conflicts — from racing against each other?*
 
-The plugin is organised into three layers, each with a different
+The plugin is organized into three layers, each with a different
 trigger model:
 
 | Layer                              | What it does                                                 | When it runs                                                              | Mutates state? |
@@ -440,9 +440,9 @@ drain():
       finalise: marker commit, merge-commit on main, deleteRef branch
 ```
 
-In ninety per cent of `drain()` invocations the store is empty and
+In ninety percent of `drain()` invocations the store is empty and
 the conflict-related code path is skipped entirely; the conflict
-machinery imposes no runtime cost on the normal synchronisation path.
+machinery imposes no runtime cost on the normal synchronization path.
 
 ---
 
@@ -479,7 +479,7 @@ The local file is untouched. The user resolves at their convenience.
 The local device deleted the file; the remote device modified it. The
 local intent ("this file should be gone") and the remote intent ("this
 file matters and has been improved") are genuinely incompatible — the
-plugin cannot decide which one to honour without asking.
+plugin cannot decide which one to honor without asking.
 
 A sibling carrying the remote modified content is created. There is
 no local file to put next to it; the sibling stands alone in its
@@ -495,13 +495,13 @@ parent directory. The user resolves in one of two ways:
 
 The local device modified the file; the remote device deleted it.
 Symmetric with 6.2 in terms of git mechanics, but pseudo-merge mode
-treats it asymmetrically and resolves it automatically in favour of
+treats it asymmetrically and resolves it automatically in favor of
 the local modification.
 
 The reasoning: the user **already** demonstrated intent towards this
 file by modifying it. The earlier deletion on the other device may
 have been a mistake, a stale draft cleanup, or an action the user
-themselves no longer endorses. To resolve the conflict in favour of
+themselves no longer endorses. To resolve the conflict in favor of
 deletion would discard the more recent and more deliberate signal.
 
 Concretely, the auto-merge gate returns the outcome `modify-wins`:
@@ -569,7 +569,7 @@ guess.
 
 ## 8. Editing While in Conflict — A Distinguishing Feature
 
-> *Why must a conflict block further edits to a file? It need not.*
+> *Why must a conflict block further edits to a file? It needs it not.*
 
 A conventional VCS treats a file in conflict as inert: until the
 conflict is resolved, the file is in a peculiar half-merged state and
@@ -577,7 +577,7 @@ the user is expected to stop working on it. Pseudo-merge mode removes
 this restriction. **The user can keep editing `idea.md` even while
 the conflict on it is pending,** and those edits flow into the same
 private conflict branch the original local version was pushed to.
-Other devices remain unaware of all of this until the user finalises
+Other devices remain unaware of all of this until the user finalizes
 the resolution.
 
 The mechanism is mechanical and uses no new primitives:
@@ -623,7 +623,7 @@ months later through the GitHub Network graph or `git log --all`
 against a cloned copy. Were the plugin to absorb multiple in-flight
 edits into a single "resolution" commit, that contract would be
 broken; the user's thirty-minute deliberation between two phrasings
-would collapse into a single artefact stripped of the reasoning. The
+would collapse into a single artifact stripped of the reasoning. The
 private conflict branch is the durable archive of that reasoning, and
 the final merge-commit on `main` is what ensures the archive remains
 reachable after the branch label is deleted.
@@ -671,7 +671,7 @@ produced it:
 This naming-to-meaning correspondence is the property §9 walks through.
 It is what lets a reader look at any staging file on disk and know
 immediately what it represents, regardless of which protocol produced
-it. The recovery sweep on plugin load uses the same correspondence as
+it. The recovery sweep on the plugin load uses the same correspondence as
 its first decision axis.
 
 ### 9.1 The Two Callsites at a Glance
@@ -695,10 +695,10 @@ extension. The pre-suffix placement is deliberate. Most file
 managers — and Obsidian's own file explorer — preserve the trailing
 extension when deciding which icon to show, whether to render a
 preview, and so on. A staging file named `note.md.sync-tmp` would
-look like a file of unknown type; `note.sync-tmp.md` looks like a
+look like a file of an unknown type; `note.sync-tmp.md` looks like a
 Markdown file with an unusual stem, which is exactly what it is.
 
-The algorithm, parameterised by which suffix to use:
+The algorithm, parameterized by which suffix to use:
 
 ```
 stagingPathFor(finalPath, which ∈ {"tmp", "bak"}):
@@ -730,13 +730,13 @@ including the dot.
 ### 9.3 Path A — Pull-Replace via `atomicWriteFile` (Five Steps)
 
 The first context that produces staging files is the ordinary pull-side
-overwrite. When the plugin's pull observes that a file on `main` has
+overwritten. When the plugin's pull observes that a file on `main` has
 new bytes since the last sync, it must replace the local copy. A
 naïve `writeBinary(path, newBytes)` would be hostile to a crash: if
-the write started but did not finish, the file on disk would be a
+the writing started but did not finish, the file on disk would be a
 truncated mix of old and new — *neither version recoverable, both
 versions corrupted*. The plugin instead routes every pull-side
-overwrite through `atomicWriteFile`, which uses a five-step protocol
+overwritten through `atomicWriteFile`, which uses a five-step protocol
 that uses **both** suffixes in complementary roles:
 
 ```
@@ -767,7 +767,7 @@ two facts a recovery agent needs to know if a crash occurs:
 * `.sync-bak` exists ⇒ "the old bytes are still recoverable here, in
   case the new bytes turn out not to have been committed."
 
-Both files coexist briefly during Steps 2–3 of every overwrite, then
+Both files coexist briefly during Steps 2–3 of every overwriting, then
 the `.sync-tmp` disappears at Step 3 (renamed away), the snapshot is
 updated at Step 4, and `.sync-bak` disappears at Step 5.
 
@@ -776,9 +776,9 @@ The order is significant. The snapshot update (Step 4) happens
 (Step 5). This ordering is the **integrity witness** the recovery
 sweep will later use to decide what an in-progress state means: if
 the snapshot says "this path has remote SHA `X`" and the live file's
-SHA matches `X`, then the new write committed successfully and the
+SHA matches `X`, then the new writing committed successfully and the
 remaining `.sync-bak` is only a cleanup leftover. If the snapshot and
-the live file disagree, either the write was partial or the snapshot
+the live file disagree, either the writing was partial or the snapshot
 update never ran — in both cases, the `.sync-bak` is the trustable
 copy and the sweep restores it.
 
@@ -823,7 +823,7 @@ The protocol uses three steps rather than five because the additive
 nature removes two concerns:
 
 1. There is no live file to move aside — Path A's Step 2 has no
-   analogue here, because the sibling path is fresh.
+   analogue here because the sibling path is fresh.
 2. There is no need for a separate live-bytes-versus-new-bytes
    distinction — only new bytes exist. The staging file *is* the
    eventual sibling, just sitting at its staging name until Step 3
@@ -1022,7 +1022,7 @@ back to `idea.md`. On the next `[Sync]`:
 3. `processBatch` runs over the side-batch. It pushes the new
    content of `idea.md` to `main`.
 4. After the queue drains, the conflict-record store is empty and
-   the branch exists. The finalise block runs: a marker commit is
+   the branch exists. The finalised block runs: a marker commit is
    written to the branch capturing the final state, then a
    merge-commit on `main` is constructed manually with two parents
    (the current `main` head and the branch head). The merge-commit
@@ -1466,7 +1466,7 @@ deleted.
 the situation in which `main`'s HEAD advanced between the batch's
 creation and its push. The same auto-merge gate as on the pull side
 runs against the new `main` tree; failure registers the path as a
-conflict, the same as a pull-side detection would.
+conflict, the same as pull-side detection would.
 
 **Sibling file** — An additional file in the vault next to a
 conflicting base file, named
@@ -1475,24 +1475,24 @@ carrying the remote side's content. The user resolves the conflict
 by manipulating this file with standard operations: delete it, edit
 it, rename it onto the base, etc.
 
-**Side-batch** — A batch synthesised inline by Phase B of
+**Side-batch** — A batch synthesized inline by Phase B of
 `evaluateConflictState` to propagate a resolved file's live content
 to `main`. Marked `synthetic: true` in its meta.json; treated as a
 solo batch by the queue (never folded into other user batches).
 
 **Snapshot store** — The local persistent record of "what each path
 looked like in the version of the repository this device most
-recently synchronised against." Stored at
+recently synchronized against." Stored at
 `.obsidian/plugins/github-easy-sync/github-easy-sync-metadata.json`.
 Used by the change detector and by pull-side reconciliation to
 distinguish "this file changed locally" from "this file changed
 remotely" from "this file changed on both sides."
 
 **Staging path / `.sync-tmp` / `.sync-bak`** — The intermediate
-location of a file during the atomic write protocols. `.sync-tmp`
+location of a file during the atomic writing protocols. `.sync-tmp`
 holds new bytes destined for a target path (forward direction;
 both Path A and Path B produce these). `.sync-bak` holds the old
-bytes of a file moved aside before an overwrite (rollback
+bytes of a file moved aside before an overwriting (rollback
 direction; only Path A produces these). Both use pre-suffix form
 (e.g., `note.sync-tmp.md`, `note.sync-bak.md`) so that the file
 extension is preserved and gitignore's `*.sync-tmp*` / `*.sync-bak*`

@@ -16,7 +16,7 @@ An Obsidian plugin that syncs a local vault with a GitHub repository using **onl
 
 - **User-facing overview, installation, settings reference, conflict-resolution UX, migration from other plugins**: [`README.md`](./README.md).
 - **Conflict-resolution design rationale, suffix semantics (`.sync-tmp` vs `.sync-bak`), three-step / five-step atomic protocols, scenarios A–E, glossary**: [`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md). **Canonical spec for the conflict layer** — when working on `src/sync2/conflict-*.ts`, `src/sync2/atomic-write.ts`, `src/sync2/views/`, or the conflict tests, read it first. Code comments cross-reference the article's section numbers (§4.3, §9.4, §10 Scenario E, etc.).
-- **Diff2 widget design** (in-progress UX layer on top of pseudo-merge mode, lives on the `diff2` branch): [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md).
+- **Diff2 widget design** (in-progress UX layer on top of pseudo-merge mode, lives on the `diff2` branch): [`IMPLEMENTATION_PLAN.md`](DIFF2_IMPLEMENTATION_PLAN.md).
 
 Behaviour described in the article is locked in by the unit + integration suites. If you change anything in the conflict layer and the article disagrees, fix the code OR update the article — don't let them drift.
 

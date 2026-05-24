@@ -469,7 +469,7 @@ export default class ChangeDetector {
   // Reader for GI: resolves a `.gitignore` absolute path to its
   // content + mtime via vault.adapter. The mtime lets GI auto-skip
   // re-parsing when the file hasn't moved on disk — Layer A's
-  // self-keeping-fresh contract from IMPLEMENTATION_PLAN.md.
+  // self-keeping-fresh contract from DIFF2_IMPLEMENTATION_PLAN.md.
   private giReader = async (
     absPath: string,
   ): Promise<{ content: string; mtime: number } | null> => {
