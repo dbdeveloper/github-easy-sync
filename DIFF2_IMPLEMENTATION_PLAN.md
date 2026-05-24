@@ -75,10 +75,11 @@
    і вносити зміну дуже ретельно з повним прогоном тестів "до і
    після".
 
-6. **Phase-by-phase, не "великий вибух".** Реалізація йде фазами
-   (Phase 0 → Phase 8). Кожна фаза — окремий PR, що сам по собі
-   не ламає main. Розгортання інкрементально, з можливістю
-   зупинитись на будь-якій фазі, і мати працездатний плагін.
+6. **Phase-by-phase, не "великий вибух".** Реалізація йде фазами; канонічна
+   енумерація — у §R9 (Implementation roadmap). Кожна фаза — окремий PR, що сам по собі
+   не ламає main. Розгортання інкрементально, з можливістю зупинитись на будь-якій
+   фазі, починаючи з Phase 3 (перший shippable user-feature; Phases 0–2 — infrastructure,
+   див. R9 MVP-cliff пояснення).
 
 7. **CLAUDE.md, docs/PSEUDO-MERGE-MODE.md, і цей документ - як джерело істини про поточну поведінку.** 
    Перед зміною будь-якого наявного механізму — перечитати відповідний розділ цих документів і відповідні 
@@ -108,12 +109,13 @@
 - Перетворити Diff-Edit на **уніфікований інструмент** для всіх
   пов'язаних задач: 
   - розв'язання конфліктів, 
-  - історія змін (diff-порівняння попередніх версій будь-якого текстового файлу з Vault з його версіями з GitHub repo),
+  - історія змін (diff-порівняння попередніх версій будь-якого текстового файлу з Vault з його версіями з .push-queue 
+    (в режимі offline) і GitHub repo),
   - відновлення видалених файлів (за рахунок збережених копій в GitHub repo і, у режимі offline, тимчасово, – 
-    з .push-queue/.
-  - порівняння довільних (текстових) файлів,
+    з .trash/.
+  - порівняння довільних (текстових) файлів.
 
-Форма UI обговорюється окремо.
+Форма UI та UX взаємодія обговорюються далі.
 
 ---
 
@@ -1270,3 +1272,93 @@ await onloadRecoverySweep({
   залишає state, який повторний onload зачистить.
 - Disk-corruption (зіпсовані байти у середині файлу). Об'єкти типу `meta.json` парсяться через `JSON.parse` з try/catch; invalid JSON →
   трактується як відсутній і wipe-ається.
+
+### R9. Implementation roadmap (phased)
+
+Дванадцять фаз, кожна — окремий PR розміру 200–800 рядків коду + тести. Канонічна
+енумерація для цього плану (Принципи #6 говорять про "phased delivery"; деталі — тут).
+
+**MVP-cliff.** Phases 0–2 — це **infrastructure** (нема user-facing value: список і
+порожня панель). Перший shippable user-feature з'являється на **Phase 3** — там end-to-end
+resolve-flow вже працює (відкрити конфлікт → натиснути `[apply]` → `[←]` → file пишеться у
+vault → Phase A на наступному drain auto-cleans). Усе після Phase 3 ortogонально додає
+історію, deleted, compare, external tool — у будь-якому порядку, якщо потрібно зупинитись
+на якійсь фазі і паралельно випустити білд.
+
+**Per-mode toolbars (R7.9) розподілені по фазах їхніх режимів.** R7.9a ships у Phase 3
+(Conflicts toolbar потрібен для resolve-flow); R7.9b — у Phase 7 (History); R7.9c — у
+Phase 8 (Compare); R7.9d — у Phase 9 (Deleted). Phase 6 — це **тільки** entry-points
+(R2.7), без toolbar-роботи.
+
+**Phase 9 sync2 carve-out.** R3.5 (`TTL=0`) вимагає, щоб `sync2-manager.processBatch` після
+успішного push повідомив `TrashStore.confirmDeleted(paths[])`. Це **подія**, не імпорт —
+`sync2` отримує `onBatchDeleted: (paths) => void` callback через constructor-injection,
+`diff2` його надає при wire-up у `main.ts`. Це **єдиний** дозволений напрямок взаємодії
+(sync2 emit-ить, diff2 слухає); імпорт `src/sync2/* → ../diff2/*` залишається
+забороненим (CLAUDE.md).
+
+#### R9.1. Phase table
+
+| # | Status | Scope | R-coverage | Key files (new + edits) | Acceptance |
+|---|---|---|---|---|---|
+| 0 | infra | Module scaffolding | — | `src/diff2/{types.ts, diff-edit-view.ts, events.ts}`; `src/main.ts` (edits: registerView, 4 stub commands) | `pnpm build` clean; `Open Diff-Edit` command opens empty view tab; existing 429 unit + ~106 integration tests pass unchanged |
+| 1 | infra | Conflicts list + synthetic detection | R2.0, R2.2 | `src/diff2/{conflicts-list.ts, synthetic-detector.ts}`; `diff-edit-view.ts` (edits) | Status-bar 🔀 click opens view; list shows tracked + synthetic items with distinct badges; group-by-path expandable rows; click → empty detail placeholder |
+| 2 | infra | DiffPane render + free editing | R7.1–R7.4, R7.8 | `src/diff2/{diff-pane.ts, diff-chunks.ts, word-level-diff.ts, markers.ts, decorations.ts}` | Click conflict opens DiffPane з кольоровим diff + marker block-widgets + word-level highlights; free-edit працює; жодних action-кнопок ще нема |
+| 3 | **mvp** | Action buttons + group buttons + `[←]`→write-to-vault | R7.5, R7.6, R7.9a, R7.7.c (steps 1, 4–5 only: write, history-null, close) | `src/diff2/{chunk-actions.ts, conflict-merge-all.ts, toolbar-conflicts.ts}`; `diff-pane.ts` (edits) | Per-chunk `[apply]/[remove]`; групові `[Keep all local]/[Apply all remote]/[Join all]` (md only); `[←]` пише buffer → base-file через `atomicWriteFile`; sibling cleanup тут — **через Phase A на наступному drain** (sibling видимий до наступного [Sync] click; proactive cleanup при `[←]` ship-иться у Phase 4). Перший end-to-end resolve flow вже працює |
+| 4 | releasable | Exit protocol + proactive sibling cleanup | R7.11, R7.7.c (step 2 added: SHA-compare + remove) | `src/diff2/exit-protocol.ts`; `diff-pane.ts` (edits) | `[←]` тепер додатково: `for siblingK of siblings(basePath): if SHA(base) == SHA(siblingK): adapter.remove(siblingK)`. Multi-sibling Scenario C працює (PSEUDO-MERGE-MODE §10). Idempotent: drain after diff2-cleaned sibling = no-op for that record |
+| 5 | releasable | Persistent autosave + recovery dialog | R7.7.a, R7.7.b, R7.7.d | `src/diff2/{autosave-store.ts, cm-history-serde.ts, recovery-dialog.ts}`; `diff-pane.ts` (edits) | Throttled (1.5 s) write `buffer.txt + history.json + cursor.json + meta.json`; atomic-rename per файл; recovery dialog при reopen; `oursShaAtStart` mismatch → wipe + fresh; tab-close видаляє autosave, crash зберігає |
+| 6 | releasable | Entry points + summary modal | R2.7 (entry-points only) | `src/diff2/{entry-points.ts, summary-modal.ts}`; `src/main.ts` (edits) | File-menu `Compare with…` / `Show history`; command palette commands; status-bar 🔀 живе; ribbon button — **default on** (per R2.7.4), settings toggle для disable; post-sync modal `[Continue] / [Go to Diff-Edit]` (тільки коли 0→N transition) |
+| 7 | releasable | History mode | R2.3, R7.9b | `src/github/client.ts` (edits — `listCommitsForPath`, *permitted cross-cut: read-only API wrapper, не sync2-internal*); `src/diff2/{history-list.ts, restore-version.ts, toolbar-history.ts}`; `diff-edit-view.ts` (edits) | `Show history of active file` працює; список спершу з push-queue, GitHub on demand (`[Show GitHub history…]`); DiffPane у read-only/edit toggle; `[Restore this version]` з confirm-модалкою |
+| 8 | releasable | Compare any two | R2.1, R7.9c | `src/diff2/{file-picker.ts, compare-mode.ts, toolbar-compare.ts}`; optional desktop-only `fs-browse.ts` | `Compare two files…` + `Compare active file with…` + file-menu `Compare with…` працюють; FuzzySuggestModal picker; `[Swap]`; `✏️/🔒` toggle default Reference; filesystem-browse — за результатом R2.1 research (інакше scope-cut) |
+| 9 | releasable | TrashStore + Deleted mode | R3, R2.4, R7.9d, R8 trash rows | `src/diff2/{trash-store.ts, trash-watcher.ts, deleted-list.ts, toolbar-deleted.ts}`; `src/sync2/sync2-manager.ts` (edits — додає `onBatchDeleted(paths)` constructor-injected callback hook, **єдиний дозволений cross-edge: sync2 emit-ить, diff2 listen-ить; жодного імпорту з diff2 у sync2** — див. R9 prose); `src/main.ts` (edits — wire trash-watcher + callback) | Delete будь-якого файлу → move до `.trash/<id>/vault/<path>` (move, not copy); Deleted sub-tab список (`.trash/` + GitHub history); `[Restore]` повертає; TTL=0 cleanup при `processBatch` confirm; pull-deletes bypass (R3.4); path-only-when-empty filter |
+| 10 | releasable | External diff tool | R6 | `src/diff2/{external-tool.ts, shell-arg-parse.ts}`; `src/settings/{settings.ts, tab.ts}` (edits — desktop-only section); `toolbar-*.ts` (edits — `[Open in external tool]` button) | Desktop only: settings section з command template + Read-result-back; spawn без `shell: true`; ENOENT → Notice + fall-back на internal; mobile повністю прихований; integration з R7.11 exit-protocol |
+| 11 | releasable | Full `onloadRecoverySweep` + cross-phase QA | R8.2 | `src/diff2/onload-recovery-sweep.ts`; `src/main.ts` (edits — wire у onload після `loadSettings`) | Усі diff2-side sweep-и (`trashStore.recoverIncomplete`, `autosaveStore.sweep`, `tmpStore.sweep`, conflict-store synthetic-detection-aware behavior) ідуть з єдиної точки; kill-mid-op тести з R8.3 зеленi |
+
+### R10. Test plan
+
+Розташування — три директорії, узгоджені з існуючою test-інфраструктурою (CLAUDE.md
+*Testing*):
+
+- `tests/diff2/` — unit тести diff2-модулів (vault-stand-in через існуючий `mock-obsidian.ts`).
+- `tests/diff2/crash-resilience/` — kill-mid-op сценарії з fault-injection (R8.3 шаблон —
+  `<store>-kill-after-<step>.test.ts`).
+- `tests/integration/scenarios/diff2/` — справжній GitHub flows (нова buckets):
+  - `m-series-history/` — `listCommitsForPath` end-to-end (Phase 7).
+  - `n-series-trash/` — trash ↔ sync взаємодія, TTL=0 cleanup (Phase 9).
+
+**Тести додаємо, не заміняємо** (Принцип #4). Існуючі 429 unit + ~106 integration тести
+sync2 мають лишитись бітово ідентичними. Якщо diff2-зміна змушує sync2-тест падати —
+це регрес у diff2, не "застарілий тест"; шукати корінь.
+
+**Test-file enumeration.** Конкретний список test-файлів складається per-PR разом із
+phase-кодом, не у плані (щоб не розходилося). Phase R9-row "Acceptance" формулює
+поведінкові вимоги; PR-автор маппить їх на потрібну кількість test-файлів.
+
+**Open question (Phase 2 PR-blocking) — CM6 *widget rendering* spike.** Phase 2 рендерить
+`Decoration.widget` (marker block-widgets) у DiffPane. Чи існуюче JSDOM-середовище
+(`mock-obsidian.ts`) коректно проганяє CM6 view-update-цикл — невідомо. Спайк (~2 години)
+перед Phase 2 PR: написати найпростіший `tests/diff2/diffpane-render.test.ts` з 3-рядковим
+diff і перевірити чи widget-DOM-елементи з'являються. Якщо не працює — або mock-DOM-
+розширення, або переносити render-тести у Playwright.
+
+(*Окремо від цього*, R11 згадує Phase-5-blocking CM6 *history serialization* spike —
+це інша перевірка, інший API, не плутати.)
+
+### R11. Readiness check — is the doc enough to start?
+
+**Yes for Phase 0–1.** Документу достатньо, щоб одразу почати: scaffolding (Phase 0) і
+Conflicts list + synthetic detection (Phase 1) мають чітко визначені деліверебли і
+acceptance-критерії; жодних зовнішніх досліджень не потрібно.
+
+**Blocked items для пізніших фаз** (не блокують старт Phase 0):
+
+| Phase | Blocking item | Type | Resolution before PR |
+|---|---|---|---|
+| 2 | UI mockup для marker block-widgets layout, color palette, button visual style | Design | 1–2 mockups (Figma чи ASCII у issue), узгоджені перед Phase 2 PR. Без них Phase 2 ризикує rework-у після рев'ю. |
+| 2 | Diff library choice (`diff` vs `diff-match-patch`) | Tech decision | Порівняти bundle-size impact на mobile (production build); обрати у Phase 2 PR description. |
+| 2 | CM6 *widget rendering* under JSDOM | Tech spike (~2 h) | Див. R10 — окрема перевірка від Phase-5 spike нижче. |
+| 5 | CM6 *history serialization* — `historyField.spec.fromJSON` / `toJSON` API existence | Tech spike (~1 h) | Написати throwaway test що серіалізує + десеріалізує undo-stack. Якщо API нема або не покриває — fall back на buffer-only autosave без undo persistence (опція Q2-c з обговорення). **Це інша перевірка, ніж Phase-2 widget-rendering spike — не плутати.** |
+| 8 | Filesystem-browse API (R2.1) | Research | Дослідити сучасні Obsidian / Capacitor / `electron.ipcRenderer` шляхи. Якщо нічого — scope-cut filesystem browse з R2.1 (план уже передбачає цей outcome). Phase 8 ship-able і без нього. |
+
+**Не блокують**: hotkey-bindings (експліцитно делеговано Obsidian Hotkeys settings),
+diff lib name (decision-at-impl-time), фaза-ordering у 6–11 (orthogonal).
