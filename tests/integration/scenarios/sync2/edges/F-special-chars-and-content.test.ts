@@ -315,7 +315,7 @@ describe.skipIf(!integrationEnabled())(
     it(
       "pre-flight validation: stale deletion (another device deleted the path between our sync clicks) drops the entry, push succeeds without 422",
       async () => {
-        // PUSH-REORGANIZATION §3.1 + §7.1: when our batch carries a
+        // PSEUDO-MERGE-MODE §12.1 + §7.1: when our batch carries a
         // deletion for a path another device (or a manual GitHub
         // edit) has already removed from the remote tree, the
         // pre-flight validator must drop the entry rather than sending

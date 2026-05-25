@@ -1333,7 +1333,370 @@ predicate at drain end.
 
 ---
 
-## 11. What Pseudo-Merge Mode Does *Not* Promise
+## 11. Cross-Platform Contracts
+
+The conflict-resolution layer of §4–§10 works because the underlying
+file primitives behave the same way on every platform the plugin
+ships to. They do not — Obsidian Mobile (Android + iOS, Capacitor)
+and Obsidian Desktop (Electron) diverge in three places that matter
+to the protocol. The plugin pays the cost of normalising these once,
+in a single module (`src/sync2/cross-platform.ts`), rather than
+scattering the workarounds across every call site that would
+otherwise hit one of the divergences.
+
+Three contracts live in that module.
+
+**Filename character set.** Obsidian Android refuses to create a file
+whose name contains any of the Windows FAT/NTFS-forbidden ASCII
+characters (`< > : " | ? * \`). The rejection is platform policy,
+not filesystem policy — the bridge layer enforces it even on
+filesystems that would happily store the bytes. Obsidian itself
+(Desktop *and* Mobile) rejects a second family (`# ^ [ ]`) because
+those characters have grammar meaning in wiki-links
+(`[[note#heading]]`, `[[note^block-id]]`, `[[link]]`). The two
+families together are 12 ASCII characters that are unsafe in any
+vault path the plugin needs to materialise. They can still arrive
+from outside — a Desktop user creating a name on macOS, the GitHub
+web UI, raw git, a different tool committing to the repo — and the
+protocol has to canonicalise them on the way through.
+
+`sanitizeFilename(path)` rewrites every forbidden character to its
+visually-faithful Unicode counterpart (curly quote for `"`,
+modifier-letter colon for `:`, fullwidth glyphs for the rest). The
+12-character map is stable, deterministic, and round-trips through
+the sync protocol cleanly because every replacement is a single
+Unicode codepoint outside both forbidden families and is accepted by
+every vault adapter the plugin ships to. `needsSanitization(path)`
+is a cheap fast-path predicate so the common case (a clean path)
+costs O(n) regex match and no allocation.
+
+Both functions fire on two surfaces. The push side runs them over
+the vault walk before `findChanges`: any local file whose name
+contains a forbidden character is renamed in place through
+Obsidian's link-aware rename API (so wiki-links pointing at the old
+name follow the file), and only then does change-detection see the
+canonical form. The pull side runs them over the incoming GitHub
+paths: any forbidden-named GitHub file is materialised under its
+canonical local name, and the forbidden remote path is recorded in
+the pending-deletions queue (§12.2) so the next push cleans GitHub.
+A multi-device vault that started with a forbidden-named file ends
+up — after one round-trip of sync from any device — with that file
+present under its canonical name on every device and on GitHub.
+
+**URL encoding for GitHub Contents API paths.** The
+`/repos/.../contents/<path>` endpoint embeds the path directly in
+the URL. Characters with URL syntax meaning — `?`, `#`, ` `, `%` —
+terminate the path component on the server side: a request for the
+path `[1] File ^ opa?.md` reaches the API as the path
+`[1] File ^ opa` with `md` as a query parameter, and the API
+truthfully returns 404 for a file that doesn't exist at the
+truncated path. `encodePathForGithub(path)` percent-encodes per
+segment, preserving `/` as the structural separator. The plugin's
+GitHub client routes every contents-API URL construction through
+this helper so the policy "no raw path interpolation into a URL" is
+enforced at the one place where it matters.
+
+**Adapter rename portability.** Capacitor's `adapter.rename` on
+Android and iOS throws "Destination file already exists" when the
+destination is occupied. POSIX `rename` (Desktop's path) silently
+overwrites. The portable pattern — `if (exists(dst)) remove(dst);
+rename(src, dst)` — is wrapped as `safeRename(adapter, src, dst)`.
+Every protocol step that ends in a rename — the staging-file
+promotion of §9.3 Step 3; the conflict-store `meta.json.tmp` rename
+in §9.4; the pending-deletions store's persistRecord; the atomic-
+write rollback path — calls this helper rather than inlining the
+dance. A future contributor who introduces a new write-then-rename
+step gets the cross-platform behaviour for free, and the rationale
+for the existence of the dance lives in one place rather than
+duplicated across five call sites.
+
+These three contracts are not optional decoration. They are
+load-bearing properties of the protocol: the conflict layer depends
+on `safeRename` to land its `meta.json` atomically, the push
+pipeline depends on `encodePathForGithub` to identify the right
+remote path under any vault filename, and pull-side reconciliation
+depends on `sanitizeFilename` to materialise files Mobile can store.
+They share a module because they share an invariant: "anything the
+plugin must do differently on Mobile vs. Desktop goes here first;
+the call sites do not see the difference."
+
+---
+
+## 12. The Push Pipeline
+
+The conflict-resolution layer of §4–§10 describes WHEN a path goes
+to the conflict branch and HOW its sibling is constructed. The push
+pipeline of this section describes WHAT happens when a
+non-conflicting batch reaches GitHub. The path is simple at the top
+— fetch HEAD, build tree, create commit, fast-forward branch — but
+three structural guarantees make it robust against the failure modes
+that show up in multi-device traffic.
+
+### 12.1 Pre-flight validation
+
+Every `createTree` request the plugin sends carries some combination
+of file additions, modifications, and deletions. Additions and
+modifications include inline content; GitHub assembles them
+server-side with no further round-trips to anywhere else. Deletions
+are different: they reference a path by name with `sha: null`, and
+GitHub interprets the entry as "remove this path from the new tree."
+For the interpretation to succeed the path must exist at the parent
+tree the create-request is rebasing onto. If it doesn't — if the
+path was deleted by another device, or by a manual GitHub web edit,
+between when our batch was constructed and when our push reaches the
+server — GitHub responds 422 `GitRPC::BadObjectState` and the whole
+tree-create fails. Repeated retries fail identically until the local
+state is reconciled.
+
+A stale deletion is a structural risk for any multi-device sync —
+not a bug to be patched once but a class of inconsistency that the
+protocol has to absorb on every push. The plugin's defence is to
+validate every deletion entry against `currentHead` before the
+tree-create request leaves. The validator lives in `processBatch`
+between `TreeBuilder.buildTreeEntries` and `client.createTree`. For
+each entry with `sha: null` it calls `getContentsAtRef(path,
+currentHead)`. If the path exists at currentHead, the deletion is
+kept. If the path is absent (the API returns null), the deletion is
+dropped — and the matching snapshot row is removed too, so the next
+change-detection pass does not re-emit the same stale deletion. The
+batch is sent only with entries that match remote state at push time.
+
+The validator handles its own failure mode explicitly. If
+`getContentsAtRef` itself throws (network timeout, GitHub 5xx,
+dropped connection), the validator throws and the push aborts;
+`lastSync` does not advance, the queued batch survives on disk, the
+next drain retries. This is intentional. Pre-flight validation is a
+safety net, not a performance optimisation. If the net cannot run,
+the engine defers to the next drain rather than optimistically
+proceeding and risking the 422 the net was designed to prevent.
+From the user's perspective: one click "didn't go through"; the
+next click (or interval tick) succeeds once the network recovers.
+
+The validator does not check additions or modifications — those
+have content the server resolves regardless of base-tree state.
+The discipline is targeted at the one entry shape that turns
+"remote state changed under us" into a hard failure.
+
+### 12.2 Pending-deletions queue
+
+Pull-side sanitize (§11) materialises a forbidden-named GitHub file
+under its canonical local name and needs a way to record "delete
+this forbidden path on the next push." The naïve approach — write a
+`SnapshotStore` entry at the forbidden path so the next change-
+detection pass emits a deletion — fits the existing diff-driven
+push pipeline but violates the snapshot store's contract: every
+snapshot entry is documented as "what we observed on GitHub at the
+recorded SHA," and a phantom-for-delete-intent entry is not an
+observation. The protocol uses an explicit store instead.
+
+The pending-deletions store lives at
+`<configDir>/plugins/<self>/.pending-deletions/`, one folder per
+entry, each containing a `meta.json` with the path, the source
+(`pull-side-sanitize` / `migration-from-snapshot` / `manual`), the
+GitHub commit SHA at which the path was last observed present, and
+the blob SHA at that commit. The `processBatch` consumer injects
+every queue entry as an additional deletion in the tree-create
+request; pre-flight validation (§12.1) covers it just like a
+change-detector-emitted deletion; a successful push clears the
+matching queue entry; a failed push leaves the entry untouched for
+the next drain.
+
+The separation has two structural pay-offs. The snapshot store
+stays a verifiable cache — every row is now "we observed this path
+with this SHA at this commit on GitHub" — and any reader can trust
+its values without checking which entries are real and which are
+delete-intents. The pending-deletions store is named for what it
+does — its content type is "delete these paths from GitHub on the
+next push" — and the activity log entries that reference it
+(sources, dropped-as-stale events, successful clear-on-push events)
+are diagnosable on their own terms.
+
+Reset semantics are uniform. Plugin Reset (Settings → Reset) wipes
+the pending-deletions store alongside the snapshot, the push-queue,
+and the conflict store; the store cannot outlive an explicit Reset
+action. Plugin uninstall removes `<configDir>/plugins/<self>/`
+recursively through Obsidian's own cleanup; the store cannot outlive
+the plugin installation. Both lifecycles are honest about ownership.
+
+### 12.3 Push-queue depth as user signal
+
+The ribbon `[Sync with GitHub]` icon carries a numeric badge. The
+number it shows is the count of batches currently on disk under
+`.push-queue/`, waiting for `drain()` to dispatch them. Depth 0
+hides the badge; depth ≥ 1 shows `(N)` in a small green pill at
+the corner of the icon. The signal is updated after every persistent
+queue mutation: `enqueueOrMerge` writes a new batch (depth +1, or
++0 if folded into an existing one); `processBatch` deletes a
+successfully-pushed batch (depth −1); the empty-after-reconcile
+branch deletes the queue entry too. On plugin start, the icon is
+seeded with the current queue depth from disk so the badge reflects
+state even after a restart.
+
+The signal is read-only and load-bearing for the user's mental
+model of "I clicked Sync; where did my work go?". The badge appears
+the moment a batch lands on disk, persists while drain processes it
+(typically 1–3 seconds of HTTP round-trips), and clears when the
+push succeeds. Offline syncs accumulate batches — the badge climbs
+`(1)` → `(2)` → `(3)` — and the next reconnection drains them with
+the badge decrementing in lock-step. The user has direct visibility
+into the engine's state without needing to open the activity log.
+
+The badge does not show the unresolved-conflict count. That signal
+lives on the status-bar `🔀 N` indicator (§5), which is the
+canonical home for the conflict layer's state. The two surfaces are
+deliberately distinct: the sync icon reflects pipeline state (do I
+have outbound work pending?), the status-bar reflects collaboration
+state (do I have unresolved conflicts to address?). The diff2
+widget (`DIFF2_IMPLEMENTATION_PLAN.md` R2.7.4) introduces a third
+surface — a separate ribbon icon — that mirrors the status-bar
+conflict count for users who prefer the ribbon as their primary
+visual area.
+
+---
+
+## 13. Error Taxonomy
+
+A sync engine that talks to GitHub fields four broad kinds of
+failure: network-level (connection dropped before any HTTP response
+was assembled), HTTP-level (GitHub returned a 4xx or 5xx that the
+engine must dispatch on), platform-level (the local OS or WebView
+refused a vault operation), and inconsistency-level (the engine
+observed two pieces of remote state that contradict each other
+within a single sync click). The plugin models all four as a typed
+class hierarchy in `src/errors.ts`:
+
+```
+SyncError                  (abstract base — never thrown directly)
+├── NetworkError           (transient — retriable=true)
+├── GithubAPIError         (typed HTTP response from GitHub)
+│   ├── NotFoundError      (404)
+│   ├── ConflictError      (409 — bare repo, ref mismatch)
+│   ├── ValidationError    (422 — malformed request OR stale state
+│   │                        per body.message)
+│   ├── AuthError          (401, 403 — token problems)
+│   └── RateLimitError     (429 — retriable=true)
+├── PlatformError          (Capacitor / WebView refused a vault
+│                            operation — non-retriable, user-visible)
+└── StaleStateError        (two pieces of remote state observed in
+                              one sync click no longer agree)
+```
+
+Three properties make the hierarchy useful at the catch site.
+
+First, **`instanceof` dispatch.** A catch site that needs to handle
+"any GitHub HTTP error" matches on `GithubAPIError`; one that needs
+only the 404 case matches on `NotFoundError`. The same error
+instance answers both queries because TypeScript classes form a real
+inheritance tree. No status-code switch is needed; no string
+matching on `error.message`; no duck-typing on `(err as { status?:
+number }).status`. The catch is as specific or as broad as the
+handling demands, no more.
+
+Second, **the `retriable` getter.** Every class declares whether
+retrying the operation that produced it can plausibly succeed.
+`NetworkError.retriable` is true (a network blip resolves on next
+attempt); `ValidationError.retriable` is false (a malformed payload
+stays malformed); `RateLimitError.retriable` is true (with backoff);
+`PlatformError.retriable` is false (the WebView's rejection is
+deterministic until the input changes). The retry policy lives on
+the class, not on the catch site, and the retryUntil predicate
+consults `error.retriable` rather than re-deriving the answer from
+status codes at every call.
+
+Third, **the `name` field.** Every subclass sets `this.name =
+new.target.name`, so `String(err)` reads "StaleStateError: ..."
+rather than the generic "Error: ...". The activity log and bug
+reports get classifiable error names automatically through
+`describeError()`'s `ctor` field. Failure modes are filterable in
+the log without inspecting the message string; users who paste a
+log snippet into an issue carry the class name with it.
+
+The 422 case deserves a note. GitHub returns 422 for two distinct
+sub-causes — malformed payload, and `GitRPC::BadObjectState` from
+remote state drift (§12.1) — and the type system models both as
+`ValidationError`. Catch sites that need the distinction read
+`error.body?.message` directly. The choice was pragmatic: the
+second sub-cause is rare once pre-flight validation runs, and
+splitting the type would couple every catch site to the specific
+GitHub message string rather than to the class. The same logic
+applies in reverse to `StaleStateError`: the engine raises it for
+several causes (compare/fetch disagreement from a client bug, token
+permission drift, replica consistency lag, force-push race), all of
+which share the same retry policy ("retry one drain; if it repeats,
+the operator needs to investigate") and so do not need separate
+subclasses.
+
+The hierarchy is deliberately flat. Adding a sixth or seventh
+status-code subclass is easy when the engine starts caring about a
+new code; adding parallel sub-hierarchies is also possible but
+currently unnecessary — catch sites distinguish the rare sub-causes
+by reading log context, not by `instanceof`.
+
+---
+
+## 14. Skip-Class Discipline
+
+Loops over remote-change lists and batch entries are full of
+`continue` and early `return` statements. Each one represents a
+deliberate decision by the loop body to not process the current
+item the way it processes its siblings. The decisions look identical
+at the language level but mean very different things — and the
+consequences of confusing them are visible in the protocol's
+history. The discipline below codifies the meanings so future
+contributors can audit a skip in isolation.
+
+Four labels enumerate every legitimate reason to skip:
+
+**`applied`** — the operation completed via a non-default code path.
+A sibling write that landed the same bytes as the base; a deletion
+processed inline rather than through the main flow; a sanitize
+migration that ran on the spot. The cursor (snapshot row, lastSync,
+queue entry) advances normally; the work is done, just not through
+the loop's main branch.
+
+**`deferred`** — the operation is intentionally postponed to a
+different code path. The push-queue overlap case is the canonical
+instance: when a pull-side change targets a path that has an in-
+flight push batch, the pull defers to the post-reconcile drain
+rather than racing the push. The cursor does NOT advance for this
+path; an `anyOverlapDeferred` flag tells the caller to hold
+`lastSync` so the deferred change is not lost on the next
+incremental sync.
+
+**`already-correct`** — the desired state is already on disk. SHA-
+match resume during pull is the canonical instance: a previous pull
+pass wrote the bytes and crashed before recording the snapshot row,
+so the next pass reads the local file, hashes it, finds the SHA
+matches the expected one, refreshes the snapshot stat-cache, and
+skips. The skip is a true no-op for the disk; the snapshot row is
+the only thing advancing.
+
+**`unexpected`** — the operation could not be applied and the loop
+body does not know why. This is the dangerous case. A silent
+`continue` here advances loop state past the failure; if the loop
+also advances any cursor (lastSync, snapshot row, queue entry),
+the failure is permanently masked — the next sync's compare diff
+no longer surfaces the path because the state appears consistent.
+The discipline is: an `unexpected` skip is never a `continue`. It
+is `throw new StaleStateError(...)`. The error propagates to the
+per-file catch in the calling loop, which logs the exact path and
+re-throws; the outer loop aborts; the cursor does not advance; the
+next sync retries.
+
+Every skip in the seven loops at the heart of the sync engine —
+`pullIfNeeded`, `applyRemoteAddOrModify`, `applyRemoteDeletion`,
+`processBatch`, `reconcileBatchAgainstHead`, `bootstrapFromRemote`,
+`adoptionPullAndRecord` — is annotated with one of these four
+labels as a source comment immediately preceding the `continue` or
+`return`. The annotation is documentation for future readers, but
+it also enforces the protocol's most important contract: there is
+no fifth category. If the loop body cannot place a skip into one of
+the four buckets, the bucket is `unexpected` and the line should be
+a `throw`, not a `continue`.
+
+---
+
+## 15. What Pseudo-Merge Mode Does *Not* Promise
 
 Honest engineering documentation must enumerate what the design does
 not solve, in addition to what it does. Four points deserve explicit
@@ -1377,7 +1740,142 @@ work the user might still want.
 
 ---
 
-## 12. Glossary
+## 16. Field Postmortems
+
+The design as described in §1–§15 reads as a single coherent
+protocol, but the path to that protocol passed through specific
+field incidents that surfaced specific structural gaps. The five
+postmortems below preserve the historical record: each one captures
+the symptom that was reported, the proximate cause that was
+identified, and the section above whose discipline now makes the
+class of failure unreachable. Future contributors investigating a
+similar symptom can use the list as a triage index.
+
+### 16.1 `FILE_NOTCREATED` on Obsidian Android (2026-05-25)
+
+**Symptom.** Mobile sync of a desktop-created file named
+`Actual-projects/Ладовіра/Штрихи до "святої" книги "Віра в Лад".md`
+failed with a Notice `Error syncing. Error: FILE_NOTCREATED`. The
+plugin log surfaced the full bridge-layer message only after the
+observability fix below; the underlying rejection came from
+`win.androidBridge.onmessage`.
+
+**Cause.** Obsidian Android refuses to create files whose name
+contains any of the Windows FAT/NTFS-forbidden ASCII characters
+(`< > : " | ? * \`) — independently of the underlying filesystem,
+as a cross-platform-compatibility safeguard so a vault that syncs to
+a Windows desktop won't break. Desktop Obsidian on macOS or Linux
+happily creates such names because the underlying POSIX filesystem
+allows them, and the asymmetry was invisible until the file crossed
+platforms.
+
+**Now-covered-by:** §11 *Cross-Platform Contracts* (the
+`sanitizeFilename` / `needsSanitization` discipline rewrites the
+12-character forbidden set to canonical Unicode replacements on
+both push and pull sides; multi-device vaults converge on the
+canonical form after one round-trip).
+
+### 16.2 `err: {}` in the plugin log (2026-05-25)
+
+**Symptom.** Every recorded sync failure showed
+`additional_data: {"err": {}}` — the captured error object
+serialised as an empty object. Bug reports were unactionable: a sync
+failure was visible in the log but its cause was not.
+
+**Cause.** Two layers. (1) The `sync()` and `syncCurrentFile()`
+click handlers caught errors and showed a Notice but never called
+`logger.error`. The toast disappeared in seconds; the log saw
+nothing. (2) When the catch site DID reach a logger call (e.g. the
+interval-drain handler), `safeStringify` only unwrapped
+`v instanceof Error` to extract `name`/`message`/`stack`.
+Capacitor's native-bridge errors on Android come through as objects
+whose `instanceof Error` evaluates to `false` (different JS realm)
+and whose Error-shape fields live on the prototype rather than as
+own enumerable properties. `JSON.stringify` of such an object
+produces `{}`.
+
+**Now-covered-by:** `src/utils.ts::describeError(err)` extracts
+`type`, `ctor`, `string` (via `String(err)`), and the Error-shape
+fields via direct property access that survives prototype-only
+definitions. `src/logger.ts::safeStringify` mirrors the same
+extraction so any `logger.error(msg, { err })` site benefits
+automatically. The two click handlers log before showing a Notice.
+The typed-error hierarchy of §13 makes the resulting log entries
+classifiable by `name` for filtering.
+
+### 16.3 `404` on GitHub Contents URLs containing `?`, `#`, etc. (2026-05-25)
+
+**Symptom.** A file named `[1] File ^ opa?.md` pushed via the
+GitHub web UI was unreachable by pull. `GET contents/[1] File ^
+opa?.md` returned 404 despite the file existing in the GitHub tree.
+
+**Cause.** The GitHub Contents-API URL was constructed by direct
+string interpolation of the path. URL-syntax characters (`?`, `#`,
+` `, …) terminate the path component on the server side: the API
+saw the path as `[1] File ^ opa` with `md` as a query parameter —
+no such file at that path → 404.
+
+**Now-covered-by:** §11 *Cross-Platform Contracts*
+(`encodePathForGithub` percent-encodes per segment; every Contents-
+API URL construction routes through it; raw path interpolation is
+forbidden by convention and missing from the GitHub client code).
+
+### 16.4 Orphaned state after silent skip on null fetch (2026-05-25)
+
+**Symptom.** After the URL-encoding bug in 16.3 was hit on mobile,
+the `[1] File ^ opa?.md` file remained absent from the mobile vault
+on every subsequent sync — even after the encoding fix shipped. A
+Plugin Reset (full re-bootstrap) was required to recover.
+
+**Cause.** `applyRemoteAddOrModify` treated a
+`safeFetchContents → null` result as "raced with subsequent remote
+delete; skip this file." The 404 from the URL-encoding bug returned
+null. The pull loop continued; `lastSync` advanced to the new
+branch head. From the next sync forward, the compare diff between
+`lastSync` and `currentHead` no longer surfaced the file as a
+change — it was present at both ends with the same SHA — and the
+file became invisible to incremental sync.
+
+**Now-covered-by:** §14 *Skip-Class Discipline*. The compare-listed-
+but-fetch-null case is now `unexpected` and throws
+`StaleStateError`. The per-file catch in `pullIfNeeded` logs the
+exact path; the loop aborts; `lastSync` stays at the prior
+`expectedHead`; the next sync retries. Either succeeds (transient
+race resolved, permission drift fixed, fixed-client deployed) or
+re-fails until the underlying cause is gone — no orphan state.
+
+### 16.5 `GitRPC::BadObjectState` (422) on stale deletion entries (2026-05-25)
+
+**Symptom.** Two desktop syncs within thirty minutes of one
+release produced six retries each (~17 seconds of network noise)
+and a final `Error: Failed to create tree, status 422`. Both pushes
+carried a deletion entry for a path that had been sanitized away on
+a different device hours earlier.
+
+**Cause.** Pull-side sanitize wrote a *phantom snapshot entry* at
+the forbidden GitHub path with the GitHub blob SHA. ChangeDetector
+Pass 2 saw the snapshot entry had no local file → emitted a
+deletion change → TreeBuilder built a `sha:null` entry → push
+attempted `createTree` with a deletion targeting a path another
+device's sanitize-push had already removed. GitHub responded 422
+`GitRPC::BadObjectState`. The bug was rare before pull-side
+sanitize existed (the only way to produce a stale deletion was a
+manual edit on GitHub web between two syncs) and systemic
+afterward (any forbidden path migrated by Device A produced a
+phantom on Device B that became stale as soon as Device B pulled
+post-migration).
+
+**Now-covered-by:** §12.1 *Pre-flight validation* (the validator
+drops stale deletions before `createTree`; the matching snapshot
+row is removed so ChangeDetector does not re-emit the same stale
+deletion next sync) and §12.2 *Pending-deletions queue* (sanitize
+intent is recorded in an explicit store, not as a phantom snapshot
+entry; the snapshot invariant "every row is an observation, not a
+delete-intent" is restored).
+
+---
+
+## 17. Glossary
 
 The following terms appear repeatedly in the article. Definitions are
 intentionally concise; consult the relevant section for context.
@@ -1510,3 +2008,51 @@ vault file's `mtime` to `SnapshotStore.lastCommitMtime` and only
 considers files modified since that point as candidates for a real
 diff. The same pattern is used per-record in the conflict store for
 the cached `(siblingMtime, siblingSize, siblingSha)` triple.
+
+**Cross-platform contract** — A rule of the form "this filesystem
+/ URL / adapter behaves differently on platform X than on platform
+Y" that the protocol normalises in one place. The three current
+contracts (forbidden-character set, GitHub Contents URL encoding,
+Capacitor-rename-doesn't-overwrite) live in
+`src/sync2/cross-platform.ts`; see §11.
+
+**Forbidden character (filename)** — One of the 12 ASCII characters
+rejected either by the host platform (Family 1: `< > : " | ? *
+\` — Obsidian Android only) or by Obsidian itself (Family 2: `# ^
+[ ]` — both platforms, because of wiki-link grammar). Replaced by
+`sanitizeFilename()` with visually-faithful Unicode counterparts;
+see §11.
+
+**Pending-deletions queue** — Explicit on-disk store at
+`<configDir>/plugins/<self>/.pending-deletions/` recording paths
+the engine must delete from GitHub on the next push. Used by pull-
+side sanitize (§11) when a forbidden-named GitHub file is
+materialised locally under its canonical name and the forbidden
+path itself needs cleanup. Replaces the older phantom-snapshot
+mechanism; see §12.2.
+
+**Pre-flight validation** — A check performed on a push-side
+operation (every `createTree` request that carries deletion
+entries) *before* the request is sent, against current GitHub
+state, to verify the operation's assumptions still hold. The
+opposite of optimistic write-and-retry; see §12.1.
+
+**Stale-state error** (`StaleStateError`) — Typed error raised when
+two pieces of remote state observed within one sync click no
+longer agree. Causes include client URL-encoding bugs, token
+permission drift, replica eventual consistency, and concurrent
+force-push that rewrote currentHead. Always non-retriable on its
+own surface: the per-file catch aborts the loop, the cursor stays
+put, the next drain retries. See §13.
+
+**Skip-class** — One of four labels (`applied`, `deferred`,
+`already-correct`, `unexpected`) annotated as a source-code
+comment on every `continue` / `return` inside the seven core loop
+bodies of the sync engine. The `unexpected` class is never a
+`continue` — it is `throw new StaleStateError(...)`. See §14.
+
+**Push-queue depth** — Count of batches currently on disk under
+`.push-queue/`, waiting to be drained. Surfaced as a numeric badge
+on the `[Sync with GitHub]` ribbon icon: depth 0 hides the badge,
+depth ≥ 1 shows `(N)` in a green pill. The signal updates after
+every persistent queue mutation; see §12.3.

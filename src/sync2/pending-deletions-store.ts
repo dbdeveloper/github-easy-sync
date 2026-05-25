@@ -3,7 +3,7 @@
 // (and that 2.0.1-beta3 partially defused via pre-flight validation
 // in createTree).
 //
-// See docs/PUSH-REORGANIZATION.md §3.2 for design rationale. In one
+// See docs/PSEUDO-MERGE-MODE.md §3.2 for design rationale. In one
 // line: when pull-side sanitize rewrites a GitHub-side forbidden path
 // to a canonical local path, we need to "remember to delete the
 // forbidden path on the next push." Phase 1 (beta3) recorded that

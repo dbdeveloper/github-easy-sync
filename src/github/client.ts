@@ -11,8 +11,8 @@ import {
   retryUntil,
 } from "src/utils";
 // URL-encoding for GitHub Contents-API paths lives in the
-// cross-platform contracts module (PUSH-REORGANIZATION §3.3).
-// Per PUSH-REORG §7.2 the migration is zero-cycle: no re-export
+// cross-platform contracts module (PSEUDO-MERGE-MODE §11).
+// Per PSEUDO-MERGE-MODE §11 the migration is zero-cycle: no re-export
 // shim, every call site (here + tests) imports directly from the
 // new location.
 import { encodePathForGithub } from "src/sync2/cross-platform";
@@ -61,7 +61,7 @@ export type BlobFile = {
   encoding: string;
 };
 
-// PUSH-REORG §3.4: `GithubAPIError` now lives in src/errors.ts.
+// PSEUDO-MERGE-MODE §13: `GithubAPIError` now lives in src/errors.ts.
 // `makeGithubAPIError(status, message, body?)` returns the right
 // subclass (NotFoundError, ConflictError, ValidationError, AuthError,
 // RateLimitError) based on the status code, falling back to the

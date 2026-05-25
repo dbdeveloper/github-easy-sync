@@ -6,7 +6,7 @@
 // invariant "any new cross-platform quirk goes here first" is
 // enforceable by code review.
 //
-// Three concerns currently centralised (PUSH-REORGANIZATION §3.3):
+// Three concerns currently centralised (PSEUDO-MERGE-MODE §11):
 //
 //   1. Filename character constraints (Obsidian Android rejects
 //      `< > : " | ? * \` because of Windows FAT/NTFS compatibility;
@@ -104,11 +104,12 @@ export function needsSanitization(path: string): boolean {
 // path at the first syntax char and returns 404. `/` is the path
 // separator and must NOT be encoded — encode per-segment and rejoin.
 //
-// Field bug reference (2026-05-25): a file named
-// `[1] File ^ opa?.md` pushed via GitHub Web UI was unreachable by
-// our pull because the raw `?` ended the URL path. The hotfix
-// initially lived inline in `src/github/client.ts`; Phase 3 of the
-// PUSH-REORGANIZATION moves it here as part of the centralisation.
+// Field bug reference (2026-05-25 — see PSEUDO-MERGE-MODE §16.3): a
+// file named `[1] File ^ opa?.md` pushed via GitHub Web UI was
+// unreachable by pull because the raw `?` ended the URL path. The
+// initial inline fix lived in `src/github/client.ts`; this module
+// became its canonical home as part of the cross-platform contracts
+// consolidation (PSEUDO-MERGE-MODE §11).
 //
 // `encodeURIComponent` handles all the Family-1 and Family-2
 // forbidden chars correctly. The chars it leaves un-encoded
