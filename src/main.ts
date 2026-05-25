@@ -102,7 +102,7 @@ export default class GitHubSyncPlugin extends Plugin {
         this.settings.enableLogging,
       );
       await this.logger.init();
-      await this.logger.info("Plugin onload start", {
+      this.logger.info("Plugin onload start", {
         version: manifest.version,
         deviceLabel: this.settings.deviceLabel,
         enableLogging: this.settings.enableLogging,
@@ -111,17 +111,17 @@ export default class GitHubSyncPlugin extends Plugin {
       });
 
       this.addSettingTab(new GitHubSyncSettingsTab(this.app, this));
-      await this.logger.info("Plugin onload: settings tab registered");
+      this.logger.info("Plugin onload: settings tab registered");
 
       await this.initSync2();
-      await this.logger.info("Plugin onload: initSync2 done");
+      this.logger.info("Plugin onload: initSync2 done");
 
       // Always start the timer: when interval is enabled, it runs at the
       // user's configured cadence and ticks pull + drain; when disabled
       // it's a 5-min watchdog that only drains pending batches (so a
       // failed earlier drain gets retried automatically).
       this.startSyncInterval();
-      await this.logger.info("Plugin onload: interval scheduler started");
+      this.logger.info("Plugin onload: interval scheduler started");
 
       this.app.workspace.onLayoutReady(() => {
         if (this.settings.showStatusBarItem) this.showStatusBarItem();
@@ -144,7 +144,7 @@ export default class GitHubSyncPlugin extends Plugin {
         callback: this.syncCurrentFile.bind(this),
       });
 
-      await this.logger.info(
+      this.logger.info(
         `Plugin onload complete (duration=${Date.now() - startedAt}ms)`,
       );
     } catch (err) {
@@ -158,7 +158,7 @@ export default class GitHubSyncPlugin extends Plugin {
       console.error(message, err);
       try {
         if (this.logger) {
-          await this.logger.error(message, { stack });
+          this.logger.error(message, { stack });
         }
       } catch {}
       try {
@@ -309,7 +309,7 @@ export default class GitHubSyncPlugin extends Plugin {
     }
     if (migrated.length > 0) {
       await store.save();
-      await this.logger.info(
+      this.logger.info(
         `Sync2 migration: phantom-snapshot → pending-deletions queue`,
         { count: migrated.length, paths: migrated },
       );
@@ -325,7 +325,7 @@ export default class GitHubSyncPlugin extends Plugin {
     const client = new GithubClient(this.settings, this.logger);
     const store = new SnapshotStore(this.app.vault);
     await store.load();
-    await this.logger.info("initSync2: SnapshotStore loaded", {
+    this.logger.info("initSync2: SnapshotStore loaded", {
       lastSyncCommitSha: store.getLastSyncCommitSha(),
       paths: store.paths().length,
     });
@@ -408,9 +408,9 @@ export default class GitHubSyncPlugin extends Plugin {
         conflictStore,
       );
       const result = await recovery.sweep();
-      await this.logger.info("initSync2: AtomicWriteRecovery sweep", result);
+      this.logger.info("initSync2: AtomicWriteRecovery sweep", result);
     } catch (err) {
-      await this.logger.error("Atomic-write recovery sweep failed", `${err}`);
+      this.logger.error("Atomic-write recovery sweep failed", `${err}`);
     }
     // ConflictCounter owns the count formula + debounced recompute;
     // ConflictWatcher just calls counter.markDirty() on relevant
@@ -568,7 +568,7 @@ export default class GitHubSyncPlugin extends Plugin {
       // a failed click left behind was the transient Notice; the
       // log showed nothing, making bug reports actionable only when
       // the user happened to screenshot the toast in time.
-      await this.logger.error("syncAll click failed", { err: describeError(err) });
+      this.logger.error("syncAll click failed", { err: describeError(err) });
       new Notice(`Error syncing. ${err}`);
     }
     // Drain may have mutated ConflictStore (Phase A SHA-match
@@ -607,7 +607,7 @@ export default class GitHubSyncPlugin extends Plugin {
       await this.sync2Manager.syncFile(path);
     } catch (err) {
       // Log BEFORE the Notice — see sync() rationale above.
-      await this.logger.error("syncFile click failed", { path, err: describeError(err) });
+      this.logger.error("syncFile click failed", { path, err: describeError(err) });
       new Notice(`Error syncing. ${err}`);
     }
     // See markDirty rationale in sync() above.

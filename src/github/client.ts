@@ -143,11 +143,11 @@ export default class GithubClient {
       // signal, not an error, so log at info level to avoid noise in the
       // log file. Anything else really is unexpected and stays at error.
       if (response.status === 404 || response.status === 409) {
-        await this.logger.info("Repo has no commits yet (bare)", {
+        this.logger.info("Repo has no commits yet (bare)", {
           status: response.status,
         });
       } else {
-        await this.logger.error("Failed to get repo content", response);
+        this.logger.error("Failed to get repo content", response);
       }
       throw makeGithubAPIError(
         response.status,
@@ -204,7 +204,7 @@ export default class GithubClient {
     );
 
     if (response.status < 200 || response.status >= 400) {
-      await this.logger.error("Failed to create tree", response);
+      this.logger.error("Failed to create tree", response);
       throw makeGithubAPIError(
         response.status,
         `Failed to create tree, status ${response.status}`,
@@ -268,7 +268,7 @@ export default class GithubClient {
     );
 
     if (response.status < 200 || response.status >= 400) {
-      await this.logger.error("Failed to create commit", response);
+      this.logger.error("Failed to create commit", response);
       throw makeGithubAPIError(
         response.status,
         `Failed to create commit, status ${response.status}`,
@@ -316,7 +316,7 @@ export default class GithubClient {
       retry ? maxRetries : 0,
     );
     if (response.status < 200 || response.status >= 400) {
-      await this.logger.error("Failed to get commit", response);
+      this.logger.error("Failed to get commit", response);
       throw makeGithubAPIError(
         response.status,
         `Failed to get commit, status ${response.status}`,
@@ -371,7 +371,7 @@ export default class GithubClient {
     );
     if (response.status === 404) return null;
     if (response.status < 200 || response.status >= 400) {
-      await this.logger.error("Failed to get contents at ref", response);
+      this.logger.error("Failed to get contents at ref", response);
       throw makeGithubAPIError(
         response.status,
         `Failed to get contents at ref, status ${response.status}`,
@@ -431,7 +431,7 @@ export default class GithubClient {
       retry ? maxRetries : 0,
     );
     if (response.status < 200 || response.status >= 400) {
-      await this.logger.error("Failed to compare refs", response);
+      this.logger.error("Failed to compare refs", response);
       throw makeGithubAPIError(
         response.status,
         `Failed to compare ${base}...${head}, status ${response.status}`,
@@ -490,7 +490,7 @@ export default class GithubClient {
     );
 
     if (response.status < 200 || response.status >= 400) {
-      await this.logger.error("Failed to create reference", response);
+      this.logger.error("Failed to create reference", response);
       throw makeGithubAPIError(
         response.status,
         `Failed to create reference, status ${response.status}`,
@@ -538,7 +538,7 @@ export default class GithubClient {
     );
 
     if (response.status < 200 || response.status >= 400) {
-      await this.logger.error(`Failed to update ref ${ref}`, response);
+      this.logger.error(`Failed to update ref ${ref}`, response);
       throw makeGithubAPIError(
         response.status,
         `Failed to update ref ${ref}, status ${response.status}`,
@@ -578,7 +578,7 @@ export default class GithubClient {
 
     if (response.status === 204) return;
     if (response.status === 422) return; // already gone
-    await this.logger.error(`Failed to delete ref ${ref}`, response);
+    this.logger.error(`Failed to delete ref ${ref}`, response);
     throw makeGithubAPIError(
       response.status,
       `Failed to delete ref ${ref}, status ${response.status}`,
@@ -617,7 +617,7 @@ export default class GithubClient {
 
     if (response.status === 404) return [];
     if (response.status < 200 || response.status >= 400) {
-      await this.logger.error(
+      this.logger.error(
         `Failed to get matching refs for ${prefix}`,
         response,
       );
@@ -657,7 +657,7 @@ export default class GithubClient {
     );
 
     if (response.status < 200 || response.status >= 400) {
-      await this.logger.error("Failed to get branch head sha", response);
+      this.logger.error("Failed to get branch head sha", response);
       throw makeGithubAPIError(
         response.status,
         `Failed to get branch head sha, status ${response.status}`,
@@ -709,7 +709,7 @@ export default class GithubClient {
     );
 
     if (response.status < 200 || response.status >= 400) {
-      await this.logger.error("Failed to update branch head sha", response);
+      this.logger.error("Failed to update branch head sha", response);
       throw makeGithubAPIError(
         response.status,
         `Failed to update branch head sha, status ${response.status}`,
@@ -755,7 +755,7 @@ export default class GithubClient {
     );
 
     if (response.status < 200 || response.status >= 400) {
-      await this.logger.error("Failed to create blob", response);
+      this.logger.error("Failed to create blob", response);
       throw makeGithubAPIError(
         response.status,
         `Failed to create blob, status ${response.status}`,
@@ -799,7 +799,7 @@ export default class GithubClient {
     );
 
     if (response.status < 200 || response.status >= 400) {
-      await this.logger.error("Failed to get blob", response);
+      this.logger.error("Failed to get blob", response);
       throw makeGithubAPIError(
         response.status,
         `Failed to get blob, status ${response.status}`,
@@ -863,7 +863,7 @@ export default class GithubClient {
     );
 
     if (response.status < 200 || response.status >= 400) {
-      await this.logger.error("Failed to create file", response);
+      this.logger.error("Failed to create file", response);
       throw makeGithubAPIError(
         response.status,
         `Failed to create file, status ${response.status}`,
