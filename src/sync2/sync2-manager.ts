@@ -45,6 +45,35 @@ import { buildConflictBranchName } from "./conflict-branch";
 import { normalizeText } from "./text-normalize";
 import { FileChange } from "./types";
 
+// ── Skip-class taxonomy (PUSH-REORGANIZATION §3.5 + §7.5) ─────────
+//
+// Every `continue` / `return` inside the loops in `pullIfNeeded`,
+// `applyRemoteAddOrModify`, `applyRemoteDeletion`, `processBatch`,
+// `reconcileBatchAgainstHead`, `bootstrapFromRemote`, and
+// `adoptionPullAndRecord` carries a `// skip-class: <label>` comment
+// with one of four labels:
+//
+//   - **applied** — the operation completed (write happened, snapshot
+//     updated, queue entry consumed). Cursor advances normally.
+//   - **deferred** — the operation is intentionally postponed; some
+//     other code path (next drain, reconcile, future sync click)
+//     will handle it. Cursor does NOT advance for this path; an
+//     anyOverlapDeferred-style flag often signals the caller to
+//     hold lastSync.
+//   - **already-correct** — desired state is already on disk; the
+//     skip is a true no-op (mtime stat-cache refresh allowed).
+//     Cursor may advance.
+//   - **unexpected** — the operation could not be applied and we
+//     don't know why. NEVER use `continue` here — `throw new
+//     StaleStateError("...", { context })` instead. The Phase 1
+//     orphan-prevention site (1.4 bug) is the canonical example:
+//     compare diff says the path exists at currentHead, fetch
+//     returns null; the prior silent-skip behaviour left orphan
+//     state requiring a Plugin Reset to recover.
+//
+// When adding a new skip, label it explicitly. When auditing an
+// existing one, treat the absence of a label as a flag for review.
+
 // Minimal client surface Sync2Manager needs. Lets tests inject a stub
 // without dragging the real GithubClient (settings, retries, logger…).
 // In production this is satisfied by GithubClient directly.
@@ -754,6 +783,9 @@ export class Sync2Manager {
                 );
                 this.pulledFilesThisSync++;
                 tickPull();
+                // skip-class: applied ("forbidden remote path sanitized
+                //   to canonical local + intent recorded in
+                //   pendingDeletions queue; next push cleans GitHub")
                 continue;
               }
             } else {
@@ -774,6 +806,8 @@ export class Sync2Manager {
             // processBatch sees the drift and triggers reconcile.
             anyOverlapDeferred = true;
             tickPull();
+            // skip-class: deferred ("path overlaps push-queue;
+            //   processBatch's reconcile branch handles it")
             continue;
           }
 
@@ -781,6 +815,7 @@ export class Sync2Manager {
             await this.applyRemoteDeletion(f.filename, expectedHead, currentHead);
             this.pulledFilesThisSync++;
             tickPull();
+            // skip-class: applied ("remote-deletion processed inline")
             continue;
           }
 
@@ -804,6 +839,9 @@ export class Sync2Manager {
                 });
               }
               tickPull();
+              // skip-class: already-correct ("local file's git-blob SHA
+              //   already matches the compare diff's expected SHA;
+              //   snapshot stat-cache refreshed, no write needed")
               continue;
             }
           }
@@ -1393,6 +1431,12 @@ export class Sync2Manager {
       // exact path, the loop aborts, lastSync stays at expectedHead,
       // and the next sync retries — either succeeds (cases a/b resolve)
       // or re-fails until a fixed build is deployed (case c).
+      // skip-class: unexpected (compare diff said this path is at
+      // currentHead; the very next fetch returned null. Throw rather
+      // than silent-skip — silent-skip is what caused the 1.4 orphan
+      // bug. The per-file catch in pullIfNeeded captures and
+      // re-throws; loop aborts; lastSync stays at expectedHead; the
+      // next drain retries.)
       throw new StaleStateError(
         `Sync2 pull: contents endpoint returned null for path the compare diff lists as present: ${path}`,
       );
@@ -1437,6 +1481,8 @@ export class Sync2Manager {
         remoteDevice: await this.fetchRemoteDevice(headRef),
         fromBatchId: null,
       });
+      // skip-class: applied (conflict registered in ConflictStore;
+      // user-driven resolution path takes over from here)
       return;
     }
 
@@ -2494,6 +2540,10 @@ export class Sync2Manager {
           `Sync2 push batch ${id}: empty after reconcile + pre-flight validation, skipping`,
         );
         await this.queue.delete(id);
+        // skip-class: already-correct (nothing left to push — every
+        // entry was either reconciled out of the batch or dropped as
+        // stale by pre-flight validation; the queue entry is deleted
+        // so the drain loop moves on to the next batch)
         return;
       }
 
