@@ -29,6 +29,7 @@
 // install — that's the §3.2 "Reset semantics" line.
 
 import { Vault } from "obsidian";
+import { safeRename } from "./cross-platform";
 
 const PENDING_DIRNAME = ".pending-deletions";
 const META_FILE = "meta.json";
@@ -215,12 +216,9 @@ export default class PendingDeletionsStore {
     const tmpPath = `${dir}/${META_TMP_FILE}`;
     const finalPath = `${dir}/${META_FILE}`;
     await this.vault.adapter.write(tmpPath, JSON.stringify(record));
-    // Capacitor rename does not overwrite — explicit remove
-    // first. Mirrors conflict-store.persistRecord.
-    if (await this.vault.adapter.exists(finalPath)) {
-      await this.vault.adapter.remove(finalPath);
-    }
-    await this.vault.adapter.rename(tmpPath, finalPath);
+    // Capacitor portability via the centralised helper
+    // (cross-platform.ts § safeRename).
+    await safeRename(this.vault.adapter, tmpPath, finalPath);
   }
 
   // adapter.mkdir is non-recursive on some platforms; build the chain

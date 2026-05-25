@@ -10,22 +10,12 @@ import {
   isWriteRetriableStatus,
   retryUntil,
 } from "src/utils";
-
-// Encode a vault path for use as a GitHub Contents-API URL segment.
-// GitHub's `/repos/.../contents/<path>` endpoint embeds the path
-// directly in the URL — characters that have URL syntax meaning
-// (`?`, `#`, ` `, `%`, etc.) must be percent-encoded or the server
-// truncates the path at the first syntax char and returns 404. `/`
-// is the path separator and must NOT be encoded — encode per-segment
-// and rejoin. Field bug 2026-05-25: a file named `[1] File ^ opa?.md`
-// pushed via GitHub Web UI was unreachable by our pull because the
-// raw `?` ended the URL path. `encodeURIComponent` handles ALL of
-// the Family-1 and Family-2 forbidden chars correctly even though
-// they should rarely appear on GitHub once the sanitizer migration
-// has run end-to-end.
-export function encodePathForGithub(path: string): string {
-  return path.split("/").map(encodeURIComponent).join("/");
-}
+// URL-encoding for GitHub Contents-API paths lives in the
+// cross-platform contracts module (PUSH-REORGANIZATION §3.3).
+// Per PUSH-REORG §7.2 the migration is zero-cycle: no re-export
+// shim, every call site (here + tests) imports directly from the
+// new location.
+import { encodePathForGithub } from "src/sync2/cross-platform";
 
 export type RepoContent = {
   files: { [key: string]: GetTreeResponseItem };

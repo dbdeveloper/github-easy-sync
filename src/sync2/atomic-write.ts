@@ -5,6 +5,7 @@
 import { Vault } from "obsidian";
 import { calculateGitBlobSHA } from "../utils";
 import type SnapshotStore from "./snapshot-store";
+import { safeRename } from "./cross-platform";
 
 // Atomic-with-backup write of a vault file. Crash-safe sequence:
 //
@@ -147,17 +148,17 @@ export async function atomicWriteFile(
 
   try {
     // Step 2: move the live path aside under .sync-bak. Skipped when
-    // the file doesn't exist (brand-new file case).
+    // the file doesn't exist (brand-new file case). safeRename
+    // handles the "drop stale .sync-bak from a previous crash"
+    // step (cross-platform.ts § safeRename).
     if (await vault.adapter.exists(path)) {
-      // Drop a stale .sync-bak if one survives from an earlier crash
-      // — rename's destination must be free.
-      if (await vault.adapter.exists(bakPath)) {
-        await vault.adapter.remove(bakPath);
-      }
-      await vault.adapter.rename(path, bakPath);
+      await safeRename(vault.adapter, path, bakPath);
     }
 
-    // Step 3: atomic promote .sync-tmp → live path.
+    // Step 3: atomic promote .sync-tmp → live path. Plain rename:
+    // step 2 just moved any live file aside, so `path` is empty.
+    // No safeRename — the invariant "path is empty here" matters
+    // and we want to fail loudly if it isn't.
     await vault.adapter.rename(tmpPath, path);
 
     // Step 4: caller updates snapshot so subsequent recovery sweeps
@@ -176,10 +177,7 @@ export async function atomicWriteFile(
     // pre-write state. .sync-tmp goes to the trash either way.
     try {
       if (await vault.adapter.exists(bakPath)) {
-        if (await vault.adapter.exists(path)) {
-          await vault.adapter.remove(path);
-        }
-        await vault.adapter.rename(bakPath, path);
+        await safeRename(vault.adapter, bakPath, path);
       }
     } catch {
       // Ignore secondary errors — best-effort rollback.

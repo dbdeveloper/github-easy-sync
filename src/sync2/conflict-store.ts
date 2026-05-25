@@ -5,6 +5,7 @@
 import { Vault } from "obsidian";
 import { calculateGitBlobSHA } from "../utils";
 import { stagingPathFor } from "./atomic-write";
+import { safeRename } from "./cross-platform";
 
 // ConflictStore — a single source of truth for every active conflict
 // on this device. `inConflictFiles` is derived on the fly from the
@@ -563,17 +564,14 @@ export default class ConflictStore {
     const tmpPath = `${recordDir}/${META_TMP_FILE}`;
     const finalPath = `${recordDir}/${META_FILE}`;
     await this.vault.adapter.write(tmpPath, JSON.stringify(record));
-    // Capacitor's adapter.rename on iOS/Android does NOT overwrite an
-    // existing destination — it throws "Destination file already
-    // exists". This bit users on the second persistRecord call inside
-    // create() (after the sibling writing refreshes mtime/size) and
-    // produced phantom duplicate conflict records because indexRecord
-    // never ran. Explicit remove before rename keeps the protocol
-    // portable across desktop + mobile.
-    if (await this.vault.adapter.exists(finalPath)) {
-      await this.vault.adapter.remove(finalPath);
-    }
-    await this.vault.adapter.rename(tmpPath, finalPath);
+    // Capacitor portability via the centralised helper
+    // (cross-platform.ts § safeRename). Historical context: the
+    // bug that motivated extracting this helper was the second
+    // persistRecord call inside create() — after sibling writing
+    // refreshed mtime/size, the rename re-attempt collided with
+    // the existing meta.json on mobile and produced phantom
+    // duplicate conflict records because indexRecord never ran.
+    await safeRename(this.vault.adapter, tmpPath, finalPath);
   }
 
   private async ensureDir(dirPath: string): Promise<void> {
