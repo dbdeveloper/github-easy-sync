@@ -32,6 +32,7 @@ import {
   parseDeviceSuffix,
 } from "./commit-message";
 import ConflictStore, { ConflictKind } from "./conflict-store";
+import PendingDeletionsStore from "./pending-deletions-store";
 import {
   attemptAutoMerge,
   PluginJsContext,
@@ -220,6 +221,14 @@ export interface Sync2ManagerDeps {
   // that don't exercise the conflict path can omit it (the manager
   // throws if a conflict tries to register and the store is missing).
   conflictStore?: ConflictStore;
+  // Pending-deletions queue (PUSH-REORGANIZATION §3.2). Receives an
+  // entry whenever pull-side sanitize observes a forbidden GitHub
+  // path and writes its canonical form locally — the entry drives a
+  // future push to delete the forbidden path from GitHub. Optional:
+  // unit tests that don't exercise sanitize/push paths can omit it
+  // (the corresponding code paths guard on `!this.pendingDeletions`
+  // and skip the queue operation).
+  pendingDeletions?: PendingDeletionsStore;
   // Pseudo-merge ConflictWatcher (stage 9 wiring). The drain wraps
   // its batch loop in pause/resume so mid-drain vault writes from
   // sibling-create don't trigger nested evaluateConflictState
@@ -317,6 +326,7 @@ export class Sync2Manager {
   private readonly selfPluginId: string;
   private readonly deviceLabel: () => string;
   private readonly conflictStore: ConflictStore | undefined;
+  private readonly pendingDeletions: PendingDeletionsStore | undefined;
   private readonly conflictWatcher: ConflictWatcher | undefined;
   private readonly conflictCounter: ConflictCounter | undefined;
   private readonly accumulateOfflineSyncs: boolean;
@@ -363,6 +373,7 @@ export class Sync2Manager {
         ? deps.deviceLabel
         : () => deps.deviceLabel as string;
     this.conflictStore = deps.conflictStore;
+    this.pendingDeletions = deps.pendingDeletions;
     this.conflictWatcher = deps.conflictWatcher;
     this.conflictCounter = deps.conflictCounter;
     this.accumulateOfflineSyncs = deps.accumulateOfflineSyncs ?? false;
@@ -722,16 +733,20 @@ export class Sync2Manager {
                 } else {
                   await this.writeBinaryRemote(canonical, blob.content);
                 }
-                // Phantom snapshot at the forbidden GitHub path so
-                // the next ChangeDetector pass emits a deletion.
-                // mtime=0/size=0 because the path has no local file;
-                // Pass 2 only consults `path` membership.
-                this.store.set(f.filename, {
-                  path: f.filename,
-                  remoteSha: f.sha ?? blob.sha,
-                  mtime: 0,
-                  size: 0,
-                });
+                // Record the intent to delete the forbidden GitHub
+                // path on the next push. PUSH-REORGANIZATION §3.2:
+                // pre-2.0.1-beta4 this was a phantom snapshot entry
+                // (mtime=0/size=0). beta4 moves the intent to the
+                // explicit pending-deletions queue — same observable
+                // behaviour (next push emits the deletion), cleaner
+                // invariant (the snapshot stays "real entries only").
+                if (this.pendingDeletions) {
+                  await this.pendingDeletions.add(f.filename, {
+                    source: "pull-side-sanitize",
+                    observedAtCommit: currentHead,
+                    remoteSha: f.sha ?? blob.sha,
+                  });
+                }
                 await this.logger.info(
                   "Sync2 pull: sanitized remote forbidden path",
                   { from: f.filename, to: canonical },
@@ -991,20 +1006,29 @@ export class Sync2Manager {
       if (blob === null) {
         // Path absent at currentHead — deletion is stale (another
         // device or manual GitHub edit already removed it). Drop the
-        // entry AND the matching snapshot row.
+        // entry AND the matching snapshot row AND the matching
+        // pending-deletions queue entry. The latter two are
+        // independent stores; either, both, or neither may carry the
+        // path, and remove() on either is idempotent — calling both
+        // unconditionally is the safe pattern.
         droppedStale.push(entry.path);
         this.store.remove(entry.path);
+        if (this.pendingDeletions) {
+          await this.pendingDeletions.remove(entry.path);
+        }
       } else {
         out.push(entry);
       }
     }
     if (droppedStale.length > 0) {
       await this.logger.info(
-        `Sync2 pre-flight validation: dropped ${droppedStale.length} stale deletion(s) and matching snapshot entries`,
+        `Sync2 pre-flight validation: dropped ${droppedStale.length} stale deletion(s); snapshot + pending-deletions cleared`,
         { paths: droppedStale },
       );
       // Persist the snapshot mutation so a subsequent crash before
       // push completion doesn't leave the phantoms re-discoverable.
+      // PendingDeletionsStore.remove() is self-persisting (writes
+      // through to disk on each call) so no equivalent save() needed.
       await this.store.save();
     }
     return out;
@@ -1182,12 +1206,18 @@ export class Sync2Manager {
               await this.ensureParentDir(canonical);
               await this.vault.adapter.writeBinary(canonical, bytes);
             }
-            this.store.set(filePath, {
-              path: filePath,
-              remoteSha: item.sha,
-              mtime: 0,
-              size: 0,
-            });
+            // Pending-deletion intent (PUSH-REORGANIZATION §3.2;
+            // see pullIfNeeded sanitize site for full rationale).
+            // Bootstrap's currentHead is the freshly-fetched branch
+            // head; the entry observes the forbidden path at that
+            // exact commit.
+            if (this.pendingDeletions) {
+              await this.pendingDeletions.add(filePath, {
+                source: "pull-side-sanitize",
+                observedAtCommit: currentHead,
+                remoteSha: item.sha,
+              });
+            }
             await this.logger.info(
               "Sync2 bootstrap: sanitized remote forbidden path",
               { from: filePath, to: canonical },
@@ -2386,6 +2416,43 @@ export class Sync2Manager {
           },
         });
 
+      // Inject pending-deletions queue contents as additional deletion
+      // entries (PUSH-REORGANIZATION §3.2). Each queue entry was added
+      // by pull-side sanitize to record the intent "delete this
+      // forbidden GitHub path on the next push." Injection happens at
+      // push-time (not enqueue-time) so the queue can accept new
+      // entries between batch creation and push without losing them.
+      //
+      // Dedup: skip paths already present in batch.files (a paradoxical
+      // case — the user is editing the same path the queue wants
+      // deleted; the user's intent wins, the queue entry is dropped
+      // as obsolete) or already in batch.deletions (no need to
+      // duplicate the sha:null entry; whichever source wrote it is
+      // fine).
+      const injectedFromQueue: string[] = [];
+      const entriesWithInjection = [...rawEntries];
+      if (this.pendingDeletions) {
+        const existingPaths = new Set(
+          rawEntries.map((e) => e.path),
+        );
+        const conflictingFilePaths = new Set(batch.files);
+        for (const pending of this.pendingDeletions.getAll()) {
+          if (
+            existingPaths.has(pending.path) ||
+            conflictingFilePaths.has(pending.path)
+          ) {
+            continue;
+          }
+          entriesWithInjection.push({
+            path: pending.path,
+            mode: "100644",
+            type: "blob",
+            sha: null,
+          });
+          injectedFromQueue.push(pending.path);
+        }
+      }
+
       // Pre-flight validation of deletion entries (PUSH-REORGANIZATION
       // §3.1, decision §7.1). For each entry with `sha: null` (a
       // deletion), confirm the path still exists at currentHead. If
@@ -2394,7 +2461,8 @@ export class Sync2Manager {
       // constructed and now) — sending it would draw a 422
       // GitRPC::BadObjectState. Drop the entry AND the matching
       // snapshot row, so the next ChangeDetector pass doesn't re-emit
-      // the same stale deletion.
+      // the same stale deletion. Also drops the matching
+      // pending-deletions queue entry for paths injected above.
       //
       // Validator network failure (per §7.1): if `getContentsAtRef`
       // itself errors, `validateDeletionsAgainstHead` throws and
@@ -2404,8 +2472,11 @@ export class Sync2Manager {
       // than silently reintroduce the 422 we're trying to prevent.
       const entries =
         currentHead === null
-          ? rawEntries
-          : await this.validateDeletionsAgainstHead(rawEntries, currentHead);
+          ? entriesWithInjection
+          : await this.validateDeletionsAgainstHead(
+              entriesWithInjection,
+              currentHead,
+            );
 
       // Empty batch: reconcile may have deferred every path via
       // ConflictStore, pre-flight validation may have dropped every
@@ -2500,6 +2571,23 @@ export class Sync2Manager {
       }
       for (const path of batch.deletions) {
         this.detector.recordDeletion(path);
+      }
+      // Pending-deletions queue cleanup (PUSH-REORGANIZATION §3.2):
+      // every queue entry whose path was just successfully deleted on
+      // GitHub (or was injected from the queue into this batch and
+      // didn't survive pre-flight validation) is no longer needed.
+      // The store's remove() is idempotent — calling it on a path
+      // that wasn't in the queue is a no-op, so we don't need to
+      // distinguish "came from change-detector" from "came from
+      // queue injection."
+      if (this.pendingDeletions) {
+        const cleanupPaths = new Set<string>([
+          ...batch.deletions,
+          ...injectedFromQueue,
+        ]);
+        for (const path of cleanupPaths) {
+          await this.pendingDeletions.remove(path);
+        }
       }
       this.store.setLastSync(commitSha, newTreeSha);
       this.store.setLastCommitMtime(this.now());
