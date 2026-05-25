@@ -692,7 +692,7 @@ export default class GitHubSyncPlugin extends Plugin {
       el.style.height = "14px";
       el.style.padding = "0 3px";
       el.style.borderRadius = "7px";
-      el.style.background = "var(--color-orange, #d97706)";
+      el.style.background = "var(--color-green, #16a34a)";
       el.style.color = "white";
       el.style.fontSize = "10px";
       el.style.lineHeight = "14px";
