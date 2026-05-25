@@ -217,13 +217,24 @@ export interface ProgressHandle {
 }
 export type ProgressFactory = (initialMessage: string) => ProgressHandle;
 
-// Thin async logger surface — Sync2Manager records phase markers and
-// errors. Backed by src/logger.ts which appends JSON lines to
-// <vault>/<plugin-id>.log.
+// Logger surface used by Sync2Manager — phase markers, errors,
+// diagnostic probes. Backed by src/logger.ts which appends JSON
+// lines to <vault>/<plugin-id>.log.
+//
+// API is SYNCHRONOUS by design: when logging is disabled, every
+// log call is a pure no-op (no Promise allocation, no microtask).
+// When enabled, the underlying disk-append fires in the background;
+// callers do NOT await log I/O. The lambda form of `data` is only
+// invoked when logging is enabled, so diagnostic prep (memory
+// snapshots, walk-prototype error extraction, large array maps)
+// costs nothing in production.
 export interface Sync2Logger {
-  info(message: string, data?: unknown): Promise<void>;
-  warn(message: string, data?: unknown): Promise<void>;
-  error(message: string, data?: unknown): Promise<void>;
+  info(message: string, data?: unknown | (() => unknown)): void;
+  warn(message: string, data?: unknown | (() => unknown)): void;
+  error(message: string, data?: unknown | (() => unknown)): void;
+  // Read-only flag for sites that need to GUARD a multi-step
+  // diagnostic probe (e.g. before+after memory snapshots).
+  readonly isEnabled?: boolean;
 }
 
 export interface Sync2ManagerDeps {
@@ -443,7 +454,7 @@ export class Sync2Manager {
       const ids = await this.queue.list();
       this.onQueueDepthChanged(ids.length);
     } catch (err) {
-      await this.logger.warn(
+      this.logger.warn(
         "Sync2 fireQueueDepth: queue.list() failed",
         { err: `${err}` },
       );
@@ -458,7 +469,7 @@ export class Sync2Manager {
   // disk. Network drain (pull + push) runs inside drain() which can
   // also be triggered by the interval timer or onload.
   async syncAll(): Promise<void> {
-    await this.logger.info("Sync2 syncAll start");
+    this.logger.info("Sync2 syncAll start");
     // Remote-identity drift check runs FIRST — before bootstrapIfNeeded.
     // If the user pointed the plugin at a different
     // (owner, repo, branch), we wipe local state here so the rest of
@@ -502,7 +513,7 @@ export class Sync2Manager {
         const pendingBatches = await this.queue.list();
         if (pendingBatches.length === 0) this.onNoLocalChanges?.();
         await this.drain(progress);
-        await this.logger.info("Sync2 syncAll: nothing to sync");
+        this.logger.info("Sync2 syncAll: nothing to sync");
         return;
       }
       const enqueued = await this.enqueueOrMerge(changes, this.fullSyncMeta());
@@ -518,7 +529,7 @@ export class Sync2Manager {
         // the "Commit N files" notice against the actual paths. Drop
         // once the change-detection pipeline has had enough field
         // testing on multi-device traffic.
-        await this.logger.info("Sync2 syncAll committed", {
+        this.logger.info("Sync2 syncAll committed", {
           count: enqueued,
           changes: changes.map((c) => `${c.kind} ${c.path}`),
         });
@@ -542,7 +553,7 @@ export class Sync2Manager {
   // missing on both sides, hardcoded-blocked, gitignored): logs a
   // notice and returns silently. No queue batch is created.
   async syncFile(path: string): Promise<void> {
-    await this.logger.info(`Sync2 syncFile start`, { path });
+    this.logger.info(`Sync2 syncFile start`, { path });
     // Remote-identity drift check first — same reason as syncAll. If
     // settings now point at a different remote, the snapshot is
     // useless and we'd be pushing single-file content to the wrong
@@ -568,7 +579,7 @@ export class Sync2Manager {
         const pendingBatches = await this.queue.list();
         if (pendingBatches.length === 0) this.onNoLocalChanges?.();
         await this.drain(progress);
-        await this.logger.info(`Sync2 syncFile: nothing to sync`, { path });
+        this.logger.info(`Sync2 syncFile: nothing to sync`, { path });
         return;
       }
 
@@ -586,7 +597,7 @@ export class Sync2Manager {
         this.onLocalCommitted?.(enqueued);
         // TEMPORARY DEBUG LOG (matches syncAll). Single-file path so
         // the entry shape stays identical for grep-ability.
-        await this.logger.info("Sync2 syncFile committed", {
+        this.logger.info("Sync2 syncFile committed", {
           count: enqueued,
           changes: [`${change.kind} ${change.path}`],
         });
@@ -684,7 +695,7 @@ export class Sync2Manager {
       // bogus base SHA. Pinned by K3.
       const status = (err as { status?: number }).status;
       if (status === 404) {
-        await this.logger.warn("Sync2 pull: compare base unreachable", {
+        this.logger.warn("Sync2 pull: compare base unreachable", {
           expectedHead,
           currentHead,
         });
@@ -814,7 +825,7 @@ export class Sync2Manager {
                     remoteSha: f.sha ?? blob.sha,
                   });
                 }
-                await this.logger.info(
+                this.logger.info(
                   "Sync2 pull: sanitized remote forbidden path",
                   { from: f.filename, to: canonical },
                 );
@@ -826,7 +837,7 @@ export class Sync2Manager {
                 continue;
               }
             } else {
-              await this.logger.warn(
+              this.logger.warn(
                 "Sync2 pull: forbidden-path target exists, sanitize skipped",
                 { remote: f.filename, local_canonical: canonical },
               );
@@ -918,7 +929,7 @@ export class Sync2Manager {
           // stays at expectedHead so the next sync retries — without
           // this, partial pulls would silently advance lastSync and
           // skip the failed files.
-          await this.logger.error("Sync2 pull: file apply failed", {
+          this.logger.error("Sync2 pull: file apply failed", {
             path: f.filename,
             status: f.status,
             sha: f.sha ?? null,
@@ -998,7 +1009,7 @@ export class Sync2Manager {
       const canonical = sanitizeFilename(f.path);
       if (canonical === f.path) continue;
       if (await this.vault.adapter.exists(canonical)) {
-        await this.logger.warn(
+        this.logger.warn(
           "Sync2 sanitize-filename: target exists, skipping",
           { from: f.path, to: canonical },
         );
@@ -1007,7 +1018,7 @@ export class Sync2Manager {
       renames.push({ from: f.path, to: canonical });
     }
     if (renames.length === 0) return;
-    await this.logger.info(
+    this.logger.info(
       `Sync2 sanitize-filename: renaming ${renames.length} file(s)`,
       { renames },
     );
@@ -1015,7 +1026,7 @@ export class Sync2Manager {
       try {
         await this.renameFile(from, to);
       } catch (err) {
-        await this.logger.error(
+        this.logger.error(
           "Sync2 sanitize-filename: rename failed",
           { from, to, err: describeError(err) },
         );
@@ -1069,7 +1080,7 @@ export class Sync2Manager {
           retry: true,
         });
       } catch (err) {
-        await this.logger.error(
+        this.logger.error(
           "Sync2 pre-flight validation: getContentsAtRef errored, aborting push",
           {
             path: entry.path,
@@ -1097,7 +1108,7 @@ export class Sync2Manager {
       }
     }
     if (droppedStale.length > 0) {
-      await this.logger.info(
+      this.logger.info(
         `Sync2 pre-flight validation: dropped ${droppedStale.length} stale deletion(s); snapshot + pending-deletions cleared`,
         { paths: droppedStale },
       );
@@ -1131,7 +1142,7 @@ export class Sync2Manager {
     ) {
       return;
     }
-    await this.logger.warn(
+    this.logger.warn(
       "Sync2 remote identity changed; wiping local state",
       { from: recorded, to: current },
     );
@@ -1192,7 +1203,7 @@ export class Sync2Manager {
     currentHead: string,
     sharedProgress: ProgressHandle | null = null,
   ): Promise<void> {
-    await this.logger.info("Sync2 adoption-from-remote start", {
+    this.logger.info("Sync2 adoption-from-remote start", {
       head: currentHead,
     });
     const { files, sha: treeSha } = await this.client.getRepoContent({
@@ -1294,7 +1305,7 @@ export class Sync2Manager {
                 remoteSha: item.sha,
               });
             }
-            await this.logger.info(
+            this.logger.info(
               "Sync2 bootstrap: sanitized remote forbidden path",
               { from: filePath, to: canonical },
             );
@@ -1303,7 +1314,7 @@ export class Sync2Manager {
             tickPull();
             continue;
           } else {
-            await this.logger.warn(
+            this.logger.warn(
               "Sync2 bootstrap: forbidden-path target exists, sanitize skipped",
               { remote: filePath, local_canonical: canonical },
             );
@@ -1390,7 +1401,7 @@ export class Sync2Manager {
     this.store.setLastSync(currentHead, headCommit.tree.sha ?? treeSha);
     this.store.setLastCommitMtime(this.now());
     await this.store.save();
-    await this.logger.info("Sync2 adoption-from-remote done", {
+    this.logger.info("Sync2 adoption-from-remote done", {
       pulled,
       identical,
       localKept,
@@ -1562,7 +1573,7 @@ export class Sync2Manager {
       if (auto.side === "ours") {
         // Keep local; snapshot stays at the old SHA so the next push
         // surfaces ours to remote.
-        await this.logger.info(
+        this.logger.info(
           "Sync2 atomic auto-merge: kept ours",
           { path },
         );
@@ -1570,7 +1581,7 @@ export class Sync2Manager {
         // Remote wins — overwrite local in place.
         await this.writeBinaryRemote(path, blob.content);
         await this.detector.recordSync(path, blob.sha);
-        await this.logger.info(
+        this.logger.info(
           "Sync2 atomic auto-merge: overwrote with theirs",
           { path },
         );
@@ -1634,7 +1645,7 @@ export class Sync2Manager {
     // (those route through reconcileBatchAgainstHead instead, which
     // surfaces the same outcome as AutoMergeResult.type ===
     // "modify-wins"). Kept as a defensive no-op for symmetry.
-    await this.logger.info(
+    this.logger.info(
       "Sync2 applyRemoteDeletion: modify-wins (local-modify resurrects file)",
       { path },
     );
@@ -1763,7 +1774,7 @@ export class Sync2Manager {
       remoteDevice: args.remoteDevice,
     });
     this.pulledFilesThisSync++;
-    await this.logger.info("Sync2 conflict registered", {
+    this.logger.info("Sync2 conflict registered", {
       path: args.vaultPath,
       kind: args.kind,
     });
@@ -1888,7 +1899,7 @@ export class Sync2Manager {
       }
       this.store.setConflictBranch(cb);
       await this.store.save();
-      await this.logger.info("Sync2 conflict-branch created", {
+      this.logger.info("Sync2 conflict-branch created", {
         name: cb.name,
         baseSha: mainHead,
       });
@@ -1947,7 +1958,7 @@ export class Sync2Manager {
     });
     this.store.setConflictBranch({ name: cb.name, head: commitSha });
     await this.store.save();
-    await this.logger.info("Sync2 conflict-branch commit pushed", {
+    this.logger.info("Sync2 conflict-branch commit pushed", {
       branch: cb.name,
       newHead: commitSha,
       paths: entries.map((e) => e.path),
@@ -2056,7 +2067,7 @@ export class Sync2Manager {
     this.store.clearConflictBranch();
     this.store.setLastSync(mergeCommit, mainTreeSha);
     await this.store.save();
-    await this.logger.info("Sync2 conflict-branch finalized", {
+    this.logger.info("Sync2 conflict-branch finalized", {
       branch: cb.name,
       mergeCommit,
     });
@@ -2362,7 +2373,7 @@ export class Sync2Manager {
     commitNum: number = 1,
     commitTotal: number = 1,
   ): Promise<void> {
-    await this.logger.info(`Sync2 push batch ${id}`);
+    this.logger.info(`Sync2 push batch ${id}`);
     await this.queue.markInProgress(id);
     // Freeze this batch against further merges. The marker survives a
     // failure (in-progress is cleared in the catch below, attempted is
@@ -2481,7 +2492,7 @@ export class Sync2Manager {
           for (const p of conflictPaths) {
             await this.queue.removeFile(id, p);
           }
-          await this.logger.info(
+          this.logger.info(
             "Sync2 split-push: routed edit-while-in-conflict paths to branch",
             { paths: conflictPaths },
           );
@@ -2574,7 +2585,7 @@ export class Sync2Manager {
       // authoritative, since dropped deletions still appear in
       // `batch.deletions` until the next ChangeDetector pass.)
       if (entries.length === 0) {
-        await this.logger.info(
+        this.logger.info(
           `Sync2 push batch ${id}: empty after reconcile + pre-flight validation, skipping`,
         );
         await this.queue.delete(id);
@@ -2619,7 +2630,7 @@ export class Sync2Manager {
         batch.parentCommitSha !== null
       ) {
         commitSha = batch.parentCommitSha;
-        await this.logger.info(
+        this.logger.info(
           `Sync2 push batch ${id}: tree unchanged vs parent — reusing parent commit`,
           { commitSha, treeSha: newTreeSha },
         );
@@ -2645,7 +2656,7 @@ export class Sync2Manager {
       for (const path of batch.files) {
         const sha = shaByPath.get(path);
         if (sha === undefined) {
-          await this.logger.warn(
+          this.logger.warn(
             `Sync2 push: missing computed SHA for ${path} — skipping recordSync`,
           );
           continue;
@@ -2686,14 +2697,14 @@ export class Sync2Manager {
       await this.queue.delete(id);
       // PSEUDO-MERGE-MODE §12.3: queue depth dropped after successful push.
       await this.fireQueueDepth();
-      await this.logger.info(`Sync2 push batch ${id} succeeded`, {
+      this.logger.info(`Sync2 push batch ${id} succeeded`, {
         commitSha,
         treeSha: newTreeSha,
       });
     } catch (err) {
       // Roll back the in-progress marker so a later resume can retry.
       await this.queue.clearInProgress(id);
-      await this.logger.error(`Sync2 push batch ${id} failed`, {
+      this.logger.error(`Sync2 push batch ${id} failed`, {
         error: String(err),
       });
       throw err;
@@ -2714,7 +2725,7 @@ export class Sync2Manager {
     const buf = await this.vault.adapter.readBinary(path);
     const content = arrayBufferToBase64(buf);
     const message = formatInitMessage(this.deviceLabel());
-    await this.logger.info(`Sync2 seed bare repo`, { path, message });
+    this.logger.info(`Sync2 seed bare repo`, { path, message });
     const seed = await this.client.createFile({
       path,
       content,
@@ -2748,7 +2759,7 @@ export class Sync2Manager {
     expectedHead: string,
     currentHead: string,
   ): Promise<void> {
-    await this.logger.info(`Sync2 reconcile batch ${batchId}`, {
+    this.logger.info(`Sync2 reconcile batch ${batchId}`, {
       expectedHead,
       currentHead,
     });
@@ -2774,6 +2785,26 @@ export class Sync2Manager {
     };
 
     for (const path of toProcess) {
+      // Per-path reconcile diagnostic probe. Fires ONLY when logging
+      // is enabled (lazy lambda — never invoked in production). The
+      // probe is here because the reconcile path is the most memory-
+      // intensive surface in the engine: each iteration fetches ours-
+      // and theirs- bytes for the SAME path (e.g. 168KB main.js × 2 =
+      // 336KB held in JS strings), then decodes both to ArrayBuffer.
+      // On mobile WebView with tight heap budgets, this is where
+      // pressure-induced UI freezes have correlated empirically.
+      // Probe captures the per-iteration entry point with the path
+      // and (if available) memoryUsage snapshot.
+      this.logger.info("Sync2 reconcile path enter", () => ({
+        path,
+        memUsage:
+          typeof (globalThis as { process?: { memoryUsage?: () => unknown } })
+            .process?.memoryUsage === "function"
+            ? (globalThis as { process: { memoryUsage: () => unknown } })
+                .process.memoryUsage()
+            : null,
+      }));
+
       const baseFetched = await this.safeFetchContents(path, expectedHead);
       const theirsFetched = await this.safeFetchContents(path, currentHead);
 
@@ -2791,6 +2822,20 @@ export class Sync2Manager {
         theirsFetched === null
           ? null
           : (base64ToArrayBuffer(theirsFetched.content) as ArrayBuffer);
+      // Diagnostic probe after both blobs are in memory — this is
+      // the peak-byte point of the iteration. Lazy lambda; runs only
+      // when logging is enabled.
+      this.logger.info("Sync2 reconcile path bytes-resident", () => ({
+        path,
+        oursBytes: oursBytes.byteLength,
+        theirsBytes: theirsBytes?.byteLength ?? 0,
+        memUsage:
+          typeof (globalThis as { process?: { memoryUsage?: () => unknown } })
+            .process?.memoryUsage === "function"
+            ? (globalThis as { process: { memoryUsage: () => unknown } })
+                .process.memoryUsage()
+            : null,
+      }));
       const baseBytes = baseFetched
         ? (base64ToArrayBuffer(baseFetched.content) as ArrayBuffer)
         : null;
@@ -2821,7 +2866,7 @@ export class Sync2Manager {
           await this.detector.recordSync(path, theirsFetched.sha);
           await this.queue.removeFile(batchId, path);
           dropFromBatchInMemory(path);
-          await this.logger.info(
+          this.logger.info(
             "Sync2 reconcile no-op: ours bytes already match theirs (mtime ignored)",
             { path },
           );
@@ -2857,7 +2902,7 @@ export class Sync2Manager {
         // Remote deleted the file but the batch still carries our
         // modification. Local-intent wins automatically — leave the
         // batch entry intact; push will resurrect the file on remote.
-        await this.logger.info(
+        this.logger.info(
           "Sync2 reconcile modify-wins: remote deleted, local modify resurrects",
           { path },
         );
@@ -2887,7 +2932,7 @@ export class Sync2Manager {
           await this.detector.recordSync(path, theirsFetched!.sha);
           await this.queue.removeFile(batchId, path);
           dropFromBatchInMemory(path);
-          await this.logger.info(
+          this.logger.info(
             "Sync2 reconcile atomic: theirs wins, dropped from batch",
             { path },
           );
