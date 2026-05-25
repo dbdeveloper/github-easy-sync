@@ -23,6 +23,19 @@ export function logFileNameFor(pluginId: string): string {
 // callsite can't blow the log up to hundreds of MB.
 const MAX_DATA_BYTES = 64 * 1024;
 
+// `data` argument shape for log methods. Two forms:
+//   - eager: an object/primitive — evaluated by the caller at the call
+//     site, passed straight through; cheap when prep is cheap.
+//   - lazy: a thunk that returns the data — Logger calls it ONLY when
+//     logging is enabled. Use when prep is non-trivial (e.g. memory
+//     snapshots, large array maps, describeError walks) so the
+//     production "logger disabled" path pays nothing for the prep.
+//
+// The two forms coexist by design — existing call sites stay readable
+// (`logger.info("msg", { x, y })`), new diagnostic-heavy sites opt into
+// `logger.info("msg", () => ({ x: walkProto(...), mem: usage() }))`.
+type LogData = unknown | (() => unknown);
+
 export default class Logger {
   private logFile: string;
 
@@ -32,6 +45,24 @@ export default class Logger {
     private enabled: boolean,
   ) {
     this.logFile = normalizePath(logFileNameFor(pluginId));
+  }
+
+  // Read-only accessor for code paths that want to GUARD heavy
+  // diagnostic prep behind an "is logger on?" check at the call site
+  // — e.g. taking a memory-usage snapshot, walking an object graph
+  // for a one-off probe. The lazy `data` callback handles the common
+  // case; this getter handles the case where the diagnostic logic
+  // doesn't fit a single `data` payload (e.g. you want to log TWICE,
+  // before + after, with a delta).
+  //
+  //   if (this.logger.isEnabled) {
+  //     const before = process.memoryUsage();
+  //     await heavyOp();
+  //     const after = process.memoryUsage();
+  //     this.logger.info("heavy delta", { before, after });
+  //   }
+  get isEnabled(): boolean {
+    return this.enabled;
   }
 
   // Sync on-disk presence to the `enabled` flag: when enabled, the
@@ -47,21 +78,31 @@ export default class Logger {
     }
   }
 
-  private async write(
+  // Fire-and-forget asynchronous writer. Only ever invoked from the
+  // synchronous `info`/`warn`/`error` entry points AFTER they have
+  // confirmed `this.enabled === true`. That gate guarantees:
+  //   - The lambda form of `data` (`() => heavyPrep()`) executes
+  //     ONLY when logging is on; production "logger disabled" pays
+  //     nothing for the prep.
+  //   - The caller never awaits log I/O. Disk-append microtasks
+  //     happen in the background; nothing on the sync call path
+  //     stalls on them.
+  private async writeAsync(
     level: string,
     message: string,
-    data?: any,
+    data?: LogData,
   ): Promise<void> {
-    if (!this.enabled) return;
-
-    let payload = data;
-    if (data !== undefined) {
+    let payload =
+      typeof data === "function"
+        ? (data as () => unknown)()
+        : data;
+    if (payload !== undefined) {
       // Backstop: if a callsite hands us a giant array/object (e.g. the full
       // sync action list or a remote tree), don't faithfully serialize it.
       // The truncated form keeps just enough to debug without ballooning the
       // log file. Targeted summaries at known-large callsites avoid hitting
       // this in normal operation.
-      const json = safeStringify(data);
+      const json = safeStringify(payload);
       if (json.length > MAX_DATA_BYTES) {
         payload = {
           __truncated: true,
@@ -129,16 +170,27 @@ export default class Logger {
     await this.vault.adapter.remove(this.logFile);
   }
 
-  async info(message: string, data?: any): Promise<void> {
-    await this.write("INFO", message, data);
+  // PUBLIC SYNC API. Returns void — never blocks the caller. The
+  // sync gate `if (!this.enabled) return` is the load-bearing line:
+  // when logging is disabled the call is a pure synchronous no-op,
+  // and the lambda form of `data` is not invoked. When enabled, the
+  // async writer fires in the background; the caller continues
+  // without awaiting disk I/O. Log-write failure (full disk, etc.)
+  // surfaces as an unhandled rejection in the console — logging is
+  // not load-bearing for plugin function, so we don't propagate.
+  info(message: string, data?: LogData): void {
+    if (!this.enabled) return;
+    void this.writeAsync("INFO", message, data);
   }
 
-  async warn(message: string, data?: any): Promise<void> {
-    await this.write("WARN", message, data);
+  warn(message: string, data?: LogData): void {
+    if (!this.enabled) return;
+    void this.writeAsync("WARN", message, data);
   }
 
-  async error(message: string, data?: any): Promise<void> {
-    await this.write("ERROR", message, data);
+  error(message: string, data?: LogData): void {
+    if (!this.enabled) return;
+    void this.writeAsync("ERROR", message, data);
   }
 }
 
