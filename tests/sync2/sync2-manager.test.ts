@@ -1530,10 +1530,13 @@ describe("Sync2Manager.syncAll — basic flow", () => {
         ],
       });
 
-      await expect(f.manager.syncAll()).rejects.toThrow(
-        /contents endpoint returned null/,
-      );
-
+      // Phase 4 (PUSH-REORG §3.4 + §7.3): the throw is now
+      // a `StaleStateError` instance, not a plain Error. Test
+      // both the class and the message — catch sites that
+      // dispatch on `instanceof StaleStateError` (vs plain
+      // Error or NotFoundError) get the right behaviour.
+      const { StaleStateError } = await import("../../src/errors");
+      await expect(f.manager.syncAll()).rejects.toBeInstanceOf(StaleStateError);
       // Critical invariant: lastSync did NOT advance. Next sync will
       // re-attempt the same compare and try to fetch the same path
       // again — once the underlying cause is gone, recovery is
