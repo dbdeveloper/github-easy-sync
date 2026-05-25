@@ -24,6 +24,7 @@ import GitignoreInvariants from "./sync2/gitignore-invariants";
 import { Sync2Manager } from "./sync2/sync2-manager";
 import { IntervalScheduler } from "./sync2/interval-scheduler";
 import ConflictStore from "./sync2/conflict-store";
+import PendingDeletionsStore from "./sync2/pending-deletions-store";
 import { ConflictCounter } from "./sync2/conflict-counter";
 import { ConflictWatcher } from "./sync2/conflict-watcher";
 import { ConflictStatusIndicator } from "./sync2/views/conflict-status-indicator";
@@ -45,6 +46,7 @@ export default class GitHubSyncPlugin extends Plugin {
   // pointers — the runtime is single-engine.
   sync2Manager!: Sync2Manager;
   conflictStore!: ConflictStore;
+  pendingDeletions!: PendingDeletionsStore;
   conflictWatcher!: ConflictWatcher;
   conflictCounter!: ConflictCounter;
   logger!: Logger;
@@ -253,8 +255,61 @@ export default class GitHubSyncPlugin extends Plugin {
       await this.conflictStore.renameVaultSiblingsToUnresolved();
       await this.conflictStore.clearAll();
     }
+    if (this.pendingDeletions) {
+      // PUSH-REORGANIZATION §3.2 Reset semantics — pending-deletions
+      // queue is plugin-managed state and gets wiped along with the
+      // snapshot, conflict store, and push queue. No user data is
+      // lost (the queue records intents to delete remote paths; on
+      // Reset the user explicitly opts out of those intents).
+      await this.pendingDeletions.clear();
+    }
     this.settings = Object.assign({}, DEFAULT_SETTINGS);
     await this.saveSettings();
+  }
+
+  // One-pass migration from 2.0.1-beta2/beta3 phantom-snapshot entries
+  // into the new pending-deletions queue (PUSH-REORGANIZATION §3.2).
+  // A phantom entry is a SnapshotStore row with mtime === 0 AND
+  // size === 0 — the signature pull-side sanitize wrote when
+  // recording "delete this forbidden GitHub path on next push"
+  // intents before this refactor. Each such entry is moved to the
+  // queue and removed from the snapshot; subsequent loads find
+  // nothing to migrate (idempotent).
+  //
+  // No `observedAtCommit` is available in the phantom signature
+  // (we never recorded it). We use `store.getLastSyncCommitSha()`
+  // as the best approximation — it's the most recent commit this
+  // device synced against and is therefore the latest point at
+  // which the phantom's `remoteSha` was plausibly correct.
+  // Empty string when lastSync is null (fresh install); in
+  // practice that combination doesn't happen because phantoms only
+  // exist after a sync that observed the forbidden path.
+  private async migratePhantomSnapshotsToPendingDeletions(
+    store: SnapshotStore,
+    pendingDeletions: PendingDeletionsStore,
+  ): Promise<void> {
+    const observedAtCommit = store.getLastSyncCommitSha() ?? "";
+    const migrated: string[] = [];
+    for (const path of store.paths()) {
+      const snap = store.get(path);
+      if (!snap) continue;
+      if (snap.mtime === 0 && snap.size === 0) {
+        await pendingDeletions.add(path, {
+          source: "migration-from-snapshot",
+          observedAtCommit,
+          remoteSha: snap.remoteSha,
+        });
+        store.remove(path);
+        migrated.push(path);
+      }
+    }
+    if (migrated.length > 0) {
+      await store.save();
+      await this.logger.info(
+        `Sync2 migration: phantom-snapshot → pending-deletions queue`,
+        { count: migrated.length, paths: migrated },
+      );
+    }
   }
 
   // ── engine init ─────────────────────────────────────────────────────
@@ -321,6 +376,22 @@ export default class GitHubSyncPlugin extends Plugin {
     });
     await conflictStore.load();
     this.conflictStore = conflictStore;
+
+    // Pending-deletions queue (PUSH-REORGANIZATION §3.2). Replaces
+    // the 2.0.1-beta2 phantom-snapshot trick: pull-side sanitize
+    // records "delete this forbidden GitHub path on next push"
+    // intent in this queue rather than as a phantom SnapshotStore
+    // entry. On first plugin load after the 2.0.1-beta4 upgrade,
+    // any leftover phantom entries in the snapshot get migrated
+    // into the queue and removed from the snapshot.
+    const pendingDeletions = new PendingDeletionsStore({
+      vault: this.app.vault,
+      configDir: this.app.vault.configDir,
+      selfPluginId: manifest.id,
+    });
+    await pendingDeletions.load();
+    this.pendingDeletions = pendingDeletions;
+    await this.migratePhantomSnapshotsToPendingDeletions(store, pendingDeletions);
     // Crash-recovery sweep for atomic-write artifacts AND for
     // ConflictStore vault-level `.sync-tmp` staging siblings. Runs BEFORE the
     // engine starts touching the vault so any leftover staging from a
@@ -388,6 +459,7 @@ export default class GitHubSyncPlugin extends Plugin {
       conflictStore,
       conflictWatcher,
       conflictCounter,
+      pendingDeletions,
       accumulateOfflineSyncs: this.settings.accumulateOfflineSyncs ?? false,
       autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? false,
       // Hooked to Obsidian's link-aware rename so the pre-sync

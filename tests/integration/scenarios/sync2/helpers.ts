@@ -27,6 +27,7 @@ import GitignoreInvariants from "../../../../src/sync2/gitignore-invariants";
 import PushQueue from "../../../../src/sync2/push-queue";
 import TreeBuilder from "../../../../src/sync2/tree-builder";
 import ConflictStore from "../../../../src/sync2/conflict-store";
+import PendingDeletionsStore from "../../../../src/sync2/pending-deletions-store";
 import { ConflictWatcher } from "../../../../src/sync2/conflict-watcher";
 import { ConflictCounter } from "../../../../src/sync2/conflict-counter";
 import {
@@ -153,6 +154,12 @@ export async function createSync2Client(
     selfPluginId: SELF_PLUGIN_ID,
   });
   await conflictStore.load();
+  const pendingDeletions = new PendingDeletionsStore({
+    vault,
+    configDir: CONFIG_DIR,
+    selfPluginId: SELF_PLUGIN_ID,
+  });
+  await pendingDeletions.load();
   // ConflictCounter + counter-only ConflictWatcher. The watcher's
   // only side effect is `counter.markDirty()` on relevant vault
   // events. Production main.ts wires identically.
@@ -191,6 +198,7 @@ export async function createSync2Client(
     conflictStore,
     conflictWatcher,
     conflictCounter,
+    pendingDeletions,
     accumulateOfflineSyncs: opts.accumulateOfflineSyncs ?? false,
     autoCanonicalize: () => opts.autoCanonicalize ?? true,
     // POSIX-flavoured rename via mock-obsidian's adapter — no wiki-link
