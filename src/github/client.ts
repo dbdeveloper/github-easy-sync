@@ -61,17 +61,14 @@ export type BlobFile = {
   encoding: string;
 };
 
-/**
- * Custom error to make some stuff easier
- */
-class GithubAPIError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
+// PUSH-REORG §3.4: `GithubAPIError` now lives in src/errors.ts.
+// `makeGithubAPIError(status, message, body?)` returns the right
+// subclass (NotFoundError, ConflictError, ValidationError, AuthError,
+// RateLimitError) based on the status code, falling back to the
+// base GithubAPIError for codes outside the mapped set. Existing
+// catch sites that duck-type on `err.status` keep working
+// unchanged; new catch sites use `err instanceof NotFoundError` etc.
+import { makeGithubAPIError } from "src/errors";
 
 export default class GithubClient {
   constructor(
@@ -152,7 +149,7 @@ export default class GithubClient {
       } else {
         await this.logger.error("Failed to get repo content", response);
       }
-      throw new GithubAPIError(
+      throw makeGithubAPIError(
         response.status,
         `Failed to get repo content, status ${response.status}`,
       );
@@ -208,7 +205,7 @@ export default class GithubClient {
 
     if (response.status < 200 || response.status >= 400) {
       await this.logger.error("Failed to create tree", response);
-      throw new GithubAPIError(
+      throw makeGithubAPIError(
         response.status,
         `Failed to create tree, status ${response.status}`,
       );
@@ -272,7 +269,7 @@ export default class GithubClient {
 
     if (response.status < 200 || response.status >= 400) {
       await this.logger.error("Failed to create commit", response);
-      throw new GithubAPIError(
+      throw makeGithubAPIError(
         response.status,
         `Failed to create commit, status ${response.status}`,
       );
@@ -320,7 +317,7 @@ export default class GithubClient {
     );
     if (response.status < 200 || response.status >= 400) {
       await this.logger.error("Failed to get commit", response);
-      throw new GithubAPIError(
+      throw makeGithubAPIError(
         response.status,
         `Failed to get commit, status ${response.status}`,
       );
@@ -375,7 +372,7 @@ export default class GithubClient {
     if (response.status === 404) return null;
     if (response.status < 200 || response.status >= 400) {
       await this.logger.error("Failed to get contents at ref", response);
-      throw new GithubAPIError(
+      throw makeGithubAPIError(
         response.status,
         `Failed to get contents at ref, status ${response.status}`,
       );
@@ -435,7 +432,7 @@ export default class GithubClient {
     );
     if (response.status < 200 || response.status >= 400) {
       await this.logger.error("Failed to compare refs", response);
-      throw new GithubAPIError(
+      throw makeGithubAPIError(
         response.status,
         `Failed to compare ${base}...${head}, status ${response.status}`,
       );
@@ -494,7 +491,7 @@ export default class GithubClient {
 
     if (response.status < 200 || response.status >= 400) {
       await this.logger.error("Failed to create reference", response);
-      throw new GithubAPIError(
+      throw makeGithubAPIError(
         response.status,
         `Failed to create reference, status ${response.status}`,
       );
@@ -542,7 +539,7 @@ export default class GithubClient {
 
     if (response.status < 200 || response.status >= 400) {
       await this.logger.error(`Failed to update ref ${ref}`, response);
-      throw new GithubAPIError(
+      throw makeGithubAPIError(
         response.status,
         `Failed to update ref ${ref}, status ${response.status}`,
       );
@@ -582,7 +579,7 @@ export default class GithubClient {
     if (response.status === 204) return;
     if (response.status === 422) return; // already gone
     await this.logger.error(`Failed to delete ref ${ref}`, response);
-    throw new GithubAPIError(
+    throw makeGithubAPIError(
       response.status,
       `Failed to delete ref ${ref}, status ${response.status}`,
     );
@@ -624,7 +621,7 @@ export default class GithubClient {
         `Failed to get matching refs for ${prefix}`,
         response,
       );
-      throw new GithubAPIError(
+      throw makeGithubAPIError(
         response.status,
         `Failed to get matching refs ${prefix}, status ${response.status}`,
       );
@@ -661,7 +658,7 @@ export default class GithubClient {
 
     if (response.status < 200 || response.status >= 400) {
       await this.logger.error("Failed to get branch head sha", response);
-      throw new GithubAPIError(
+      throw makeGithubAPIError(
         response.status,
         `Failed to get branch head sha, status ${response.status}`,
       );
@@ -713,7 +710,7 @@ export default class GithubClient {
 
     if (response.status < 200 || response.status >= 400) {
       await this.logger.error("Failed to update branch head sha", response);
-      throw new GithubAPIError(
+      throw makeGithubAPIError(
         response.status,
         `Failed to update branch head sha, status ${response.status}`,
       );
@@ -759,7 +756,7 @@ export default class GithubClient {
 
     if (response.status < 200 || response.status >= 400) {
       await this.logger.error("Failed to create blob", response);
-      throw new GithubAPIError(
+      throw makeGithubAPIError(
         response.status,
         `Failed to create blob, status ${response.status}`,
       );
@@ -803,7 +800,7 @@ export default class GithubClient {
 
     if (response.status < 200 || response.status >= 400) {
       await this.logger.error("Failed to get blob", response);
-      throw new GithubAPIError(
+      throw makeGithubAPIError(
         response.status,
         `Failed to get blob, status ${response.status}`,
       );
@@ -867,7 +864,7 @@ export default class GithubClient {
 
     if (response.status < 200 || response.status >= 400) {
       await this.logger.error("Failed to create file", response);
-      throw new GithubAPIError(
+      throw makeGithubAPIError(
         response.status,
         `Failed to create file, status ${response.status}`,
       );
