@@ -15,6 +15,7 @@ import {
   getDefaultBranchHead,
   integrationEnabled,
   readRemoteFile,
+  removeRemoteFile,
   uniqueBranchName,
   writeRemoteFile,
 } from "../../../helpers";
@@ -309,6 +310,66 @@ describe.skipIf(!integrationEnabled())(
         );
       },
       210_000,
+    );
+
+    it(
+      "pre-flight validation: stale deletion (another device deleted the path between our sync clicks) drops the entry, push succeeds without 422",
+      async () => {
+        // PUSH-REORGANIZATION §3.1 + §7.1: when our batch carries a
+        // deletion for a path another device (or a manual GitHub
+        // edit) has already removed from the remote tree, the
+        // pre-flight validator must drop the entry rather than sending
+        // it as a `sha:null` tree entry — GitHub would respond 422
+        // GitRPC::BadObjectState. After dropping, if the batch becomes
+        // empty the push is skipped entirely; if it still has other
+        // entries, the push proceeds without the stale deletion.
+        //
+        // Simulated cross-device race:
+        //   t0: Client A creates `regular.md` locally, syncs → file on
+        //       GitHub, snapshot has the entry.
+        //   t1: Another device (here: helper) deletes the file
+        //       directly from GitHub.
+        //   t2: On Client A, the file gets deleted locally. snapshot
+        //       still has the entry — ChangeDetector will emit a
+        //       deletion next sync.
+        //   t3: Client A syncs again — pre-flight validator sees the
+        //       path is gone from GitHub, drops the deletion entry +
+        //       snapshot row, push is skipped. No 422.
+        client = await createSync2Client({ branch });
+        const targetPath = "Notes/regular.md";
+        await client.vault.adapter.write(targetPath, "v1\n");
+        await sync2AllAndAssertNoErrors(client);
+        expect(await readRemoteFile(branch, targetPath)).toBe("v1\n");
+
+        // t1: another device removes the file from GitHub.
+        await removeRemoteFile(
+          branch,
+          targetPath,
+          "[seed] another device deleted the file",
+        );
+        await expect(readRemoteFile(branch, targetPath)).rejects.toThrow();
+
+        // t2: locally delete the file. Snapshot still has the entry
+        // (the previous sync recorded it); change-detector will emit
+        // a delete on the next sync.
+        fs.unlinkSync(path.join(client.vaultPath, targetPath));
+
+        // t3: sync. Without Phase 1's validation, the push would
+        // produce `POST tree (entries=1) sha:null` and 422-retry.
+        // With Phase 1, validation drops the entry, batch is empty,
+        // push is skipped silently. sync2AllAndAssertNoErrors fails
+        // if any tree-create returned 422 (or any other error).
+        await sync2AllAndAssertNoErrors(client);
+
+        // The whole sync completed without 422. The phantom snapshot
+        // row has been cleared so the next sync won't re-emit the
+        // same stale deletion.
+        // (We can't assert `client.store.get(targetPath)` directly
+        // from the integration helper — but the previous
+        // `sync2AllAndAssertNoErrors` would have failed had any sync
+        // step thrown.)
+      },
+      300_000,
     );
 
     it(

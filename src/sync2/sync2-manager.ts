@@ -933,6 +933,83 @@ export class Sync2Manager {
     }
   }
 
+  // Pre-flight validation of deletion entries in a tree-create payload
+  // (PUSH-REORGANIZATION §3.1). For each entry with `sha: null` (a
+  // deletion), confirm the path still exists at `currentHead`. Drop
+  // any whose path is already absent — sending them as a deletion in
+  // a `createTree` request triggers a 422 `GitRPC::BadObjectState`
+  // that fails the whole push and can deadlock if the stale
+  // entry stays in the queued batch across retries.
+  //
+  // Snapshot also gets the matching entry removed for any dropped
+  // deletion. Without this, ChangeDetector's next pass would re-emit
+  // the same stale deletion, creating a re-validate-and-drop loop
+  // that wastes one round-trip per sync forever.
+  //
+  // Validator failure policy (PUSH-REORGANIZATION §7.1): if
+  // `getContentsAtRef` itself errors (network, GitHub 5xx, rate
+  // limit), throw. The caller's catch in `processBatch` aborts the
+  // push; the queued batch survives; the next drain retries. Better
+  // than optimistically proceeding and reintroducing the 422.
+  //
+  // Non-deletion entries (with `content` for additions/modifies, or
+  // with a concrete blob `sha`) pass through unchanged — their
+  // failure modes are different and unrelated to remote-tree drift.
+  private async validateDeletionsAgainstHead(
+    rawEntries: NewTreeRequestItem[],
+    currentHead: string,
+  ): Promise<NewTreeRequestItem[]> {
+    const out: NewTreeRequestItem[] = [];
+    const droppedStale: string[] = [];
+    for (const entry of rawEntries) {
+      // Only pure deletions have `sha === null`. Inline-content entries
+      // have `sha === undefined` (and `content: "..."`); blob-reference
+      // entries have a concrete `sha`. We check `=== null` to capture
+      // exactly the deletion shape.
+      if (entry.sha !== null) {
+        out.push(entry);
+        continue;
+      }
+      let blob: { content: string; sha: string } | null;
+      try {
+        blob = await this.client.getContentsAtRef({
+          path: entry.path,
+          ref: currentHead,
+          retry: true,
+        });
+      } catch (err) {
+        await this.logger.error(
+          "Sync2 pre-flight validation: getContentsAtRef errored, aborting push",
+          {
+            path: entry.path,
+            ref: currentHead,
+            err: describeError(err),
+          },
+        );
+        throw err;
+      }
+      if (blob === null) {
+        // Path absent at currentHead — deletion is stale (another
+        // device or manual GitHub edit already removed it). Drop the
+        // entry AND the matching snapshot row.
+        droppedStale.push(entry.path);
+        this.store.remove(entry.path);
+      } else {
+        out.push(entry);
+      }
+    }
+    if (droppedStale.length > 0) {
+      await this.logger.info(
+        `Sync2 pre-flight validation: dropped ${droppedStale.length} stale deletion(s) and matching snapshot entries`,
+        { paths: droppedStale },
+      );
+      // Persist the snapshot mutation so a subsequent crash before
+      // push completion doesn't leave the phantoms re-discoverable.
+      await this.store.save();
+    }
+    return out;
+  }
+
   // No-op when the manager wasn't given a remoteIdentity getter
   // (unit tests that don't care about this surface).
   private async reconcileRemoteIdentity(): Promise<void> {
@@ -2296,7 +2373,7 @@ export class Sync2Manager {
         }
       }
 
-      const { entries, baseTreeSha, batch } =
+      const { entries: rawEntries, baseTreeSha, batch } =
         await this.builder.buildTreeEntries(id, {
           // Live N/M counter. Each batch starts hidden when not heavy
           // (progress=null, hook returns immediately). When heavy, the
@@ -2308,12 +2385,41 @@ export class Sync2Manager {
             progress.update(`Push ${done}/${total} files to GitHub`);
           },
         });
+
+      // Pre-flight validation of deletion entries (PUSH-REORGANIZATION
+      // §3.1, decision §7.1). For each entry with `sha: null` (a
+      // deletion), confirm the path still exists at currentHead. If
+      // it doesn't, the deletion is stale (another device or a manual
+      // GitHub Web action removed it between when our batch was
+      // constructed and now) — sending it would draw a 422
+      // GitRPC::BadObjectState. Drop the entry AND the matching
+      // snapshot row, so the next ChangeDetector pass doesn't re-emit
+      // the same stale deletion.
+      //
+      // Validator network failure (per §7.1): if `getContentsAtRef`
+      // itself errors, `validateDeletionsAgainstHead` throws and
+      // processBatch aborts. The queued batch is preserved on disk;
+      // the next drain retries. This is intentional — pre-flight
+      // validation is a safety net, and we'd rather defer one push
+      // than silently reintroduce the 422 we're trying to prevent.
+      const entries =
+        currentHead === null
+          ? rawEntries
+          : await this.validateDeletionsAgainstHead(rawEntries, currentHead);
+
       // Empty batch: reconcile may have deferred every path via
-      // ConflictStore, leaving nothing to push. Skip createTree/Commit
+      // ConflictStore, pre-flight validation may have dropped every
+      // deletion entry as stale, or both. Skip createTree/Commit
       // entirely and delete the batch so the drain loop moves on.
-      if (entries.length === 0 && batch.deletions.length === 0) {
+      // (Both `entries.length === 0` and `batch.deletions.length === 0`
+      // before this fix were a defensive belt-and-braces — entries
+      // always contained the deletions, so the first check was
+      // sufficient. Post-validation, only `entries.length` is
+      // authoritative, since dropped deletions still appear in
+      // `batch.deletions` until the next ChangeDetector pass.)
+      if (entries.length === 0) {
         await this.logger.info(
-          `Sync2 push batch ${id}: empty after reconcile, skipping`,
+          `Sync2 push batch ${id}: empty after reconcile + pre-flight validation, skipping`,
         );
         await this.queue.delete(id);
         return;

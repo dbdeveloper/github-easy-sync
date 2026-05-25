@@ -532,6 +532,13 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       size: 1,
     });
     f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+    // Pre-flight validation (PUSH-REORGANIZATION §3.1) calls
+    // `getContentsAtRef(path, currentHead)` for every deletion entry
+    // before sending the tree-create. The seed represents the file's
+    // continued existence at the remote tip — the deletion is real,
+    // not stale, so it survives validation and reaches the tree
+    // request as before.
+    f.client.setContentAtRef("BRANCH_HEAD_INIT", "Notes/old.md", "stale-but-present");
 
     await f.manager.syncAll();
 
@@ -751,6 +758,11 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       size: 1,
     });
     f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+    // Seed the path at currentHead so pre-flight validation
+    // (PUSH-REORGANIZATION §3.1) confirms the deletion is real (file
+    // still on remote) rather than stale (already removed by another
+    // device). Without this seed the validator would drop the entry.
+    f.client.setContentAtRef("BRANCH_HEAD_INIT", "x.md", "stale-but-present");
     await f.manager.syncFile("x.md");
 
     const tree = f.client.state.lastTree!;
@@ -1348,6 +1360,146 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       // Should not throw. Push proceeds normally as if pull was a no-op.
       await f.manager.syncAll();
       f.client.compare = origCompare;
+    });
+
+    it("pre-flight validation drops a stale deletion and clears its snapshot row (PUSH-REORGANIZATION §3.1)", async () => {
+      // Setup: a previous sync recorded `Notes/stale.md` in the snapshot,
+      // and ChangeDetector then emitted a delete for it (the file's
+      // gone locally). But by the time push runs, another device has
+      // already removed the file from GitHub — so the deletion entry
+      // in our batch would draw a 422 GitRPC::BadObjectState if
+      // sent. Pre-flight validation must drop the entry AND clear
+      // the snapshot row, so the next sync's ChangeDetector doesn't
+      // re-emit the same stale deletion.
+      f.store.set("Notes/stale.md", {
+        path: "Notes/stale.md",
+        remoteSha: "OLDSHA",
+        mtime: 1,
+        size: 1,
+      });
+      f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+      // Deliberately NO setContentAtRef for `Notes/stale.md` — the
+      // fake's `getContentsAtRef` returns null for this path,
+      // simulating the cross-device race where another device
+      // deleted it.
+
+      await f.manager.syncFile("Notes/stale.md");
+
+      // The stale deletion was dropped — no tree-create with sha:null
+      // for it.
+      const treeCreates = f.client.calls.filter(
+        (c) => c.op === "createTree",
+      );
+      // Either no tree was created (batch became empty after
+      // validation and the push was skipped) or the tree carries no
+      // entry for stale.md.
+      if (treeCreates.length > 0) {
+        const tree = f.client.state.lastTree ?? [];
+        const staleEntry = tree.find((e) => e.path === "Notes/stale.md");
+        expect(staleEntry).toBeUndefined();
+      }
+
+      // Critical invariant: snapshot row removed. Without this drop,
+      // ChangeDetector's next pass would re-emit the same stale
+      // deletion and we'd re-validate-and-drop forever — one wasted
+      // round-trip per sync.
+      expect(f.store.get("Notes/stale.md")).toBeUndefined();
+    });
+
+    it("pre-flight validation: batch becomes empty after dropping all stale deletions → push skipped", async () => {
+      // Two phantom snapshot entries that both turn out to be stale
+      // at currentHead. No modify entries. After validation, entries.length
+      // === 0 → push must be skipped entirely.
+      f.store.set("a.md", {
+        path: "a.md",
+        remoteSha: "SHA_A",
+        mtime: 1,
+        size: 1,
+      });
+      f.store.set("b.md", {
+        path: "b.md",
+        remoteSha: "SHA_B",
+        mtime: 1,
+        size: 1,
+      });
+      f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+      // No setContentAtRef → both paths null at currentHead.
+
+      await f.manager.syncAll();
+
+      // No createTree / createCommit calls — the empty batch was
+      // dropped, not pushed.
+      expect(
+        f.client.calls.filter((c) => c.op === "createTree"),
+      ).toEqual([]);
+      expect(
+        f.client.calls.filter((c) => c.op === "createCommit"),
+      ).toEqual([]);
+
+      // Both snapshot rows cleared.
+      expect(f.store.get("a.md")).toBeUndefined();
+      expect(f.store.get("b.md")).toBeUndefined();
+    });
+
+    it("pre-flight validation: deletion targeting a live remote path passes through unchanged", async () => {
+      // Negative case for the validator — when the deletion is
+      // legitimate (file still on remote), the entry must reach the
+      // tree-create request with sha:null intact. Confirms the
+      // validator doesn't over-drop.
+      f.store.set("Notes/live.md", {
+        path: "Notes/live.md",
+        remoteSha: "LIVE_SHA",
+        mtime: 1,
+        size: 1,
+      });
+      f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+      f.client.setContentAtRef("BRANCH_HEAD_INIT", "Notes/live.md", "still-there");
+
+      await f.manager.syncFile("Notes/live.md");
+
+      const tree = f.client.state.lastTree!;
+      expect(tree).toEqual([
+        { path: "Notes/live.md", mode: "100644", type: "blob", sha: null },
+      ]);
+      // Snapshot dropped via the normal post-push pathway.
+      expect(f.store.get("Notes/live.md")).toBeUndefined();
+    });
+
+    it("pre-flight validation: validator network failure aborts push and keeps lastSync (PUSH-REORGANIZATION §7.1)", async () => {
+      // If `getContentsAtRef` itself errors during validation, we
+      // cannot tell whether the entry is valid or stale. Policy:
+      // abort the push and let the next drain retry — better than
+      // optimistically proceeding and reintroducing the 422 we
+      // were trying to prevent.
+      f.store.set("Notes/will-fail-validation.md", {
+        path: "Notes/will-fail-validation.md",
+        remoteSha: "SHA",
+        mtime: 1,
+        size: 1,
+      });
+      f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+
+      // Override getContentsAtRef to throw a network-like error.
+      const origGet = f.client.getContentsAtRef.bind(f.client);
+      f.client.getContentsAtRef = async () => {
+        const e = new Error("ECONNRESET") as Error & { code?: string };
+        e.code = "ECONNRESET";
+        throw e;
+      };
+
+      await expect(
+        f.manager.syncFile("Notes/will-fail-validation.md"),
+      ).rejects.toThrow(/ECONNRESET/);
+
+      // lastSync stays put — next drain will retry the whole batch.
+      expect(f.store.getLastSyncCommitSha()).toBe("BRANCH_HEAD_INIT");
+      // The snapshot row also survives the failed validation —
+      // dropping it would be premature (we don't know yet whether
+      // the deletion was stale).
+      expect(f.store.get("Notes/will-fail-validation.md")).toBeDefined();
+
+      // Restore for any later test isolation.
+      f.client.getContentsAtRef = origGet;
     });
 
     it("contents-endpoint null for a compare-listed path THROWS instead of silent-skipping (orphan-prevention)", async () => {
