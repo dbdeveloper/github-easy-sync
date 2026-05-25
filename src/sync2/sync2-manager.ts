@@ -305,6 +305,16 @@ export interface Sync2ManagerDeps {
     pushedFiles: number;
     pulledFiles: number;
   }): void;
+  // Push-queue depth changed. Fired after every persistent mutation
+  // to .push-queue/ — enqueueOrMerge writes a new batch (depth +1)
+  // or folds into existing (depth +0); processBatch deletes a
+  // successfully-pushed batch (depth -1). Subscriber pattern for
+  // PUSH-REORGANIZATION §3.6: ribbon sync-icon badge displays this
+  // number so the user sees push-queue state directly rather than
+  // the indirect conflict-count proxy. `depth` is the count AFTER
+  // the mutation that triggered the callback. No-op in unit tests
+  // that don't pass it.
+  onQueueDepthChanged?(depth: number): void;
   // When true, a new sync click while pending batches exist (i.e.
   // earlier push attempt failed — typically offline) folds the new
   // changes into the latest pending batch instead of stacking. The
@@ -368,6 +378,7 @@ export class Sync2Manager {
   private readonly onSyncCompleted:
     | ((summary: { pushedFiles: number; pulledFiles: number }) => void)
     | undefined;
+  private readonly onQueueDepthChanged: ((depth: number) => void) | undefined;
   // Accumulator for the pull-side phases (bootstrapFromRemote +
   // pullIfNeeded) so onSyncCompleted can report how many files
   // actually came down from the remote. Reset at the start of each
@@ -411,12 +422,31 @@ export class Sync2Manager {
     this.onLocalCommitted = deps.onLocalCommitted;
     this.onNoLocalChanges = deps.onNoLocalChanges;
     this.onSyncCompleted = deps.onSyncCompleted;
+    this.onQueueDepthChanged = deps.onQueueDepthChanged;
     this.remoteIdentity = deps.remoteIdentity;
     this.progressBytesThreshold =
       deps.progressBytesThreshold ?? PROGRESS_BYTES_THRESHOLD;
     this.autoCanonicalize = deps.autoCanonicalize ?? (() => true);
     this.renameFile = deps.renameFile;
     this.now = deps.now ?? (() => Date.now());
+  }
+
+  // Fire onQueueDepthChanged with the CURRENT push-queue depth. Used
+  // at every persistent queue mutation (enqueue success, processBatch
+  // delete, reset, etc.) so the ribbon sync-icon badge (PUSH-REORG
+  // §3.6) reflects on-disk state without polling. No-op when the
+  // callback is not wired (most unit tests).
+  private async fireQueueDepth(): Promise<void> {
+    if (!this.onQueueDepthChanged) return;
+    try {
+      const ids = await this.queue.list();
+      this.onQueueDepthChanged(ids.length);
+    } catch (err) {
+      await this.logger.warn(
+        "Sync2 fireQueueDepth: queue.list() failed",
+        { err: `${err}` },
+      );
+    }
   }
 
   // Action 1 — full sync.
@@ -476,6 +506,10 @@ export class Sync2Manager {
       }
       const enqueued = await this.enqueueOrMerge(changes, this.fullSyncMeta());
       syncedFiles = enqueued;
+      // PUSH-REORG §3.6: queue depth changes after enqueue (whether a
+      // new batch was persisted or an existing one folded into).
+      // Ribbon badge refreshes on this signal.
+      await this.fireQueueDepth();
       if (enqueued > 0) {
         this.onLocalCommitted?.(enqueued);
         // TEMPORARY DEBUG LOG: list every file the click is about to
@@ -545,6 +579,8 @@ export class Sync2Manager {
         parentTreeSha: this.store.getLastSyncTreeSha(),
       });
       syncedFiles = enqueued;
+      // PUSH-REORG §3.6 — same depth-changed signal as syncAll.
+      await this.fireQueueDepth();
       if (enqueued > 0) {
         this.onLocalCommitted?.(enqueued);
         // TEMPORARY DEBUG LOG (matches syncAll). Single-file path so
@@ -1768,6 +1804,7 @@ export class Sync2Manager {
         refreshed.deletions.length === 0
       ) {
         await this.queue.delete(id);
+        await this.fireQueueDepth();  // §3.6
       }
     }
   }
@@ -2540,6 +2577,7 @@ export class Sync2Manager {
           `Sync2 push batch ${id}: empty after reconcile + pre-flight validation, skipping`,
         );
         await this.queue.delete(id);
+        await this.fireQueueDepth();  // §3.6
         // skip-class: already-correct (nothing left to push — every
         // entry was either reconciled out of the batch or dropped as
         // stale by pre-flight validation; the queue entry is deleted
@@ -2645,6 +2683,8 @@ export class Sync2Manager {
       await this.store.save();
 
       await this.queue.delete(id);
+      // PUSH-REORG §3.6: queue depth dropped after successful push.
+      await this.fireQueueDepth();
       await this.logger.info(`Sync2 push batch ${id} succeeded`, {
         commitSha,
         treeSha: newTreeSha,
