@@ -193,6 +193,16 @@ export async function createSync2Client(
     conflictCounter,
     accumulateOfflineSyncs: opts.accumulateOfflineSyncs ?? false,
     autoCanonicalize: () => opts.autoCanonicalize ?? true,
+    // POSIX-flavoured rename via mock-obsidian's adapter — no wiki-link
+    // updates (no real `app.fileManager`), but adequate for integration
+    // tests that just need the file to move. Production wiring lives
+    // in main.ts and uses `app.fileManager.renameFile` for link maintenance.
+    renameFile: async (oldPath: string, newPath: string): Promise<void> => {
+      if (await vault.adapter.exists(newPath)) {
+        await vault.adapter.remove(newPath);
+      }
+      await vault.adapter.rename(oldPath, newPath);
+    },
   });
 
   return {

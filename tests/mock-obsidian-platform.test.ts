@@ -108,6 +108,77 @@ describe("MOCK_PLATFORM", () => {
       });
     },
   );
+
+  // ── ASCII quote / apostrophe in filename ────────────────────────────
+  // Field-reported mobile failure (2026-05-25): pulling a file named
+  // `Штрихи до "святої" книги "Віра в Лад".md` triggered an error from
+  // the vault adapter that mock-obsidian's POSIX-backed paths don't
+  // reproduce. mock-obsidian uses Node fs which allows `"` and `'` in
+  // filenames everywhere, so these tests PASS regardless of platform
+  // (they're regression insurance for the upper layers — path
+  // normalization, URL encoding, atomic-write staging-path derivation —
+  // not a reproduction of the Capacitor-side issue itself). Confirms
+  // that the plugin doesn't OWN code that mangles paths with these
+  // characters; if a test here ever fails, the bug is in our code, not
+  // in the platform.
+  describe.each([{ platform: "desktop" as const }, { platform: "mobile" as const }])(
+    "ASCII quote/apostrophe in filename (under $platform)",
+    ({ platform }) => {
+      beforeEach(() => setMockPlatform(platform));
+
+      it("write + read + exists round-trip for path with double quotes", async () => {
+        const filePath = `Notes/Штрихи до "святої" книги "Віра в Лад".md`;
+        const content = `body with "quoted" word\n`;
+        await vault.adapter.write(filePath, content);
+        expect(await vault.adapter.exists(filePath)).toBe(true);
+        expect(await vault.adapter.read(filePath)).toBe(content);
+      });
+
+      it("write + read + exists round-trip for path with apostrophes", async () => {
+        const filePath = `Notes/Don't worry it's fine.md`;
+        const content = `body with 'apostrophes' inside\n`;
+        await vault.adapter.write(filePath, content);
+        expect(await vault.adapter.exists(filePath)).toBe(true);
+        expect(await vault.adapter.read(filePath)).toBe(content);
+      });
+
+      it("writeBinary + readBinary round-trip for path with double quotes", async () => {
+        // The pull-side path for non-text files uses writeBinary; cover
+        // it explicitly because text-vs-binary is a different code path
+        // in both mock-obsidian and the real Obsidian adapter.
+        const filePath = `assets/"quoted name".bin`;
+        const bytes = new Uint8Array([0xde, 0xad, 0xbe, 0xef]).buffer as ArrayBuffer;
+        await vault.adapter.writeBinary(filePath, bytes);
+        expect(await vault.adapter.exists(filePath)).toBe(true);
+        const out = await vault.adapter.readBinary(filePath);
+        expect(new Uint8Array(out)).toEqual(new Uint8Array(bytes));
+      });
+
+      it("atomic-write staging-path for quoted filename is well-formed", async () => {
+        // Pull-replace routes through atomicWriteFile which derives
+        // staging paths via stagingPathFor. Verify the derivation
+        // doesn't drop / re-encode the quotes — staging must round-trip
+        // back to final when AtomicWriteRecovery.sweep reverses it.
+        const finalPath = `Notes/Штрихи до "святої" книги "Віра в Лад".md`;
+        const tmpStaging = stagingPathFor(finalPath, "tmp");
+        const bakStaging = stagingPathFor(finalPath, "bak");
+        expect(tmpStaging).toBe(`Notes/Штрихи до "святої" книги "Віра в Лад".sync-tmp.md`);
+        expect(bakStaging).toBe(`Notes/Штрихи до "святої" книги "Віра в Лад".sync-bak.md`);
+      });
+
+      it("rename quoted filename to other quoted filename round-trips", async () => {
+        // Models a user renaming `"foo".md` → `"bar".md` while one of
+        // them is a sibling-file in a conflict resolution flow.
+        const src = `Notes/"old name".md`;
+        const dst = `Notes/"new name".md`;
+        await vault.adapter.write(src, "content\n");
+        await vault.adapter.rename(src, dst);
+        expect(await vault.adapter.exists(src)).toBe(false);
+        expect(await vault.adapter.exists(dst)).toBe(true);
+        expect(await vault.adapter.read(dst)).toBe("content\n");
+      });
+    },
+  );
 });
 
 // ConflictStore.create paired desktop/mobile coverage. Under

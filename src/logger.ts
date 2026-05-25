@@ -149,7 +149,24 @@ function safeStringify(value: unknown): string {
   try {
     return JSON.stringify(value, (_key, v) => {
       if (v instanceof Error) {
-        return { name: v.name, message: v.message, stack: v.stack };
+        return errorLikeToPlain(v);
+      }
+      // Cross-realm Error or Error-like object: doesn't pass
+      // `instanceof Error` (different JS context — Capacitor's
+      // native-bridge errors on iOS/Android, iframe boundaries) but
+      // has Error's shape. Without this branch, JSON.stringify renders
+      // such an object as `{}` because `message`/`stack`/`name` live on
+      // the prototype, not as own enumerable properties.
+      if (
+        v &&
+        typeof v === "object" &&
+        !Array.isArray(v) &&
+        ("message" in v || "stack" in v || "code" in v) &&
+        Object.getOwnPropertyNames(v).every(
+          (k) => !["message", "stack", "name"].includes(k),
+        )
+      ) {
+        return errorLikeToPlain(v as Record<string, unknown>);
       }
       if (typeof v === "object" && v !== null) {
         if (seen.has(v)) return "[Circular]";
@@ -160,4 +177,25 @@ function safeStringify(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+// Pull Error-ish fields out of a value regardless of where they live
+// (own enumerable, prototype accessor, non-enumerable own property).
+// Used for both real `Error` instances and cross-realm Error-like
+// objects (Capacitor `DOMException`/`CapacitorException` instances
+// that come back from the native bridge).
+function errorLikeToPlain(e: any): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of ["name", "message", "stack", "code", "cause"]) {
+    if (e[key] !== undefined) out[key] = e[key];
+  }
+  for (const key of Object.getOwnPropertyNames(e)) {
+    if (out[key] === undefined) out[key] = e[key];
+  }
+  // Final fallback: if we still got nothing extractable, include the
+  // default toString so the log carries SOMETHING.
+  if (Object.keys(out).length === 0) {
+    out.__string = String(e);
+  }
+  return out;
 }

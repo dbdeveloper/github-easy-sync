@@ -1349,6 +1349,47 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       await f.manager.syncAll();
       f.client.compare = origCompare;
     });
+
+    it("contents-endpoint null for a compare-listed path THROWS instead of silent-skipping (orphan-prevention)", async () => {
+      // 2026-05-25 field bug: compare diff named `[1] File ^ opa?.md` as
+      // added at currentHead, but the (then-buggy) Contents URL was
+      // mis-encoded so safeFetchContents returned null. The previous
+      // silent-continue allowed pullIfNeeded to finish "successfully",
+      // lastSync advanced past the file's introduction commit, and the
+      // file became permanently invisible to incremental compare. Only
+      // a Plugin Reset (full re-bootstrap) recovered.
+      //
+      // With the preventive fix, an unexpected null fetch on a path the
+      // compare diff lists as added/modified throws — the per-file
+      // catch in pullIfNeeded logs the exact path and re-throws, the
+      // loop aborts, lastSync stays at expectedHead, and the next sync
+      // retries. Either succeeds (transient race / permission drift) or
+      // re-fails until the underlying bug (URL encoding, etc) is fixed.
+      f.store.setLastSync("BASE_HEAD", "BASE_TREE");
+      f.client.setBranchHead("NEW_HEAD");
+      f.client.setTreeShaForCommit("NEW_HEAD", "NEW_TREE");
+      // Compare advertises the file as added — but we intentionally do
+      // NOT call setContentAtRef, so the fake's getContentsAtRef will
+      // return null for this path. Simulates the field-bug 404.
+      f.client.setCompareResult("BASE_HEAD", "NEW_HEAD", {
+        status: "ahead",
+        files: [
+          { filename: "Notes/ghost.md", status: "added", sha: "blob-ghost" },
+        ],
+      });
+
+      await expect(f.manager.syncAll()).rejects.toThrow(
+        /contents endpoint returned null/,
+      );
+
+      // Critical invariant: lastSync did NOT advance. Next sync will
+      // re-attempt the same compare and try to fetch the same path
+      // again — once the underlying cause is gone, recovery is
+      // automatic with no manual Reset needed.
+      expect(f.store.getLastSyncCommitSha()).toBe("BASE_HEAD");
+      // Local file is NOT in vault (we never got the bytes).
+      expect(fs.existsSync(path.join(f.root, "Notes/ghost.md"))).toBe(false);
+    });
   });
 
   // ── text canonicalisation — text canonicalisation on pull -----------------------

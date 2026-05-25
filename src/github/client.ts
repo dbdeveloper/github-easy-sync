@@ -11,6 +11,22 @@ import {
   retryUntil,
 } from "src/utils";
 
+// Encode a vault path for use as a GitHub Contents-API URL segment.
+// GitHub's `/repos/.../contents/<path>` endpoint embeds the path
+// directly in the URL — characters that have URL syntax meaning
+// (`?`, `#`, ` `, `%`, etc.) must be percent-encoded or the server
+// truncates the path at the first syntax char and returns 404. `/`
+// is the path separator and must NOT be encoded — encode per-segment
+// and rejoin. Field bug 2026-05-25: a file named `[1] File ^ opa?.md`
+// pushed via GitHub Web UI was unreachable by our pull because the
+// raw `?` ended the URL path. `encodeURIComponent` handles ALL of
+// the Family-1 and Family-2 forbidden chars correctly even though
+// they should rarely appear on GitHub once the sanitizer migration
+// has run end-to-end.
+export function encodePathForGithub(path: string): string {
+  return path.split("/").map(encodeURIComponent).join("/");
+}
+
 export type RepoContent = {
   files: { [key: string]: GetTreeResponseItem };
   sha: string;
@@ -356,7 +372,7 @@ export default class GithubClient {
       async () => {
         return this.timed(
           {
-            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/contents/${filePath}?ref=${ref}`,
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/contents/${encodePathForGithub(filePath)}?ref=${ref}`,
             headers: this.headers(),
             throw: false,
           },
@@ -842,7 +858,7 @@ export default class GithubClient {
       async () => {
         return this.timed(
           {
-            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/contents/${path}`,
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/contents/${encodePathForGithub(path)}`,
             headers: this.headers(),
             method: "PUT",
             body: JSON.stringify({
