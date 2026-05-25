@@ -10,10 +10,15 @@ import {
 import {
   calculateGitBlobSHA,
   decodeBase64String,
+  describeError,
   hasTextExtension,
 } from "../utils";
 import ChangeDetector from "./change-detector";
 import { atomicWriteFile } from "./atomic-write";
+import {
+  needsSanitization,
+  sanitizeFilename,
+} from "./filename-sanitizer";
 import GitignoreInvariants from "./gitignore-invariants";
 import PushQueue, { EnqueueMeta } from "./push-queue";
 import SnapshotStore, { RemoteIdentity } from "./snapshot-store";
@@ -285,6 +290,16 @@ export interface Sync2ManagerDeps {
   // -NL rewrites — the engine treats text the same as binary at the
   // byte level. Optional; default is true (canonicalization on).
   autoCanonicalize?: () => boolean;
+  // Cross-platform filename sanitization callback. Invoked by syncAll
+  // before findChanges to rename any vault file whose path contains a
+  // Windows-forbidden ASCII char (`< > : " | ? * \`) to its canonical
+  // Unicode form (see filename-sanitizer.ts). Plugin code passes a
+  // wrapper around `app.fileManager.renameFile` so Obsidian-aware link
+  // updates run on the rename. Unit tests pass a fs-only rename for
+  // determinism. Optional: when undefined, sanitization is skipped
+  // (legacy behaviour — useful for tests that pre-seed forbidden paths
+  // to assert push-side guards).
+  renameFile?: (oldPath: string, newPath: string) => Promise<void>;
   // Override the clock for deterministic tests.
   now?: () => number;
 }
@@ -322,6 +337,9 @@ export class Sync2Manager {
   private readonly remoteIdentity: (() => RemoteIdentity) | undefined;
   private readonly progressBytesThreshold: number;
   private readonly autoCanonicalize: () => boolean;
+  private readonly renameFile:
+    | ((oldPath: string, newPath: string) => Promise<void>)
+    | undefined;
   private readonly now: () => number;
   // Guard against re-entrant drain. The runner only loops one
   // batch at a time; if a second syncAll() lands while the first is
@@ -356,6 +374,7 @@ export class Sync2Manager {
     this.progressBytesThreshold =
       deps.progressBytesThreshold ?? PROGRESS_BYTES_THRESHOLD;
     this.autoCanonicalize = deps.autoCanonicalize ?? (() => true);
+    this.renameFile = deps.renameFile;
     this.now = deps.now ?? (() => Date.now());
   }
 
@@ -391,6 +410,15 @@ export class Sync2Manager {
       // is pure-local.
       await this.bootstrapIfNeeded(progress);
       if (this.invariants) await this.invariants.enforce();
+      // Sanitize vault filenames containing Windows-forbidden ASCII
+      // chars (`< > : " | ? * \`) BEFORE findChanges so the rename
+      // surfaces as a normal delete-old/add-new pair that the rest of
+      // the pipeline pushes to GitHub. Hard invariant — these chars
+      // never reach the remote regardless of which device created the
+      // file (some platforms, notably Obsidian Android, refuse to
+      // materialise such names on pull and block multi-device sync
+      // permanently). See `filename-sanitizer.ts` for the mapping.
+      await this.sanitizeForbiddenFilenames();
       const changes = await this.detector.findChanges();
       if (changes.length === 0) {
         await this.store.save();
@@ -664,65 +692,150 @@ export class Sync2Manager {
 
     try {
       for (const f of syncableChanges) {
-        if (queuedPaths.has(f.filename)) {
-          // Defer: processBatch's Case 4 (expectedHead != currentHead)
-          // will run reconcileBatchAgainstHead on this path. We
-          // deliberately leave lastSync at the OLD expectedHead so
-          // processBatch sees the drift and triggers reconcile.
-          anyOverlapDeferred = true;
-          tickPull();
-          continue;
-        }
-
-        if (f.status === "removed") {
-          await this.applyRemoteDeletion(f.filename, expectedHead, currentHead);
-          this.pulledFilesThisSync++;
-          tickPull();
-          continue;
-        }
-
-        // Resume: a prior pull pass may have already written this file
-        // before crashing. Mirrors bootstrapFromRemote's SHA-match skip.
-        if (
-          f.status !== "renamed" &&
-          f.sha &&
-          (await this.vault.adapter.exists(f.filename))
-        ) {
-          const localBuf = await this.vault.adapter.readBinary(f.filename);
-          const localSha = await calculateGitBlobSHA(localBuf);
-          if (localSha === f.sha) {
-            const stat = await this.vault.adapter.stat(f.filename);
-            if (stat) {
-              this.store.set(f.filename, {
-                path: f.filename,
-                remoteSha: f.sha,
-                mtime: stat.mtime,
-                size: stat.size,
-              });
+        try {
+          // Pull-side sanitize: when GitHub carries a path with chars
+          // the local platform can't materialise (Mobile rejects `"`,
+          // Obsidian rejects `# ^ [ ]`), short-circuit and write to
+          // canonical-path locally. Phantom snapshot under forbidden
+          // path triggers next ChangeDetector to emit a deletion that
+          // cleans GitHub. Canonical path itself is NOT recorded —
+          // ChangeDetector picks it up as a new file and the same
+          // push that deletes forbidden also adds canonical. One
+          // round-trip migrates legacy GitHub state to clean form.
+          // See `filename-sanitizer.ts`.
+          if (
+            (f.status === "added" ||
+              f.status === "modified" ||
+              f.status === "renamed" ||
+              f.status === "copied" ||
+              f.status === "changed") &&
+            needsSanitization(f.filename)
+          ) {
+            const canonical = sanitizeFilename(f.filename);
+            const canonicalExists = await this.vault.adapter.exists(canonical);
+            if (!canonicalExists) {
+              const blob = await this.safeFetchContents(f.filename, currentHead);
+              if (blob) {
+                if (hasTextExtension(canonical)) {
+                  const text = decodeBase64String(blob.content);
+                  await this.writeRemoteText(canonical, text);
+                } else {
+                  await this.writeBinaryRemote(canonical, blob.content);
+                }
+                // Phantom snapshot at the forbidden GitHub path so
+                // the next ChangeDetector pass emits a deletion.
+                // mtime=0/size=0 because the path has no local file;
+                // Pass 2 only consults `path` membership.
+                this.store.set(f.filename, {
+                  path: f.filename,
+                  remoteSha: f.sha ?? blob.sha,
+                  mtime: 0,
+                  size: 0,
+                });
+                await this.logger.info(
+                  "Sync2 pull: sanitized remote forbidden path",
+                  { from: f.filename, to: canonical },
+                );
+                this.pulledFilesThisSync++;
+                tickPull();
+                continue;
+              }
+            } else {
+              await this.logger.warn(
+                "Sync2 pull: forbidden-path target exists, sanitize skipped",
+                { remote: f.filename, local_canonical: canonical },
+              );
+              // Fall through to normal apply — will likely fail on
+              // mobile but the warn-log + per-file catch below surface
+              // the path to the user.
             }
+          }
+
+          if (queuedPaths.has(f.filename)) {
+            // Defer: processBatch's Case 4 (expectedHead != currentHead)
+            // will run reconcileBatchAgainstHead on this path. We
+            // deliberately leave lastSync at the OLD expectedHead so
+            // processBatch sees the drift and triggers reconcile.
+            anyOverlapDeferred = true;
             tickPull();
             continue;
           }
-        }
 
-        // added / modified / renamed / copied / changed → fetch and
-        // apply remote content. previous_filename only matters for
-        // renamed status; we treat it as a delete-of-old + add-of-new
-        // since GitHub's tree view does the same on its side.
-        if (
-          f.status === "renamed" &&
-          f.previous_filename &&
-          (await this.detector.checkSyncable(f.previous_filename))
-        ) {
-          await this.applyRemoteDeletion(f.previous_filename, expectedHead, currentHead);
+          if (f.status === "removed") {
+            await this.applyRemoteDeletion(f.filename, expectedHead, currentHead);
+            this.pulledFilesThisSync++;
+            tickPull();
+            continue;
+          }
+
+          // Resume: a prior pull pass may have already written this file
+          // before crashing. Mirrors bootstrapFromRemote's SHA-match skip.
+          if (
+            f.status !== "renamed" &&
+            f.sha &&
+            (await this.vault.adapter.exists(f.filename))
+          ) {
+            const localBuf = await this.vault.adapter.readBinary(f.filename);
+            const localSha = await calculateGitBlobSHA(localBuf);
+            if (localSha === f.sha) {
+              const stat = await this.vault.adapter.stat(f.filename);
+              if (stat) {
+                this.store.set(f.filename, {
+                  path: f.filename,
+                  remoteSha: f.sha,
+                  mtime: stat.mtime,
+                  size: stat.size,
+                });
+              }
+              tickPull();
+              continue;
+            }
+          }
+
+          // added / modified / renamed / copied / changed → fetch and
+          // apply remote content. previous_filename only matters for
+          // renamed status; we treat it as a delete-of-old + add-of-new
+          // since GitHub's tree view does the same on its side.
+          if (
+            f.status === "renamed" &&
+            f.previous_filename &&
+            (await this.detector.checkSyncable(f.previous_filename))
+          ) {
+            await this.applyRemoteDeletion(f.previous_filename, expectedHead, currentHead);
+          }
+          await this.applyRemoteAddOrModify(
+            f.filename,
+            currentHead,
+            expectedHead,
+          );
+          this.pulledFilesThisSync++;
+          tickPull();
+        } catch (err) {
+          // Per-file observability: without this catch, the very first
+          // failure aborted the entire pull loop and the only signal
+          // was a generic toast from main.ts:sync(). Pre-extract err
+          // info verbosely — Capacitor's native-bridge errors on
+          // mobile can be objects whose `message`/`stack` neither live
+          // as own enumerable properties nor make `instanceof Error`
+          // true, so the default JSON.stringify renders them as `{}`.
+          // The describeError dump pulls everything reachable
+          // (typeof, constructor name, String(err), own properties,
+          // common error-shape fields) so something always lands in
+          // the log regardless of the thrown value's shape.
+          //
+          // Re-throw preserves existing safety semantics: lastSync
+          // stays at expectedHead so the next sync retries — without
+          // this, partial pulls would silently advance lastSync and
+          // skip the failed files.
+          await this.logger.error("Sync2 pull: file apply failed", {
+            path: f.filename,
+            status: f.status,
+            sha: f.sha ?? null,
+            previous_filename: f.previous_filename ?? null,
+            err: describeError(err),
+          });
+          throw err;
         }
-        await this.applyRemoteAddOrModify(
-          f.filename,
-          currentHead,
-          expectedHead,
-        );
-        this.pulledFilesThisSync++;
-        tickPull();
       }
     } finally {
       if (ownPullProgress) pullProgress?.hide();
@@ -767,6 +880,59 @@ export class Sync2Manager {
   // has been synced before — e.g. an upgrade from an older sync2
   // version): record current settings without resetting.
   //
+  // Walk the vault, detect any file whose path contains a
+  // cross-platform-incompatible ASCII char (per
+  // filename-sanitizer.ts), and rename it to its canonical Unicode
+  // form. Runs early in syncAll (after invariants.enforce, before
+  // findChanges) so the rename surfaces to ChangeDetector as a
+  // normal delete-old/add-new pair that the rest of the pipeline
+  // publishes to GitHub. Hard invariant — these chars never reach
+  // the remote regardless of which device created the file.
+  //
+  // Skips silently when `renameFile` callback is absent (unit tests
+  // that don't wire it). Logs every rename to the activity log so a
+  // user reviewing the log can audit what got renamed and why.
+  // Collision protection: if the canonical target already exists,
+  // log a warning and skip — the user must resolve the duplicate
+  // manually before sync can converge on that path.
+  private async sanitizeForbiddenFilenames(): Promise<void> {
+    if (!this.renameFile) return;
+    type FileLike = { path: string };
+    const files: FileLike[] = (
+      this.vault as unknown as { getFiles?: () => FileLike[] }
+    ).getFiles?.() ?? [];
+    const renames: Array<{ from: string; to: string }> = [];
+    for (const f of files) {
+      if (!needsSanitization(f.path)) continue;
+      const canonical = sanitizeFilename(f.path);
+      if (canonical === f.path) continue;
+      if (await this.vault.adapter.exists(canonical)) {
+        await this.logger.warn(
+          "Sync2 sanitize-filename: target exists, skipping",
+          { from: f.path, to: canonical },
+        );
+        continue;
+      }
+      renames.push({ from: f.path, to: canonical });
+    }
+    if (renames.length === 0) return;
+    await this.logger.info(
+      `Sync2 sanitize-filename: renaming ${renames.length} file(s)`,
+      { renames },
+    );
+    for (const { from, to } of renames) {
+      try {
+        await this.renameFile(from, to);
+      } catch (err) {
+        await this.logger.error(
+          "Sync2 sanitize-filename: rename failed",
+          { from, to, err: describeError(err) },
+        );
+        throw err;
+      }
+    }
+  }
+
   // No-op when the manager wasn't given a remoteIdentity getter
   // (unit tests that don't care about this surface).
   private async reconcileRemoteIdentity(): Promise<void> {
@@ -917,6 +1083,50 @@ export class Sync2Manager {
     try {
       for (const filePath of syncablePaths) {
         const item = files[filePath];
+        // Pull-side sanitize for bootstrap (initial vault clone). Same
+        // shape as in pullIfNeeded — see comment there. Bootstrap runs
+        // before lastSync is set, so a phantom snapshot here is what
+        // ChangeDetector's first findChanges will use to emit a
+        // deletion that cleans the legacy forbidden path from GitHub.
+        if (needsSanitization(filePath)) {
+          const canonical = sanitizeFilename(filePath);
+          if (!(await this.vault.adapter.exists(canonical))) {
+            const blob = await this.client.getBlob({
+              sha: item.sha,
+              retry: true,
+            });
+            const bytes = base64ToArrayBuffer(blob.content);
+            if (hasTextExtension(canonical)) {
+              const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
+                bytes,
+              );
+              await this.writeRemoteText(canonical, text);
+            } else {
+              await this.ensureParentDir(canonical);
+              await this.vault.adapter.writeBinary(canonical, bytes);
+            }
+            this.store.set(filePath, {
+              path: filePath,
+              remoteSha: item.sha,
+              mtime: 0,
+              size: 0,
+            });
+            await this.logger.info(
+              "Sync2 bootstrap: sanitized remote forbidden path",
+              { from: filePath, to: canonical },
+            );
+            pulled++;
+            this.pulledFilesThisSync++;
+            tickPull();
+            continue;
+          } else {
+            await this.logger.warn(
+              "Sync2 bootstrap: forbidden-path target exists, sanitize skipped",
+              { remote: filePath, local_canonical: canonical },
+            );
+          }
+        }
+
         const localExists = await this.vault.adapter.exists(filePath);
         if (!localExists) {
           await this.adoptionPullAndRecord(filePath, item);
@@ -1056,7 +1266,29 @@ export class Sync2Manager {
     baseRef: string,
   ): Promise<void> {
     const blob = await this.safeFetchContents(path, headRef);
-    if (!blob) return; // raced with a subsequent remote delete; skip
+    if (!blob) {
+      // The compare diff named this path as added/modified at headRef,
+      // but the Contents endpoint returned null. Possible causes:
+      //   (a) Race: the file was deleted in a push between our compare
+      //       call and this fetch. Rare but real.
+      //   (b) Permission drift: the token lost access between compare
+      //       and now.
+      //   (c) Build/client bug producing a malformed Contents URL
+      //       (URL-encoding regression, encoding-by-segment slip, etc).
+      // Throw rather than silently skip — earlier silent-skip behaviour
+      // produced an orphan-file class of bug on 2026-05-25 where Mobile
+      // got a URL-encoding 404 on `[1] File ^ opa?.md`, the loop
+      // continued, lastSync advanced past the file's introduction commit,
+      // and subsequent compare diffs no longer surfaced the path. Path
+      // was permanently invisible to incremental sync until a Reset.
+      // With this throw, the per-file catch in pullIfNeeded logs the
+      // exact path, the loop aborts, lastSync stays at expectedHead,
+      // and the next sync retries — either succeeds (cases a/b resolve)
+      // or re-fails until a fixed build is deployed (case c).
+      throw new Error(
+        `Sync2 pull: contents endpoint returned null for path the compare diff lists as present: ${path}`,
+      );
+    }
 
     const localChange = await this.detector.findChangeForPath(path);
     const exists = await this.vault.adapter.exists(path);

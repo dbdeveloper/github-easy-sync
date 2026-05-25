@@ -81,6 +81,172 @@ describe.skipIf(!integrationEnabled())(
     );
 
     it(
+      "push-side sanitize: local file with forbidden ASCII chars gets renamed + pushed under canonical Unicode",
+      async () => {
+        // Field-reported issue: a file named
+        // `Actual-projects/Ладовіра/Штрихи до "святої" книги "Віра в Лад".md`
+        // pushed cleanly from Desktop (POSIX/NTFS allow `"`) but the
+        // matching pull on Obsidian Mobile failed with FILE_NOTCREATED
+        // because Android refuses Windows-forbidden chars in names.
+        // Invariant: those ASCII chars NEVER reach GitHub. The
+        // sanitizer rewrites local → canonical BEFORE push, regardless
+        // of which device created the file.
+        client = await createSync2Client({ branch });
+        const forbidden = `Notes/Штрихи до "святої" книги "Віра в Лад".md`;
+        const canonical = `Notes/Штрихи до “святої“ книги “Віра в Лад“.md`;
+        const content = `body with "quoted" word\n`;
+        await client.vault.adapter.write(forbidden, content);
+        await sync2AllAndAssertNoErrors(client);
+
+        // Local rename observable: forbidden gone, canonical present.
+        expect(fs.existsSync(path.join(client.vaultPath, forbidden))).toBe(
+          false,
+        );
+        expect(fs.existsSync(path.join(client.vaultPath, canonical))).toBe(
+          true,
+        );
+
+        // Remote has canonical only. Asking for the forbidden path
+        // should 404 (helper throws). Asking for canonical returns
+        // the bytes unchanged.
+        await expect(readRemoteFile(branch, forbidden)).rejects.toThrow();
+        expect(await readRemoteFile(branch, canonical)).toBe(content);
+      },
+      210_000,
+    );
+
+    it(
+      "push-side sanitize: covers the 11 forbidden chars reachable on push",
+      async () => {
+        // Stress: every forbidden char EXCEPT `\` appears in the
+        // basename. `\` cannot show up in a vault filename on push
+        // because Obsidian's `normalizePath` rewrites `\` → `/` before
+        // any adapter call, so `\` never reaches our pre-sync scan.
+        // `/` itself is the path separator and is never sanitized.
+        // (`\` IS reachable on pull from a non-Obsidian-pushed GitHub
+        // path; that path is exercised by the pull-side tests below
+        // through filename-sanitizer unit coverage.)
+        client = await createSync2Client({ branch });
+        const forbidden = `Notes/all<>:|?*"#^[].md`;
+        const canonical = `Notes/all＜＞꞉｜？＊“＃＾［］.md`;
+        const content = "stress test\n";
+        await client.vault.adapter.write(forbidden, content);
+        await sync2AllAndAssertNoErrors(client);
+
+        expect(fs.existsSync(path.join(client.vaultPath, canonical))).toBe(
+          true,
+        );
+        expect(await readRemoteFile(branch, canonical)).toBe(content);
+      },
+      210_000,
+    );
+
+    it(
+      "pull-side sanitize: legacy forbidden GitHub path lands locally as canonical, next sync cleans GitHub",
+      async () => {
+        // Models a vault whose GitHub history was populated by a tool
+        // OUTSIDE this plugin (or by this plugin BEFORE sanitize landed)
+        // and now carries paths with forbidden ASCII chars. A fresh
+        // sync from any client must (a) materialise the file under a
+        // canonical local name, and (b) drive the next sync to delete
+        // the forbidden path from GitHub + add the canonical one,
+        // converging GitHub to the invariant.
+        const forbidden = `Notes/Штрихи до "святої" книги "Віра в Лад".md`;
+        const canonical = `Notes/Штрихи до “святої“ книги “Віра в Лад“.md`;
+        const content = "legacy content from another tool\n";
+        // Seed GitHub directly, bypassing the plugin's push-side sanitizer.
+        await writeRemoteFile(branch, forbidden, content, "seed legacy forbidden path");
+
+        // First client: fresh adoption-from-remote (bootstrap path).
+        client = await createSync2Client({ branch });
+        await sync2AllAndAssertNoErrors(client);
+
+        // Local has canonical, not forbidden.
+        expect(fs.existsSync(path.join(client.vaultPath, canonical))).toBe(
+          true,
+        );
+        expect(fs.existsSync(path.join(client.vaultPath, forbidden))).toBe(
+          false,
+        );
+        expect(
+          fs.readFileSync(path.join(client.vaultPath, canonical), "utf8"),
+        ).toBe(content);
+
+        // Second sync: the phantom snapshot entry triggers
+        // ChangeDetector to emit DELETE(forbidden) + ADD(canonical).
+        // After this sync, GitHub no longer has the forbidden path.
+        await sync2AllAndAssertNoErrors(client);
+
+        await expect(readRemoteFile(branch, forbidden)).rejects.toThrow();
+        expect(await readRemoteFile(branch, canonical)).toBe(content);
+      },
+      300_000,
+    );
+
+    it(
+      "pull-side sanitize: forbidden GitHub path arrived AFTER first sync (incremental pull)",
+      async () => {
+        // Variant of the previous test against the non-bootstrap pull
+        // path (pullIfNeeded loop in compare-mode rather than the
+        // adoption walk). Verifies both pull entry points apply the
+        // same sanitize logic.
+        const seed = "Notes/seed.md";
+        client = await createSync2Client({ branch });
+        await client.vault.adapter.write(seed, "anchor\n");
+        await sync2AllAndAssertNoErrors(client);
+
+        // Now seed a forbidden path on GitHub directly.
+        const forbidden = `Notes/extra<bad>.md`;
+        const canonical = `Notes/extra＜bad＞.md`;
+        const content = "appears after first sync\n";
+        await writeRemoteFile(branch, forbidden, content, "seed legacy forbidden path");
+
+        // Incremental sync: compare emits the new forbidden file, pull
+        // sanitizes it locally.
+        await sync2AllAndAssertNoErrors(client);
+        expect(fs.existsSync(path.join(client.vaultPath, canonical))).toBe(
+          true,
+        );
+        expect(fs.existsSync(path.join(client.vaultPath, forbidden))).toBe(
+          false,
+        );
+
+        // Next sync cleans GitHub.
+        await sync2AllAndAssertNoErrors(client);
+        await expect(readRemoteFile(branch, forbidden)).rejects.toThrow();
+        expect(await readRemoteFile(branch, canonical)).toBe(content);
+      },
+      300_000,
+    );
+
+    it(
+      "ASCII apostrophes in filename round-trip (`'` is NOT sanitized)",
+      async () => {
+        // Sanity boundary: apostrophe U+0027 is NOT in the forbidden
+        // set (Obsidian + GitHub + all filesystems accept it). It must
+        // pass through unchanged on both push and pull — the sanitizer
+        // doesn't over-reach into common punctuation.
+        client = await createSync2Client({ branch });
+        const filePath = `Notes/Don't worry it's fine.md`;
+        const content = `body with 'apostrophes' inside\n`;
+        await client.vault.adapter.write(filePath, content);
+        await sync2AllAndAssertNoErrors(client);
+
+        // Push: remote has the original apostrophe-bearing path.
+        expect(await readRemoteFile(branch, filePath)).toBe(content);
+
+        // Pull: round-trip on a fresh client.
+        client.cleanup();
+        client = await createSync2Client({ branch });
+        await sync2AllAndAssertNoErrors(client);
+        const localPath = path.join(client.vaultPath, filePath);
+        expect(fs.existsSync(localPath)).toBe(true);
+        expect(fs.readFileSync(localPath, "utf8")).toBe(content);
+      },
+      210_000,
+    );
+
+    it(
       "empty file pushes + pulls as empty",
       async () => {
         // Push side: prime a sync, then add an empty file and sync.
