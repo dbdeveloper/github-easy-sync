@@ -1,11 +1,17 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import * as fs from "fs";
+import * as path from "path";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { Vault, setMockPlatform } from "../../mock-obsidian";
 import {
   FORBIDDEN_TO_CANONICAL,
   sanitizeFilename,
   needsSanitization,
-} from "../../src/sync2/filename-sanitizer";
+  safeRename,
+} from "../../src/sync2/cross-platform";
 
-describe("filename-sanitizer", () => {
+describe("cross-platform — filename sanitizer", () => {
   describe("FORBIDDEN_TO_CANONICAL mapping", () => {
     it("covers exactly the two forbidden families", () => {
       // Family 1 — Windows FAT/NTFS-forbidden (`< > : " | ? * \`).
@@ -157,5 +163,74 @@ describe("filename-sanitizer", () => {
       const after = sanitizeFilename(before);
       expect(after).toBe(`замітка_📝_中文_＜v1＞.md`);
     });
+  });
+});
+
+describe("cross-platform — safeRename", () => {
+  let tmp: string;
+  let vault: Vault;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(path.join(tmpdir(), "safe-rename-"));
+    vault = new Vault(tmp);
+    setMockPlatform("desktop");
+  });
+
+  afterEach(() => {
+    setMockPlatform("desktop");
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("renames when destination does not exist (both platforms)", async () => {
+    await vault.adapter.write("src.txt", "payload");
+    await safeRename(
+      vault.adapter as unknown as import("obsidian").DataAdapter,
+      "src.txt",
+      "dst.txt",
+    );
+    expect(await vault.adapter.exists("src.txt")).toBe(false);
+    expect(await vault.adapter.read("dst.txt")).toBe("payload");
+  });
+
+  it("on desktop: overwrites the existing destination (POSIX semantics)", async () => {
+    // Desktop adapter.rename is itself overwriting; safeRename just
+    // mirrors that so behavior stays uniform across platforms.
+    await vault.adapter.write("src.txt", "new");
+    await vault.adapter.write("dst.txt", "old");
+    await safeRename(
+      vault.adapter as unknown as import("obsidian").DataAdapter,
+      "src.txt",
+      "dst.txt",
+    );
+    expect(await vault.adapter.exists("src.txt")).toBe(false);
+    expect(await vault.adapter.read("dst.txt")).toBe("new");
+  });
+
+  it("on mobile: removes the existing destination first (Capacitor semantics)", async () => {
+    // The whole point of safeRename — Capacitor adapter.rename
+    // would throw "Destination file already exists" on the second
+    // step. safeRename inserts the remove() between exists() check
+    // and rename() so the rename's destination is always free.
+    await vault.adapter.write("src.txt", "new");
+    await vault.adapter.write("dst.txt", "old");
+    setMockPlatform("mobile");
+    await safeRename(
+      vault.adapter as unknown as import("obsidian").DataAdapter,
+      "src.txt",
+      "dst.txt",
+    );
+    expect(await vault.adapter.exists("src.txt")).toBe(false);
+    expect(await vault.adapter.read("dst.txt")).toBe("new");
+  });
+
+  it("on mobile: succeeds when destination doesn't exist (the common case)", async () => {
+    await vault.adapter.write("src.txt", "data");
+    setMockPlatform("mobile");
+    await safeRename(
+      vault.adapter as unknown as import("obsidian").DataAdapter,
+      "src.txt",
+      "dst.txt",
+    );
+    expect(await vault.adapter.read("dst.txt")).toBe("data");
   });
 });
