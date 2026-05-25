@@ -19,6 +19,7 @@ import {
   needsSanitization,
   sanitizeFilename,
 } from "./cross-platform";
+import { StaleStateError } from "../errors";
 import GitignoreInvariants from "./gitignore-invariants";
 import PushQueue, { EnqueueMeta } from "./push-queue";
 import SnapshotStore, { RemoteIdentity } from "./snapshot-store";
@@ -1392,7 +1393,7 @@ export class Sync2Manager {
       // exact path, the loop aborts, lastSync stays at expectedHead,
       // and the next sync retries — either succeeds (cases a/b resolve)
       // or re-fails until a fixed build is deployed (case c).
-      throw new Error(
+      throw new StaleStateError(
         `Sync2 pull: contents endpoint returned null for path the compare diff lists as present: ${path}`,
       );
     }
