@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { encodePathForGithub } from "../../src/github/client";
+import { encodePathForGithub } from "../../src/sync2/cross-platform";
 
 // Field bug 2026-05-25: the GitHub Contents API URL was built with raw
 // path interpolation, so `?` and other URL-syntax chars truncated the

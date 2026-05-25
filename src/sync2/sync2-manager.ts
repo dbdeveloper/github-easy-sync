@@ -18,7 +18,7 @@ import { atomicWriteFile } from "./atomic-write";
 import {
   needsSanitization,
   sanitizeFilename,
-} from "./filename-sanitizer";
+} from "./cross-platform";
 import GitignoreInvariants from "./gitignore-invariants";
 import PushQueue, { EnqueueMeta } from "./push-queue";
 import SnapshotStore, { RemoteIdentity } from "./snapshot-store";
