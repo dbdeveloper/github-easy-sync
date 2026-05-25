@@ -472,6 +472,97 @@
   instance of this audit. There are others; we just haven't been bitten
   by them yet.
 
+  ### 3.6 Visible push-queue depth on the ribbon sync icon
+
+  The plugin's ribbon `[Sync with GitHub]` icon currently carries a
+  numeric badge whose meaning is "how many unresolved conflicts the
+  user has." That signal is redundant with the status-bar `🔀 N`
+  indicator (which is the canonical home for the conflict count —
+  see PSEUDO-MERGE-MODE.md §5), and it tells the user nothing about
+  the state of the push pipeline itself. The most common
+  field-confusion pattern is: a user clicks Sync, the click body
+  finishes locally, drain runs in the background, the user can't
+  tell whether the click landed — so they click again and inflate
+  the queue.
+
+  Replace the badge with **the current depth of the push-queue** —
+  the number of batches currently on disk under `.push-queue/`
+  waiting for `drain()` to dispatch them.
+
+  **Display rules:**
+
+  - 0 batches on disk → no badge (idle state — same visual as
+    "nothing to sync").
+  - N > 0 batches → badge shows `(N)`.
+
+  **Lifecycle transitions** match the user's mental model of "I
+  clicked Sync; where did my work go?":
+
+  1. User clicks `[Sync with GitHub]`. The click body (local-only —
+     no network at this stage) materialises one batch into
+     `.push-queue/`. The badge flips to `(1)`.
+  2. `drain()` runs (immediately on the same click, or on the
+     interval tick). When the batch's push succeeds, the queue
+     directory is deleted; the badge returns to no-display.
+  3. **Offline scenario:** `drain()` raises a network error;
+     the batch survives on disk; the badge stays `(1)`. The
+     user notices the click "didn't go anywhere" without having
+     to inspect the log. Another click adds a second batch (or
+     accumulates into the first, per
+     `accumulateOfflineSyncs`) — badge becomes `(2)`. Continues
+     accumulating while offline.
+  4. **Reconnection:** the interval-tick drain processes the
+     queued batches one at a time. Badge decrements: `(3)` →
+     `(2)` → `(1)` → no-display. The decrement is the
+     reassurance signal — the user sees backlog shrinking.
+
+  **Why this is honest signal.** The push-queue depth is a
+  *real* property of the plugin's on-disk state; the conflict
+  count was a *derived* property of the snapshot + sibling
+  index. The push-queue depth changes only when an operation
+  the user themselves initiated (Sync click) or completed (drain
+  finish) modifies the queue — there's no surprise update. The
+  conflict count, by contrast, can change because *another
+  device* pushed a conflicting edit, which is an event the
+  ribbon icon has no business surfacing as a delta on the *Sync*
+  surface.
+
+  **Where the conflict count lives instead.** Two surfaces, both
+  opt-in via settings:
+
+  - Status bar `🔀 N` — unchanged from current behaviour.
+  - A NEW ribbon icon dedicated to the diff2 widget (see
+    `DIFF2_IMPLEMENTATION_PLAN.md` R2.7.4 — outside the scope of
+    this push-pipeline doc).
+
+  The sync icon stops being a status indicator for the conflict
+  layer; it becomes a status indicator for the push pipeline
+  alone. Cleaner separation.
+
+  **Implementation surface (notes for the implementer).**
+
+  - `PushQueue.depth()` (or similar) returns the count of
+    directory entries under `.push-queue/`. Cheap — already
+    listed by `queue.list()` in multiple places.
+  - The ribbon icon component subscribes to a "queue-depth-
+    changed" signal. Sources of changes:
+    - `enqueueOrMerge` (after persisting a new batch) emits +1
+      or +0 (depending on whether merge fold-in happened).
+    - `processBatch` (after `queue.delete(id)`) emits -1.
+    - Any startup path that finds pre-existing batches on disk
+      emits the current count once.
+  - This is a UI subscriber pattern — **no push-pipeline
+    behavior changes**. The queue is the source of truth; the
+    badge is a read-only mirror.
+
+  **Independence.** This shift is purely additive to Phases 1–5
+  and orthogonal to them. It can land in any release; sequencing
+  doesn't matter. The PR is small (one new event subscriber, one
+  badge-format change, the conflict-count badge removal). Its
+  shipping order in the broader plan is flexible — recommended
+  bundling with Phase 4 (typed errors) since both touch the
+  ribbon-status code path, but no hard dependency exists.
+
   ---
 
   ## 4. Phased Implementation
@@ -488,6 +579,7 @@
   | 3 | minor | `cross-platform.ts` module (§3.3) | ~3 days | Forbidden-character set, URL encoding, `safeRename`, platform predicates, validation-policy callable all live in one module. Old locations have thin re-exports with `@deprecated` JSDoc. No behavioural change; full unit + integration suite still green. Release with Phase 2 if timing aligns. |
   | 4 | minor | Typed error classes (§3.4) | ~1 week | New error hierarchy under `src/errors.ts`. GitHub client throws typed errors. `retryUntil` dispatches on class. Three highest-traffic catch sites (`sync()` in main, `processBatch`, `applyRemoteAddOrModify`) migrated to type-based dispatch. Logger records class name. Rest of the codebase migrates opportunistically. Release as `2.0.3-beta`. |
   | 5 | refactor | Silent-skip audit (§3.5) | ~3 days | One audit doc enumerating every skip site with its label. Every "unexpected" site throws `StaleStateError`. Every "deferred" / "already-correct" / "applied" site has a one-line comment with the label and reasoning. No behavioural change for the first three categories; the "unexpected" category gains explicit error surfacing. Release with Phase 4. |
+  | 6 | minor | Push-queue depth badge on the ribbon sync icon (§3.6) | ~2 days impl + review | Ribbon `[Sync with GitHub]` badge now reflects `PushQueue.depth()` rather than the conflict count. The conflict count moves off this icon entirely (status-bar `🔀 N` and the diff2 ribbon icon — see DIFF2 plan — are the two surfaces it lives on). Verify lifecycle transitions manually: click on idle vault → `(1)` → drain success → no-badge; offline → click → `(1)` accumulates; reconnect → decrement to no-badge. No automated test required for the badge text (UI surface), but the underlying `PushQueue.depth()` gets unit coverage. Release independently — any beta cycle, no dependency on Phases 1–5. |
 
   Dependencies between phases are minimal:
 
@@ -500,6 +592,8 @@
   - Phase 4 stands alone but is cleanest if it lands before Phase 5
     (so the audit has typed errors to use).
   - Phase 5 depends on Phase 4 for `StaleStateError`.
+  - Phase 6 stands alone. Touches the ribbon-status component (also
+    touched by Phase 4) but the two are orthogonal in code.
 
   Skipping any phase doesn't break the others. The roadmap is a budget
   allocation, not a critical path.
