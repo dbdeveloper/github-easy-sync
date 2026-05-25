@@ -27,14 +27,28 @@ jobs:
       - name: Create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Force-push of an already-published tag is a deploy
+        # scenario we want to support: the tag moves to a newer
+        # commit, CI re-runs, the artifacts on the release page
+        # should refresh in place. `gh release create` itself
+        # errors when a release with the same tag name already
+        # exists ("a release with the same tag name already
+        # exists: 2.0.1-beta4" — the 2026-05-25 incident, see
+        # docs/PUSH-REORGANIZATION.md §3.6). Fall through to
+        # `gh release upload --clobber` to overwrite the per-file
+        # assets in place when the release already exists.
         run: |
           if [[ "${{ github.ref_name }}" == *-beta* ]]; then
             gh release create "${{ github.ref_name }}" \
               --title="${{ github.ref_name }}" \
               --prerelease \
-              main.js manifest.json styles.css
+              main.js manifest.json styles.css \
+            || gh release upload "${{ github.ref_name }}" \
+              main.js manifest.json styles.css --clobber
           else
             gh release create "${{ github.ref_name }}" \
               --title="${{ github.ref_name }}" \
-              main.js manifest.json styles.css
+              main.js manifest.json styles.css \
+            || gh release upload "${{ github.ref_name }}" \
+              main.js manifest.json styles.css --clobber
           fi
