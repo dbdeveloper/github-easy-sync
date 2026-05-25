@@ -12,6 +12,7 @@ import {
 import { GitHubSyncSettings, DEFAULT_SETTINGS } from "./settings/settings";
 import GitHubSyncSettingsTab from "./settings/tab";
 import Logger from "./logger";
+import { describeError } from "./utils";
 import GithubClient from "./github/client";
 import GI from "./gi";
 import SnapshotStore from "./sync2/snapshot-store";
@@ -389,6 +390,16 @@ export default class GitHubSyncPlugin extends Plugin {
       conflictCounter,
       accumulateOfflineSyncs: this.settings.accumulateOfflineSyncs ?? false,
       autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? false,
+      // Hooked to Obsidian's link-aware rename so the pre-sync
+      // filename-sanitizer rewrites containing wiki-links automatically.
+      // `getAbstractFileByPath` returns null when the path vanished
+      // between the scanner's read and this callback's call (e.g. a
+      // concurrent external delete) — the manager logs and continues.
+      renameFile: async (oldPath: string, newPath: string): Promise<void> => {
+        const file = this.app.vault.getAbstractFileByPath(oldPath);
+        if (!file) return;
+        await this.app.fileManager.renameFile(file, newPath);
+      },
       onProgress: (initial: string) => {
         // Long-lived notice during the network phase — stays visible
         // until processQueue calls handle.hide(). The text is the
@@ -469,6 +480,12 @@ export default class GitHubSyncPlugin extends Plugin {
     try {
       await this.sync2Manager.syncAll();
     } catch (err) {
+      // Log BEFORE the Notice so the user-visible toast and the
+      // logged record always agree. Without this, the only artifact
+      // a failed click left behind was the transient Notice; the
+      // log showed nothing, making bug reports actionable only when
+      // the user happened to screenshot the toast in time.
+      await this.logger.error("syncAll click failed", { err: describeError(err) });
       new Notice(`Error syncing. ${err}`);
     }
     // Drain may have mutated ConflictStore (Phase A SHA-match
@@ -506,6 +523,8 @@ export default class GitHubSyncPlugin extends Plugin {
     try {
       await this.sync2Manager.syncFile(path);
     } catch (err) {
+      // Log BEFORE the Notice — see sync() rationale above.
+      await this.logger.error("syncFile click failed", { path, err: describeError(err) });
       new Notice(`Error syncing. ${err}`);
     }
     // See markDirty rationale in sync() above.

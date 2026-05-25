@@ -4,6 +4,54 @@
 
 import { base64ToArrayBuffer } from "obsidian";
 
+// Dump everything reachable about a caught value into a plain object.
+// Use at catch sites where we want maximum debug signal regardless of
+// what was thrown — Capacitor's native-bridge errors on iOS/Android,
+// strings, plain objects without an Error shape, undefined, etc. The
+// resulting object always serializes to something useful (never `{}`).
+export function describeError(err: unknown): Record<string, unknown> {
+  const info: Record<string, unknown> = {
+    type: typeof err,
+    string: safeString(err),
+  };
+  if (err === null) {
+    info.null = true;
+    return info;
+  }
+  if (err === undefined) {
+    info.undefined = true;
+    return info;
+  }
+  if (typeof err !== "object") {
+    return info;
+  }
+  const e = err as Record<string, unknown>;
+  info.ctor = (e as { constructor?: { name?: string } })?.constructor?.name;
+  // Known Error-shape fields. Read via direct access so prototype
+  // accessors (cross-realm Errors from Capacitor / WebView bridge)
+  // are pulled out alongside own properties.
+  for (const key of ["name", "message", "stack", "code", "cause"]) {
+    const v = e[key];
+    if (v !== undefined) info[key] = v;
+  }
+  // All own properties — covers structured error shapes with custom
+  // fields (HTTP error codes, plugin-specific context).
+  const ownProps: Record<string, unknown> = {};
+  for (const key of Object.getOwnPropertyNames(err)) {
+    if (!(key in info)) ownProps[key] = e[key];
+  }
+  if (Object.keys(ownProps).length > 0) info.ownProps = ownProps;
+  return info;
+}
+
+function safeString(v: unknown): string {
+  try {
+    return String(v);
+  } catch {
+    return "[unstringifiable]";
+  }
+}
+
 const TEXT_EXTENSIONS = [
   // Notes / docs
   ".md",
