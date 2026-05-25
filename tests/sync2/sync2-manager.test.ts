@@ -532,7 +532,7 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       size: 1,
     });
     f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
-    // Pre-flight validation (PUSH-REORGANIZATION §3.1) calls
+    // Pre-flight validation (PSEUDO-MERGE-MODE §12.1) calls
     // `getContentsAtRef(path, currentHead)` for every deletion entry
     // before sending the tree-create. The seed represents the file's
     // continued existence at the remote tip — the deletion is real,
@@ -759,7 +759,7 @@ describe("Sync2Manager.syncAll — basic flow", () => {
     });
     f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
     // Seed the path at currentHead so pre-flight validation
-    // (PUSH-REORGANIZATION §3.1) confirms the deletion is real (file
+    // (PSEUDO-MERGE-MODE §12.1) confirms the deletion is real (file
     // still on remote) rather than stale (already removed by another
     // device). Without this seed the validator would drop the entry.
     f.client.setContentAtRef("BRANCH_HEAD_INIT", "x.md", "stale-but-present");
@@ -1362,7 +1362,7 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       f.client.compare = origCompare;
     });
 
-    it("pre-flight validation drops a stale deletion and clears its snapshot row (PUSH-REORGANIZATION §3.1)", async () => {
+    it("pre-flight validation drops a stale deletion and clears its snapshot row (PSEUDO-MERGE-MODE §12.1)", async () => {
       // Setup: a previous sync recorded `Notes/stale.md` in the snapshot,
       // and ChangeDetector then emitted a delete for it (the file's
       // gone locally). But by the time push runs, another device has
@@ -1465,7 +1465,7 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       expect(f.store.get("Notes/live.md")).toBeUndefined();
     });
 
-    it("pre-flight validation: validator network failure aborts push and keeps lastSync (PUSH-REORGANIZATION §7.1)", async () => {
+    it("pre-flight validation: validator network failure aborts push and keeps lastSync (PSEUDO-MERGE-MODE §12.1)", async () => {
       // If `getContentsAtRef` itself errors during validation, we
       // cannot tell whether the entry is valid or stale. Policy:
       // abort the push and let the next drain retry — better than
@@ -1530,7 +1530,7 @@ describe("Sync2Manager.syncAll — basic flow", () => {
         ],
       });
 
-      // Phase 4 (PUSH-REORG §3.4 + §7.3): the throw is now
+      // Phase 4 (PSEUDO-MERGE-MODE §13 + §7.3): the throw is now
       // a `StaleStateError` instance, not a plain Error. Test
       // both the class and the message — catch sites that
       // dispatch on `instanceof StaleStateError` (vs plain

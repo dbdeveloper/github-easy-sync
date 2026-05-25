@@ -8,9 +8,10 @@ Version `2.0.1-beta` · AGPL-3.0 · Fork of
 
 ---
 
-## What's new in 2.0.1-beta
+## What's new in 2.0.1-beta4
 
-Conflict resolution rebuilt from the ground up. Full mechanics in
+Sync engine rebuilt from the ground up — both the conflict-
+resolution layer and the push pipeline. Full mechanics in
 [§Conflict resolution](#conflict-resolution) below; full design
 rationale in [docs/PSEUDO-MERGE-MODE.md](./docs/PSEUDO-MERGE-MODE.md).
 Headline changes:
@@ -45,6 +46,21 @@ Headline changes:
   renames `*.conflict-from-*` files to
   `<file>.unresolved-<original-ts>.<ext>` so a future re-enable
   starts clean.
+- **Cross-platform filename safety.** Files named with Windows-
+  forbidden characters (`< > : " | ? * \`) or Obsidian-wiki-
+  forbidden characters (`# ^ [ ]`) are automatically rewritten to
+  canonical Unicode replacements on both push and pull. A vault
+  authored on one platform stays usable from any other; see
+  [§11 of the design doc](./docs/PSEUDO-MERGE-MODE.md).
+- **Pre-flight validation on every push.** Stale deletion entries
+  (a path another device already removed) are detected before the
+  tree-create request is sent and dropped silently — no more 422
+  `GitRPC::BadObjectState` failures from multi-device race
+  conditions; see [§12.1 of the design doc](./docs/PSEUDO-MERGE-MODE.md).
+- **Push-queue depth visible on the ribbon.** The `[Sync with
+  GitHub]` icon shows `(N)` when batches are waiting to drain —
+  click feedback you can see, offline accumulations you can count,
+  reconnection progress that decrements in front of you.
 
 ---
 

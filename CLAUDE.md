@@ -15,10 +15,10 @@ An Obsidian plugin that syncs a local vault with a GitHub repository using **onl
 ## Where to read what
 
 - **User-facing overview, installation, settings reference, conflict-resolution UX, migration from other plugins**: [`README.md`](./README.md).
-- **Conflict-resolution design rationale, suffix semantics (`.sync-tmp` vs `.sync-bak`), three-step / five-step atomic protocols, scenarios A–E, glossary**: [`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md). **Canonical spec for the conflict layer** — when working on `src/sync2/conflict-*.ts`, `src/sync2/atomic-write.ts`, `src/sync2/views/`, or the conflict tests, read it first. Code comments cross-reference the article's section numbers (§4.3, §9.4, §10 Scenario E, etc.).
-- **Diff2 widget design** (UI/UX layer on top of pseudo-merge mode; subproject work-in-progress on the `diff2` branch — no code yet in `src/diff2/` as of 2.0.1-beta): [`docs/DIFF2_IMPLEMENTATION_PLAN.md`](./docs/DIFF2_IMPLEMENTATION_PLAN.md). **Canonical spec for the diff-edit widget**, conflict/history/deleted views (R2.2–R2.4), `TrashStore` (R3), external-tool integration (R6), CM6 unified DiffPane (R7), R7.11 exit protocol with proactive sibling cleanup, and crash resilience (R8). When working on `src/diff2/` or any change that touches the diff-edit widget, read it first — and read it in tandem with [`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md), which the plan repeatedly cross-references (§5 Phase A/B, §8 byte-match rule, §9.4/§9.5 staging protocols, §9.7 filesystem-authoritative, §10 Scenarios C/E).
+- **Canonical spec for the whole sync engine** — conflict-resolution layer (sibling files, conflict branches, three-step / five-step atomic protocols, scenarios A–E) AND push pipeline layer (pre-flight validation, pending-deletions queue, push-queue depth signal) AND cross-cutting infrastructure (cross-platform contracts, typed error hierarchy, skip-class discipline): [`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md). **Read this first** when working on anything under `src/sync2/`, `src/errors.ts`, the GitHub client (`src/github/client.ts`), or any test that exercises the engine. Code comments cross-reference the article's section numbers (§4.3, §9.4, §10 Scenario E, §11 cross-platform, §12.1 pre-flight validation, §12.2 pending-deletions, §13 error taxonomy, §14 skip-class, §16 field postmortems, etc.).
+- **Diff2 widget design** (UI/UX layer on top of pseudo-merge mode; subproject work-in-progress on the `diff2` branch — no code yet in `src/diff2/` as of 2.0.1-beta4): [`docs/DIFF2_IMPLEMENTATION_PLAN.md`](./docs/DIFF2_IMPLEMENTATION_PLAN.md). **Canonical spec for the diff-edit widget**, conflict/history/deleted views (R2.2–R2.4), `TrashStore` (R3), external-tool integration (R6), CM6 unified DiffPane (R7), R7.11 exit protocol with proactive sibling cleanup, and crash resilience (R8). When working on `src/diff2/` or any change that touches the diff-edit widget, read it first — and read it in tandem with [`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md), which the plan repeatedly cross-references (§5 Phase A/B, §8 byte-match rule, §9.4/§9.5 staging protocols, §9.7 filesystem-authoritative, §10 Scenarios C/E, §11 cross-platform, §12 push pipeline).
 
-Behaviour described in the article is locked in by the unit + integration suites. If you change anything in the conflict layer and the article disagrees, fix the code OR update the article — don't let them drift.
+Behaviour described in the article is locked in by the unit + integration suites. If you change anything in the engine and the article disagrees, fix the code OR update the article — don't let them drift.
 
 ## Commands
 
@@ -50,13 +50,18 @@ src/
 ├── gi.ts                            # GI (gitignore matcher) — path-browserify, mobile-safe
 ├── logger.ts                        # Truncated JSON log file
 ├── utils.ts                         # hasTextExtension, retry helpers, calculateGitBlobSHA,
-│                                    #  isRetriableStatus / isWriteRetriableStatus / isRetriableError
-├── github/client.ts                 # Thin requestUrl wrapper, retryUntil
+│                                    #  isRetriableStatus / isWriteRetriableStatus / isRetriableError,
+│                                    #  describeError (typed-error extractor used by safeStringify)
+├── errors.ts                        # SyncError class hierarchy: NetworkError, GithubAPIError +
+│                                    #  4 status subclasses, PlatformError, StaleStateError, makeGithubAPIError
+│                                    #  dispatcher. PSEUDO-MERGE-MODE §13.
+├── github/client.ts                 # Thin requestUrl wrapper, retryUntil; throws via makeGithubAPIError
 ├── settings/
 │   ├── settings.ts                  # GitHubSyncSettings + DEFAULT_SETTINGS
 │   └── tab.ts                       # Settings UI (trim onChange, Reset modal)
 └── sync2/
     ├── sync2-manager.ts             # Orchestrator: syncAll, syncFile, drain, processBatch,
+    │                                #  validateDeletionsAgainstHead (pre-flight, §12.1),
     │                                #  finalizeConflictBranchIfReady, synthesizeResolutionSideBatches,
     │                                #  registerConflictAndDropPath, pushConflictPathsToBranch
     ├── interval-scheduler.ts        # Periodic tick + onload startup (testable in isolation)
@@ -64,6 +69,10 @@ src/
     ├── push-queue.ts                # .push-queue/ persistence + markers + meta serdes + enqueueSynthetic
     ├── tree-builder.ts              # Batch → tree entries (with uploadedBlobs skip)
     ├── snapshot-store.ts            # github-easy-sync-metadata.json (file name is historic)
+    ├── pending-deletions-store.ts   # .pending-deletions/<id>/meta.json — pull-sanitize delete-intents
+    │                                #  (PSEUDO-MERGE-MODE §12.2)
+    ├── cross-platform.ts            # Centralized contracts: sanitizeFilename (12 forbidden ASCII →
+    │                                #  Unicode), encodePathForGithub, safeRename. PSEUDO-MERGE-MODE §11.
     ├── gitignore-invariants.ts      # Invariant .gitignore blocks; always-write enforce
     ├── commit-message.ts            # Hardcoded format* helpers; commitMessageForBatch
     ├── atomic-write.ts              # 5-step atomicWriteFile + stagingPathFor + AtomicWriteRecovery.sweep
@@ -171,6 +180,6 @@ The bucket form takes a glob — `tests/integration/scenarios/sync2/conflicts*` 
 - **No scheduler logic in `main.ts`.** Periodic-tick decisions (interval enabled vs watchdog vs `autoCommitOnSync`) and the onload-startup pulse live in `src/sync2/interval-scheduler.ts` so they can be unit-tested in isolation under a fake timer. If you find yourself adding an `setInterval` or `app.workspace.onLayoutReady` callback for sync purposes inside `main.ts`, move it into `IntervalScheduler` instead.
 - **`drain()` is re-entrant-safe via a `running` flag** on `Sync2Manager`. Concurrent `syncAll()` calls (e.g. interval tick fires while user click is mid-flight) collapse into one drain — the second call returns immediately. Don't bypass this with a separate code path; the integration suite's H3 test pins the serialisation.
 - **Commit messages are hardcoded** in `src/sync2/commit-message.ts` (`formatSyncMessage`, `formatResolveConflictMessage`, etc.). Don't reintroduce a per-user template field — the design choice was deliberate (date/time live in commit metadata; provenance lives in the trailing `(deviceLabel)` suffix).
-- **When working on conflict resolution**, [`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md) is the canonical spec the code targets. Code comments reference the article's section numbers (e.g. `§9.4`, `§10 Scenario E`); use those to navigate between code and design rationale.
+- **When working on conflict resolution OR the push pipeline OR cross-cutting infrastructure** (cross-platform contracts in `cross-platform.ts`, typed errors in `errors.ts`, pending-deletions in `pending-deletions-store.ts`, skip-class annotations in any loop), [`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md) is the canonical spec the code targets. Code comments reference the article's section numbers (e.g. `§9.4`, `§10 Scenario E`, `§11 cross-platform contracts`, `§12.1 pre-flight validation`, `§13 error taxonomy`, `§14 skip-class`); use those to navigate between code and design rationale. The bug catalog in `§16 Field Postmortems` is the triage index for similar future symptoms.
 - **When working on `src/diff2/`**, [`docs/DIFF2_IMPLEMENTATION_PLAN.md`](./docs/DIFF2_IMPLEMENTATION_PLAN.md) is the canonical spec. Diff2 is **purely additive UI/UX on top of pseudo-merge mode**: it must not change `ConflictStore` semantics, never bypass Phase A/B at drain start, and never push commits / mutate the conflict branch directly (that's `sync2-manager`'s job). The two operations diff2 may perform on the vault are (a) write base-file bytes through `atomicWriteFile`, and (b) `adapter.remove(siblingPath)` as the R7.11 proactive-cleanup step when `SHA(base) == SHA(sibling)`. Everything else is a `sync2/` concern that diff2 only observes.
 - **Diff2 → sync2 dependency direction.** When `src/diff2/` modules start landing, they may import from `src/sync2/` (read `ConflictStore`, subscribe to `ConflictCounter`, observe `Sync2Manager` events). But **`src/sync2/` must never import from `src/diff2/`**. This keeps the sync engine buildable and testable without the UI layer (e.g., for sync-only regression runs and for the existing integration suite), and preserves the option to ship `src/diff2/` as a separate plugin later. Any new edge in `src/sync2/*.ts` that imports `../diff2/...` is a regression — surface it instead of bridging.

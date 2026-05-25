@@ -1,5 +1,5 @@
 // Unit tests for the typed-error hierarchy from src/errors.ts
-// (PUSH-REORGANIZATION §3.4). The tests lock in the contract that
+// (PSEUDO-MERGE-MODE §13). The tests lock in the contract that
 // catch sites rely on:
 //   - `instanceof` works for both the specific subclass and the
 //     parent classes (so `err instanceof GithubAPIError` catches
@@ -103,7 +103,7 @@ describe("errors — class hierarchy", () => {
   });
 
   it("`body` is preserved when passed (for §7.4 message-body inspection)", () => {
-    // PUSH-REORG §7.4 decided that all 422 → ValidationError, with
+    // PSEUDO-MERGE-MODE §13 decided that all 422 → ValidationError, with
     // sub-causes distinguished by `body.message`. The catch sites
     // need to read body off the error directly.
     const body = {

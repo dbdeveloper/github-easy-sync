@@ -1,6 +1,6 @@
 // Unit tests for PendingDeletionsStore — the explicit pending-
 // deletions queue that replaces 2.0.1-beta2's phantom-snapshot trick.
-// See docs/PUSH-REORGANIZATION.md §3.2 for design rationale.
+// See docs/PSEUDO-MERGE-MODE.md §3.2 for design rationale.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "fs";
@@ -234,7 +234,7 @@ describe("PendingDeletionsStore", () => {
     expect(after).toEqual(before);
   });
 
-  // ── clear() (Reset semantics — see PUSH-REORGANIZATION.md §3.2) ───
+  // ── clear() (Reset semantics — see PSEUDO-MERGE-MODE.md §12.2) ───
 
   it("clear() wipes the whole on-disk directory and the in-memory cache", async () => {
     await store.add("a.md", {

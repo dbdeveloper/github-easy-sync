@@ -34,7 +34,7 @@ jobs:
         # errors when a release with the same tag name already
         # exists ("a release with the same tag name already
         # exists: 2.0.1-beta4" — the 2026-05-25 incident, see
-        # docs/PUSH-REORGANIZATION.md §3.6). Fall through to
+        # docs/PSEUDO-MERGE-MODE.md §12.3). Fall through to
         # `gh release upload --clobber` to overwrite the per-file
         # assets in place when the release already exists.
         run: |
