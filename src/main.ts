@@ -69,7 +69,11 @@ export default class GitHubSyncPlugin extends Plugin {
   // Status-bar indicator and ribbon-icon badge are created when the
   // user's settings turn the corresponding bar/ribbon on.
   conflictStatusIndicator: ConflictStatusIndicator | null = null;
-  ribbonConflictBadge: HTMLElement | null = null;
+  // PUSH-REORG §3.6: the ribbon sync-icon's badge now shows
+  // push-queue depth (count of pending batches in .push-queue/),
+  // not the unresolved-conflict count. Fed by Sync2Manager's
+  // onQueueDepthChanged callback.
+  ribbonPendingBatchesBadge: HTMLElement | null = null;
 
   // Vault listeners — sibling-file delete/rename closes the matching
   // conflict record. Refs kept so we can offref them on unload.
@@ -519,6 +523,13 @@ export default class GitHubSyncPlugin extends Plugin {
       // Left as a no-op so tests + future wiring can still depend on
       // the callback existing in the deps surface.
       onSyncCompleted: () => {},
+      // PUSH-REORG §3.6: push-queue depth changes drive the ribbon
+      // sync-icon's badge. Fired by Sync2Manager after every
+      // persistent .push-queue/ mutation (enqueueOrMerge add,
+      // processBatch delete, etc).
+      onQueueDepthChanged: (depth: number) => {
+        this.refreshRibbonPendingBatchesBadge(depth);
+      },
     });
 
     // Conflict resolution events (sibling delete, edit, rename) are
@@ -647,24 +658,33 @@ export default class GitHubSyncPlugin extends Plugin {
   refreshConflictUI(): void {
     const count = this.conflictCounter?.getValue() ?? 0;
     this.conflictStatusIndicator?.refresh(count);
-    this.refreshRibbonConflictBadge(count);
+    // PUSH-REORG §3.6: the ribbon sync-icon's badge is NO LONGER
+    // driven by conflict-count — it shows push-queue depth instead
+    // (see refreshRibbonPendingBatchesBadge, fed by Sync2Manager's
+    // onQueueDepthChanged callback). Conflict-count is still
+    // surfaced via the status-bar 🔀 N indicator; a future diff2
+    // ribbon icon will optionally double-up on that signal
+    // (DIFF2_IMPLEMENTATION_PLAN.md R2.7.4).
   }
 
-  private refreshRibbonConflictBadge(count: number): void {
+  // Subtle absolute-positioned numeric pill in the ribbon sync
+  // icon's corner. The exact styling is left to user themes — we
+  // attach a CSS class so theme authors can override.
+  // Visibility rules (PUSH-REORG §3.6):
+  //   depth === 0 → no badge (idle state).
+  //   depth >= 1  → `(N)` badge in orange pill.
+  private refreshRibbonPendingBatchesBadge(depth: number): void {
     if (!this.syncRibbonIcon) return;
-    if (count <= 0) {
-      this.ribbonConflictBadge?.remove();
-      this.ribbonConflictBadge = null;
+    if (depth <= 0) {
+      this.ribbonPendingBatchesBadge?.remove();
+      this.ribbonPendingBatchesBadge = null;
       return;
     }
-    if (!this.ribbonConflictBadge) {
-      // Subtle absolute-positioned numeric pill in the ribbon icon's
-      // corner. The exact styling is left to user themes — we attach
-      // a CSS class so theme authors can override.
-      this.ribbonConflictBadge = this.syncRibbonIcon.createSpan({
-        cls: "github-easy-sync-ribbon-conflict-badge",
+    if (!this.ribbonPendingBatchesBadge) {
+      this.ribbonPendingBatchesBadge = this.syncRibbonIcon.createSpan({
+        cls: "github-easy-sync-ribbon-pending-batches-badge",
       });
-      const el = this.ribbonConflictBadge;
+      const el = this.ribbonPendingBatchesBadge;
       el.style.position = "absolute";
       el.style.top = "2px";
       el.style.right = "2px";
@@ -680,10 +700,10 @@ export default class GitHubSyncPlugin extends Plugin {
       el.style.pointerEvents = "none";
       this.syncRibbonIcon.style.position = "relative";
     }
-    this.ribbonConflictBadge.setText(String(count));
-    this.ribbonConflictBadge.setAttribute(
+    this.ribbonPendingBatchesBadge.setText(String(depth));
+    this.ribbonPendingBatchesBadge.setAttribute(
       "aria-label",
-      `${count} pending sync conflict${count === 1 ? "" : "s"}`,
+      `${depth} push batch${depth === 1 ? "" : "es"} pending`,
     );
   }
 
@@ -746,12 +766,27 @@ export default class GitHubSyncPlugin extends Plugin {
       "Sync with GitHub",
       this.sync.bind(this),
     );
-    this.refreshConflictUI();
+    // Seed the badge with the current push-queue depth so the icon
+    // reflects on-disk state on first paint — covers the case where
+    // the plugin loads with pre-existing batches (offline session,
+    // crash recovery, etc.).
+    void this.refreshSyncRibbonInitial();
+  }
+
+  private async refreshSyncRibbonInitial(): Promise<void> {
+    try {
+      const queue = (this.sync2Manager as unknown as { queue: PushQueue })
+        .queue;
+      const ids = await queue.list();
+      this.refreshRibbonPendingBatchesBadge(ids.length);
+    } catch {
+      // ignored — startup race, the next sync click refreshes anyway
+    }
   }
 
   hideSyncRibbonIcon(): void {
-    this.ribbonConflictBadge?.remove();
-    this.ribbonConflictBadge = null;
+    this.ribbonPendingBatchesBadge?.remove();
+    this.ribbonPendingBatchesBadge = null;
     this.syncRibbonIcon?.remove();
     this.syncRibbonIcon = null;
   }
