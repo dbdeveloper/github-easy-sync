@@ -289,4 +289,38 @@ describe("PendingDeletionsStore", () => {
     const reread = store.getByPath("note.md");
     expect(reread?.id).toBe(rec.id);
   });
+
+  // ── migration from phantom-snapshot entries ──────────────────────
+
+  it("migration source records 'migration-from-snapshot' and the lastSync commit", async () => {
+    // Exercises the source-tagging path used by main.ts on first
+    // load after the 2.0.1-beta4 upgrade. The migration helper
+    // iterates SnapshotStore.paths(), filters mtime===0+size===0
+    // entries (the phantom signature), and calls add() with
+    // source='migration-from-snapshot' and observedAtCommit set to
+    // the snapshot's lastSyncCommitSha (or "" when null).
+    //
+    // We don't import the helper directly here — that's a main.ts
+    // concern — but we lock the store contract so future changes
+    // to the source tag fail loudly. The test models the call
+    // shape the migration uses.
+    const rec = await store.add("Notes/legacy-phantom.md", {
+      source: "migration-from-snapshot",
+      observedAtCommit: "last-sync-sha-abc123",
+      remoteSha: "blob-from-phantom",
+    });
+    expect(rec.source).toBe("migration-from-snapshot");
+    expect(rec.observedAtCommit).toBe("last-sync-sha-abc123");
+
+    // Round-trip through disk to confirm the source tag persists.
+    const store2 = new PendingDeletionsStore({
+      vault: vault as unknown as import("obsidian").Vault,
+      configDir: CONFIG_DIR,
+      selfPluginId: SELF,
+    });
+    await store2.load();
+    expect(store2.getByPath("Notes/legacy-phantom.md")?.source).toBe(
+      "migration-from-snapshot",
+    );
+  });
 });
