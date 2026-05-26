@@ -29,7 +29,6 @@
 //   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R7 (DiffPane form — Phase 2)
 
 import { ItemView, Notice, type Vault, WorkspaceLeaf } from "obsidian";
-import { atomicWriteFile } from "../sync2/atomic-write";
 import type SnapshotStore from "../sync2/snapshot-store";
 import type { ConflictCounter } from "../sync2/conflict-counter";
 import type ConflictStore from "../sync2/conflict-store";
@@ -41,6 +40,7 @@ import {
   DiffEditSubTab,
   DiffEditViewState,
 } from "./events";
+import { executeExitProtocol } from "./exit-protocol";
 import { findAllConflicts, type ConflictEntry } from "./synthetic-detector";
 import { renderConflictsToolbar } from "./toolbar-conflicts";
 
@@ -307,10 +307,13 @@ export class DiffEditView extends ItemView {
   }
 
   // R7.7.c step 1 — write current buffer to vault base file.
+  // R7.7.c step 2 (Phase 4) — proactive sibling cleanup: for each
+  //   sibling with SHA(sibling) === SHA(base) the post-write,
+  //   adapter.remove(siblingPath). Performed inside
+  //   executeExitProtocol (src/diff2/exit-protocol.ts).
   // Step 4 (CM6 history null) is implicit when activeDiffPane is
   // disposed inside render(). Step 5 (close detail view) is the
   // `[←]` back-to-list transition done at the end of this method.
-  // Step 2 (proactive sibling cleanup via SHA-compare) is Phase 4.
   // Step 3 (autosave cleanup) is Phase 5.
   private async exitDetailView(entry: ConflictEntry): Promise<void> {
     const pane = this.activeDiffPane;
@@ -322,24 +325,24 @@ export class DiffEditView extends ItemView {
 
     const newOursText = pane.getDocText();
     try {
-      const bytes = new TextEncoder().encode(newOursText)
-        .buffer as ArrayBuffer;
-      // atomicWriteFile uses the 5-step protocol from
-      // PSEUDO-MERGE-MODE.md §9.3 — crash-safe with .sync-tmp +
-      // .sync-bak. The optional afterCommit hook is used by sync2
-      // for snapshot recordSync; in the diff2-write case we leave
-      // it undefined (sibling cleanup + snapshot bookkeeping happen
-      // on the next [Sync] click via Phase A — see R7.7.c).
-      await atomicWriteFile(
-        this.deps.vault,
+      const result = await executeExitProtocol(
+        { vault: this.deps.vault },
         entry.basePath,
-        bytes,
-        undefined,
+        newOursText,
       );
-      new Notice(`Saved ${entry.basePath}`);
+      const cleaned = result.siblingsRemoved.length;
+      const suffix =
+        cleaned === 0
+          ? ""
+          : cleaned === 1
+            ? " (1 redundant sibling cleaned)"
+            : ` (${cleaned} redundant siblings cleaned)`;
+      new Notice(`Saved ${entry.basePath}${suffix}`);
     } catch (err) {
       new Notice(`Failed to save ${entry.basePath}: ${String(err)}`);
-      // Stay in detail view so the user doesn't lose work.
+      // Step 1 failed — stay in detail view so the user doesn't
+      // lose work. Step 2 failures inside executeExitProtocol are
+      // swallowed best-effort; only step 1 throws.
       return;
     }
 
