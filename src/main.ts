@@ -155,13 +155,19 @@ export default class GitHubSyncPlugin extends Plugin {
         callback: this.syncCurrentFile.bind(this),
       });
 
-      // Diff-Edit widget — Phase 0 scaffolding. Registers the view
-      // type so workspace can instantiate it, plus the four commands
-      // that route into it. Real list/detail content lands in later
-      // phases (see DIFF2_IMPLEMENTATION_PLAN.md §R12).
+      // Diff-Edit widget — Phase 1 (conflicts list + sub-tabs + stub
+      // detail view). Registers the view type so workspace can
+      // instantiate it; dependencies (vault, conflictStore,
+      // conflictCounter) passed via closure since the view needs
+      // them to populate the list and react to changes.
       this.registerView(
         DIFF2_EDIT_VIEW_TYPE,
-        (leaf) => new DiffEditView(leaf),
+        (leaf) =>
+          new DiffEditView(leaf, {
+            vault: this.app.vault,
+            conflictStore: this.conflictStore,
+            conflictCounter: this.conflictCounter,
+          }),
       );
       this.addCommand({
         id: "open-diff-edit",
@@ -825,13 +831,15 @@ export default class GitHubSyncPlugin extends Plugin {
     this.updateStatusBarItem();
     // Conflict-count indicator lives in its own addStatusBarItem
     // element so user themes can style it independently. Click
-    // opens the first sibling in the editor (same shortcut the
-    // pre-sync modal's "Resolve" button uses).
+    // opens the Diff-Edit view (Phase 1+) — replaces the prior
+    // "open first sibling in editor" shortcut so users get the
+    // structured conflicts list directly. See DIFF2_IMPLEMENTATION_PLAN
+    // §R2.7.3 + R9.1 Phase 1 acceptance.
     if (!this.conflictStatusIndicator) {
       const indicatorParent = this.addStatusBarItem();
       this.conflictStatusIndicator = new ConflictStatusIndicator(
         indicatorParent,
-        () => void this.openFirstSibling(),
+        () => void this.activateDiffEditView(),
       );
     }
     this.refreshConflictUI();

@@ -1,34 +1,70 @@
-// Reverse of conflict-store.ts::buildSiblingPath. Given a sibling vault
-// path of the form
+// Helpers for parsing the sibling-file naming scheme produced by
+// `src/sync2/conflict-store.ts::buildSiblingPath`:
 //
-//   "<dir>/<stem>.conflict-from-<label>-<isoTs>.<ext>"
+//   "<dir>/<stem>.conflict-from-<deviceLabel>-<isoTs>.<ext>"
 //
-// return the corresponding base path "<dir>/<stem>.<ext>" — or
-// "<dir>/<stem>" when the base has no extension or is a dotfile
-// (e.g. ".gitignore"). Returns null when the input does not match the
-// sibling-naming convention; the caller treats null as "this is not a
-// sibling I should reverse".
+// where <isoTs> is "YYYY-MM-DDTHH-MM-SSZ" (the canonical shape
+// buildSiblingPath emits). Both helpers below share the same anchor
+// regex; they differ only in what they reconstruct/return.
 //
-// The regex pattern is identical to conflict-store.ts::unresolvedNameFor,
-// anchored on the exact iso shape (YYYY-MM-DDTHH-MM-SSZ) that
-// buildSiblingPath produces. The two helpers reverse the same naming
-// scheme; they differ only in what they reconstruct: this one returns
-// the base path, the other returns the "unresolved-<iso>" rename form
-// used at plugin reset.
+// Two helpers, two use cases:
+//   - stripConflictSuffix(path) → base path "<dir>/<stem>.<ext>" only.
+//     Used by TrashStore.confirmResolved (layer 1b of R3.5) to match
+//     sibling-trash entries by base path.
+//   - parseSiblingFilename(path) → full structured tuple
+//     { basePath, deviceLabel, isoTimestamp }. Used by the conflicts
+//     list (Phase 1) to render device label + timestamp in each row.
+
+const SIBLING_PATTERN =
+  /^(.+?)\.conflict-from-(.+)-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)(\..+)?$/;
+
+// Returns the base path corresponding to a sibling file. Returns null
+// when the input does not match the sibling-naming convention; the
+// caller treats null as "this is not a sibling I should reverse".
 //
-// Used by TrashStore.confirmResolved (layer 1b of R3.5,
-// docs/DIFF2_IMPLEMENTATION_PLAN.md §R3.5) to identify sibling-trash
-// entries whose base path matches a just-resolved conflict's base path.
+// Canonical specs: docs/DIFF2_IMPLEMENTATION_PLAN.md §R3.5, §R3.10.
 export function stripConflictSuffix(siblingPath: string): string | null {
   const slash = siblingPath.lastIndexOf("/");
   const dir = slash === -1 ? "" : siblingPath.slice(0, slash + 1);
   const basename = slash === -1 ? siblingPath : siblingPath.slice(slash + 1);
 
-  const m = basename.match(
-    /^(.+?)\.conflict-from-.+-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)(\..+)?$/,
-  );
+  const m = basename.match(SIBLING_PATTERN);
   if (!m) return null;
 
-  const [, stem, , ext = ""] = m;
+  const [, stem, , , ext = ""] = m;
   return `${dir}${stem}${ext}`;
+}
+
+// Parsed components of a sibling filename. `basePath` is the
+// reconstructed base file path (same value stripConflictSuffix
+// returns). `deviceLabel` is the bracket-sanitized device segment
+// (parens replaced with brackets by buildSiblingPath — caller must
+// reverse if they want the original label, but for display the
+// bracket form is fine). `isoTimestamp` is the exact 20-character
+// "YYYY-MM-DDTHH-MM-SSZ" substring; convert to Date via
+// `new Date(isoTimestamp.replace(/-/g, ":").replace(/T(\d\d):(\d\d):/, "T$1:$2:").replace("Z", ".000Z"))`
+// — actually it's simpler to use the raw string for display since
+// it's already ISO-like.
+export interface ParsedSibling {
+  basePath: string;
+  deviceLabel: string;
+  isoTimestamp: string;
+}
+
+export function parseSiblingFilename(
+  siblingPath: string,
+): ParsedSibling | null {
+  const slash = siblingPath.lastIndexOf("/");
+  const dir = slash === -1 ? "" : siblingPath.slice(0, slash + 1);
+  const basename = slash === -1 ? siblingPath : siblingPath.slice(slash + 1);
+
+  const m = basename.match(SIBLING_PATTERN);
+  if (!m) return null;
+
+  const [, stem, deviceLabel, isoTimestamp, ext = ""] = m;
+  return {
+    basePath: `${dir}${stem}${ext}`,
+    deviceLabel,
+    isoTimestamp,
+  };
 }

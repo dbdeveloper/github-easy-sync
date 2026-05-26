@@ -1,39 +1,76 @@
 // Diff-Edit widget — the host ItemView that Obsidian opens in a tab.
-// Phase 0 ships only the scaffolding: view registers with workspace,
-// `Open Diff-Edit` command opens an empty tab, contentEl renders a
-// placeholder. Future phases populate contentEl with:
 //
-//   Phase 1 — sub-tabs header (Conflicts / Deleted) + list-view body
-//   Phase 2 — DiffPane (CM6 unified merge view) for detail
+// Phase 1 ships:
+//   - Sub-tabs header (Conflicts / Deleted).
+//   - Conflicts list body (real, populated via synthetic-detector).
+//   - Deleted body placeholder (Phase 9b).
+//   - Detail-view placeholder reachable by clicking a conflict row;
+//     `[←]` back arrow returns to list. The DiffPane itself lands in
+//     Phase 2 — Phase 1's detail view is a stub that just shows the
+//     selected (basePath, siblingPath).
+//   - Subscribes to ConflictCounter so the list refreshes when the
+//     vault changes (sibling create/delete/rename).
+//
+// Future phases:
+//   Phase 2 — DiffPane render in detail view
 //   Phase 3 — chunk-action buttons + group toolbar (resolve flow)
 //   Phase 5 — autosave + recovery dialog on reopen
-//   Phase 6 — entry-point wiring (file-menu, status-bar click,
-//             ribbon click, summary modal)
-//   Phase 7 — History list + Restore-this-version
+//   Phase 6 — entry-point hooks (file-menu, post-sync modal,
+//             status-bar/ribbon click already wired to activateView
+//             from main.ts)
+//   Phase 7 — History list + restore
 //   Phase 8 — Compare picker + compare-mode
 //   Phase 9b — Deleted-mode UI + restore
 //
 // Canonical specs:
 //   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R2.0 (single-pane shell)
-//   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R7 (DiffPane form)
-//
-// The view type ID is used by Obsidian's workspace to dispatch
-// setViewState({type: ...}) calls back to this class via the
-// factory registered in main.ts::onload.
+//   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R2.2 (conflicts list)
+//   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R2.7.5 (default sub-tab)
+//   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R7 (DiffPane form — Phase 2)
 
-import { ItemView, WorkspaceLeaf } from "obsidian";
-import { DEFAULT_DIFF_EDIT_VIEW_STATE, DiffEditViewState } from "./events";
+import { ItemView, type Vault, WorkspaceLeaf } from "obsidian";
+import type { ConflictCounter } from "../sync2/conflict-counter";
+import type ConflictStore from "../sync2/conflict-store";
+import { renderConflictsList } from "./conflicts-list";
+import {
+  DEFAULT_DIFF_EDIT_VIEW_STATE,
+  DiffEditSubTab,
+  DiffEditViewState,
+} from "./events";
+import { findAllConflicts, type ConflictEntry } from "./synthetic-detector";
 
 export const DIFF2_EDIT_VIEW_TYPE = "diff2-edit-view";
 
-export class DiffEditView extends ItemView {
-  // State is settable by command callers before / after setViewState
-  // so they can drop the view straight into a particular sub-tab or
-  // detail session. Phase 0 ignores transitions; Phase 1+ acts on them.
-  private state: DiffEditViewState = DEFAULT_DIFF_EDIT_VIEW_STATE;
+export interface DiffEditViewDeps {
+  vault: Vault;
+  conflictStore: ConflictStore;
+  conflictCounter: ConflictCounter;
+}
 
-  constructor(leaf: WorkspaceLeaf) {
+// Phase 1 owns the navigation state machine inside the view: which
+// sub-tab is active, and (when in detail mode) which entry the user
+// drilled into. Future phases extend this with compare/history modes.
+type Phase1ViewState =
+  | { mode: "list"; tab: DiffEditSubTab }
+  | { mode: "detail"; entry: ConflictEntry; tab: DiffEditSubTab };
+
+function initialState(): Phase1ViewState {
+  // R2.7.5 — default sub-tab is always Conflicts (deterministic UX
+  // regardless of pending-count). Even when N === 0 the conflicts
+  // tab opens; user must explicitly switch to Deleted.
+  return { mode: "list", tab: "conflicts" };
+}
+
+export class DiffEditView extends ItemView {
+  private viewState: Phase1ViewState = initialState();
+  private readonly deps: DiffEditViewDeps;
+  // Unsubscribe handle from ConflictCounter.subscribe — set on open,
+  // called on close.
+  private unsubscribeCounter: (() => void) | null = null;
+
+  constructor(leaf: WorkspaceLeaf, deps: DiffEditViewDeps) {
     super(leaf);
+    this.deps = deps;
   }
 
   getViewType(): string {
@@ -41,48 +78,154 @@ export class DiffEditView extends ItemView {
   }
 
   getDisplayText(): string {
-    // Title shown in the tab header. Later phases may vary by state
-    // (e.g., "Diff-Edit · Conflicts" / "Diff-Edit · history of note.md").
     return "Diff-Edit";
   }
 
   getIcon(): string {
-    // Matches the ribbon icon convention from R2.7.4.
     return "git-merge";
   }
 
-  // Public state-setter — Phase 0 stores but doesn't render-react.
-  // Later phases call requestRefresh()/re-render in response.
+  // Phase 0 API kept for forward-compat. Phase 6 may use this to drop
+  // the view straight into a particular sub-tab from external entry
+  // points (file-menu, summary modal). Phase 1 ignores
+  // compare/history shapes — they're stubbed out below.
   setDiffEditState(state: DiffEditViewState): void {
-    this.state = state;
+    if (state.kind === "sub-tab") {
+      this.viewState = { mode: "list", tab: state.tab };
+      this.render();
+    }
+    // compare-detail / history-detail not handled in Phase 1.
   }
 
   getDiffEditState(): DiffEditViewState {
-    return this.state;
+    return this.viewState.mode === "list"
+      ? { kind: "sub-tab", tab: this.viewState.tab }
+      : { kind: "sub-tab", tab: this.viewState.tab };
   }
 
   async onOpen(): Promise<void> {
+    // ConflictCounter notifies on any sibling-event vault change.
+    // List-mode subscribers re-render; detail-mode just keeps showing
+    // the active entry (refresh is a no-op for detail since the
+    // selected sibling is stable until user clicks `[←]`).
+    this.unsubscribeCounter = this.deps.conflictCounter.subscribe(() => {
+      // Defer render to next microtask so multiple rapid changes
+      // collapse into one re-render. Simple debounce; later phases
+      // may upgrade to requestAnimationFrame if needed.
+      queueMicrotask(() => this.render());
+    });
+
+    this.viewState = initialState();
+    this.render();
+  }
+
+  async onClose(): Promise<void> {
+    if (this.unsubscribeCounter) {
+      this.unsubscribeCounter();
+      this.unsubscribeCounter = null;
+    }
+  }
+
+  // ── render dispatch ───────────────────────────────────────────────
+
+  private render(): void {
     const container = this.contentEl;
     container.empty();
     container.addClass("diff2-edit-view-root");
 
-    // Phase 0 placeholder. Replaced by Phase 1's sub-tabs header +
-    // list router; Phase 2+ adds DiffPane and toolbars.
-    const header = container.createDiv({ cls: "diff2-placeholder-header" });
-    header.createEl("h3", { text: "Diff-Edit" });
-    header.createEl("p", {
+    if (this.viewState.mode === "list") {
+      this.renderHeader(container, this.viewState.tab);
+      this.renderListBody(container, this.viewState.tab);
+    } else {
+      this.renderDetail(container, this.viewState.entry);
+    }
+  }
+
+  private renderHeader(parent: HTMLElement, activeTab: DiffEditSubTab): void {
+    const header = parent.createDiv({ cls: "diff2-view-header" });
+    const tabs: { id: DiffEditSubTab; label: string }[] = [
+      { id: "conflicts", label: "Conflicts" },
+      { id: "deleted", label: "Deleted" },
+    ];
+    for (const t of tabs) {
+      const tabEl = header.createDiv({
+        cls:
+          `diff2-tab diff2-tab-${t.id}` +
+          (t.id === activeTab ? " diff2-tab-active" : ""),
+        text: t.label,
+      });
+      tabEl.style.cursor = "pointer";
+      tabEl.addEventListener("click", () => {
+        if (this.viewState.mode !== "list" || this.viewState.tab !== t.id) {
+          this.viewState = { mode: "list", tab: t.id };
+          this.render();
+        }
+      });
+    }
+  }
+
+  private renderListBody(parent: HTMLElement, tab: DiffEditSubTab): void {
+    const body = parent.createDiv({ cls: "diff2-view-body" });
+
+    if (tab === "conflicts") {
+      const { entries } = findAllConflicts(
+        this.deps.vault,
+        this.deps.conflictStore,
+      );
+      renderConflictsList(body, entries, {
+        onEntryClick: (entry) => {
+          this.viewState = { mode: "detail", entry, tab };
+          this.render();
+        },
+      });
+      return;
+    }
+
+    // tab === "deleted" — Phase 9b placeholder.
+    body.createEl("p", {
+      cls: "diff2-deleted-placeholder",
       text:
-        "Scaffolding only (Phase 0). The conflicts list, deleted list, " +
-        "history, compare, and unified DiffPane land in later phases — " +
-        "see docs/DIFF2_IMPLEMENTATION_PLAN.md §R12 for sequencing.",
-      cls: "diff2-placeholder-text",
+        "Deleted-mode UI lands in Phase 9b. See " +
+        "docs/DIFF2_IMPLEMENTATION_PLAN.md §R3.13 for the Phase 9b enumeration.",
     });
   }
 
-  async onClose(): Promise<void> {
-    // Phase 0 has nothing to tear down. Phase 5 will clean up
-    // autosave throttles + write last buffer snapshot here; Phase 6
-    // will fire the DetailViewClose event consumed by the last-tab-
-    // close hook (R3.7 invariant via trashStore.resetLifts()).
+  private renderDetail(parent: HTMLElement, entry: ConflictEntry): void {
+    // Top toolbar — Phase 1 only renders `[←]` back. Phase 3 adds
+    // group buttons; Phase 6 adds [Open in external tool]; the
+    // toggle for read-only/edit (R7.9b/c) only matters in History/
+    // Compare modes — Conflicts is always editable.
+    const toolbar = parent.createDiv({ cls: "diff2-detail-toolbar" });
+    const back = toolbar.createSpan({
+      cls: "diff2-back-arrow",
+      text: "← Back to list",
+    });
+    back.style.cursor = "pointer";
+    back.addEventListener("click", () => {
+      this.viewState = { mode: "list", tab: "conflicts" };
+      this.render();
+    });
+
+    // Phase 1 detail body is a stub — actual DiffPane lands in
+    // Phase 2. Show the selected entry's identity so the click→detail
+    // transition is visibly working.
+    const body = parent.createDiv({ cls: "diff2-detail-body" });
+    body.createEl("h3", { text: entry.basePath });
+    const info = body.createDiv({ cls: "diff2-detail-info" });
+    info.createEl("p", { text: `Sibling: ${entry.siblingPath}` });
+    info.createEl("p", { text: `Device: ${entry.deviceLabel}` });
+    info.createEl("p", { text: `Timestamp: ${entry.isoTimestamp}` });
+    info.createEl("p", {
+      text: `Kind: ${entry.kind}${
+        entry.kind === "tracked" ? " (ConflictStore record present)" : ""
+      }`,
+    });
+    body.createEl("p", {
+      cls: "diff2-detail-placeholder",
+      text:
+        "DiffPane (CM6 unified merge view, R7) lands in Phase 2. " +
+        "Phase 3 adds per-chunk apply/remove buttons + group toolbar; " +
+        "Phase 4 wires R7.11 exit protocol with proactive sibling cleanup.",
+    });
   }
 }
