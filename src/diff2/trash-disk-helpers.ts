@@ -2,7 +2,7 @@
 // could live inline, but they recur enough that a named helper keeps
 // the algorithm bodies readable.
 //
-// Canonical specs: docs/tasks/TASK_9A_TRASH_CORE.md §3.
+// Canonical specs: docs/DIFF2_IMPLEMENTATION_PLAN.md §R3.8 (helpers).
 
 import { DataAdapter } from "obsidian";
 import { safeRename } from "../sync2/cross-platform";

@@ -4,7 +4,7 @@
 //
 // Canonical specs:
 //   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R3 (Recently deleted / Local trash)
-//   - docs/tasks/TASK_9A_TRASH_CORE.md (this PR's home spec)
+//   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R3.8–R3.12 (API + algorithms)
 //
 // Architectural notes worth re-stating in code:
 //

@@ -5,7 +5,7 @@
 // the vault. Idempotent on repeat invocation.
 //
 // Canonical specs:
-//   - docs/tasks/TASK_9A_TRASH_CORE.md §7
+//   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R3.11 (recovery sweep algorithm)
 //   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R8.1 (TrashStore.create row,
 //     plus the lift/return rows that share the same metadata-only
 //     recovery shape)

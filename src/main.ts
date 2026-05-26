@@ -52,7 +52,7 @@ export default class GitHubSyncPlugin extends Plugin {
   pendingDeletions!: PendingDeletionsStore;
   conflictWatcher!: ConflictWatcher;
   conflictCounter!: ConflictCounter;
-  // diff2 trash subsystem (see docs/tasks/TASK_9A_TRASH_CORE.md).
+  // diff2 trash subsystem (see docs/DIFF2_IMPLEMENTATION_PLAN.md §R3).
   // TrashStore is the data layer; TrashWatcher monkey-patches
   // vault.delete/trash to feed user-driven deletes into the store.
   // Both live for the plugin's lifetime; the watcher is uninstalled
@@ -428,7 +428,7 @@ export default class GitHubSyncPlugin extends Plugin {
     // diff2 TrashStore — captures user-driven deletes for one-drain-
     // cycle recovery (R3.4 + R3.5). Instantiated and recovery-swept
     // BEFORE Sync2Manager so the engine starts on a consistent trash
-    // state. See docs/tasks/TASK_9A_TRASH_CORE.md.
+    // state. See docs/DIFF2_IMPLEMENTATION_PLAN.md §R3.8–R3.11.
     const trashStore = new TrashStore({
       vault: this.app.vault,
       configDir: this.app.vault.configDir,

@@ -7,7 +7,7 @@
 //
 // Canonical specs:
 //   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R3.2, §R3.4
-//   - docs/tasks/TASK_9A_TRASH_CORE.md §6.1
+//   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R3.10 (intercept algorithm)
 //
 // Pattern, blast radius, and limitations:
 //
