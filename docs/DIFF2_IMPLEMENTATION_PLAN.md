@@ -2006,21 +2006,45 @@ diff lib name (decision-at-impl-time), фaза-ordering у 6–11 (orthogonal).
 > залишаються. Цей розділ — runbook для виконання R9.1 well: критичний
 > шлях, паралельні треки, що з чим перетинається.
 
-#### R12.0. Pre-implementation spikes (~3h total, блокують подальше комітування)
+#### R12.0. Pre-implementation spikes — ✅ COMPLETED
 
-Перш ніж стартувати Phase 0, виконати **два technical spikes** — їх
-негативний результат reshapes plans for Phases 2 і 5 відповідно.
-Знайти їх обидва результати ДО того, як Phase 0 PR landed, щоб не
-переробляти types.ts / interfaces після.
+Both spikes landed at `tests/diff2/spikes/` (kept in tree as living
+documentation of the assumptions Phase 2 / Phase 5 rely on).
 
-| Spike                                                                            | Question                                                               | Time-box | Fallback if negative                                                                                                                                                                                                                            |
-|----------------------------------------------------------------------------------|------------------------------------------------------------------------|----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **CM6 widget rendering under JSDOM** (Phase 2 blocker)                           | `Decoration.widget` renders correctly in tests via `mock-obsidian.ts`? | ~2h      | Add Playwright suite for diff2 render tests; Phase 2 acceptance criterion shifts from vitest to Playwright. Affects Phases 2/3/4/5 testing strategy.                                                                                            |
-| **CM6 history `historyField.spec.fromJSON/toJSON` round-trip** (Phase 5 blocker) | Can serialize+deserialize undo-stack across plugin reload?             | ~1h      | R7.7.a degrades to **buffer-only autosave** (no undo persistence). R7.7.b recovery dialog still works but `[Continue editing]` resumes from a clean undo state. Entire R7.7 design needs the degraded path explicit; revisit before Phase 5 PR. |
+| Spike | Result | Implication |
+|---|---|---|
+| **CM6 widget rendering under JSDOM** (Phase 2 blocker) | ✅ PASS | `Decoration.widget` renders + updates correctly under vitest's happy-dom environment via `// @vitest-environment happy-dom` directive. Phase 2/3/4/5 testing stays in vitest — no Playwright migration needed. |
+| **CM6 history `historyField` serde via `EditorState.toJSON/fromJSON`** (Phase 5 blocker) | ✅ PASS | Single + multi-edit round-trips work. JSON shape is plain (no circular refs / functions) — safe for `atomicWriteJson` persistence. R7.7.a ships per-spec. |
 
-Both spikes: write throwaway tests at `tests/diff2/spikes/`, document
-findings in PR description, then delete the spike tests (or keep as
-mini-suite if cheap).
+**Findings worth remembering for Phase 2:**
+
+- vitest's default env is `node` (no DOM). Add
+  `// @vitest-environment happy-dom` as a file directive on every
+  diff2 test that constructs an `EditorView`. Existing unit tests
+  (746 of them as of Phase 9a) **don't** need DOM — leave them on
+  the default node env to keep them fast.
+- `happy-dom@^20` added as devDependency.
+- `view.requestMeasure()` may be needed after dispatching changes
+  before querying widget DOM in assertions (CM6 batches measurement
+  cycles).
+
+**Findings worth remembering for Phase 5 (R7.7.a):**
+
+- Use the **public** API `EditorState.toJSON({ historyField })` /
+  `EditorState.fromJSON(json, config, { historyField })`. Internal
+  `historyField.spec.toJSON/fromJSON` exists but isn't exposed via
+  the TypeScript types; using it requires `as any` casts.
+- Configure history with `history({ newGroupDelay: 0 })` for
+  diff-edit sessions: per-chunk actions should each be their own
+  undoable step. The default `newGroupDelay` (~500ms) folds rapid
+  consecutive transactions into one group, which is wrong for
+  programmatic chunk-action dispatching.
+- `@codemirror/commands` and `@codemirror/state` versions must match
+  (single-instance check fails otherwise — "Unrecognized extension
+  value" runtime error). When upgrading either, bump both together.
+- `@codemirror/state` bumped 6.5.2 → 6.6.0 during this spike to
+  align with `@codemirror/commands@6.10.3`. No production regression
+  (746 existing tests stayed green).
 
 #### R12.1. Critical path to first user-visible release (Phases 0 → 3)
 
