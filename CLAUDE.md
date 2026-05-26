@@ -16,7 +16,7 @@ An Obsidian plugin that syncs a local vault with a GitHub repository using **onl
 
 - **User-facing overview, installation, settings reference, conflict-resolution UX, migration from other plugins**: [`README.md`](./README.md).
 - **Canonical spec for the whole sync engine** — conflict-resolution layer (sibling files, conflict branches, three-step / five-step atomic protocols, scenarios A–E) AND push pipeline layer (pre-flight validation, pending-deletions queue, push-queue depth signal) AND cross-cutting infrastructure (cross-platform contracts, typed error hierarchy, skip-class discipline): [`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md). **Read this first** when working on anything under `src/sync2/`, `src/errors.ts`, the GitHub client (`src/github/client.ts`), or any test that exercises the engine. Code comments cross-reference the article's section numbers (§4.3, §9.4, §10 Scenario E, §11 cross-platform, §12.1 pre-flight validation, §12.2 pending-deletions, §13 error taxonomy, §14 skip-class, §16 field postmortems, etc.).
-- **Diff2 widget design** (UI/UX layer on top of pseudo-merge mode; subproject work-in-progress on the `diff2` branch — no code yet in `src/diff2/` as of 2.0.1-beta4): [`docs/DIFF2_IMPLEMENTATION_PLAN.md`](./docs/DIFF2_IMPLEMENTATION_PLAN.md). **Canonical spec for the diff-edit widget**, conflict/history/deleted views (R2.2–R2.4), `TrashStore` (R3), external-tool integration (R6), CM6 unified DiffPane (R7), R7.11 exit protocol with proactive sibling cleanup, and crash resilience (R8). When working on `src/diff2/` or any change that touches the diff-edit widget, read it first — and read it in tandem with [`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md), which the plan repeatedly cross-references (§5 Phase A/B, §8 byte-match rule, §9.4/§9.5 staging protocols, §9.7 filesystem-authoritative, §10 Scenarios C/E, §11 cross-platform, §12 push pipeline).
+- **Diff2 widget design** (UI/UX layer on top of pseudo-merge mode; subproject on the `diff2` branch): [`docs/DIFF2_IMPLEMENTATION_PLAN.md`](./docs/DIFF2_IMPLEMENTATION_PLAN.md). **Canonical spec for the diff-edit widget**, conflict/history/deleted views (R2.2–R2.4), `TrashStore` (R3), external-tool integration (R6), CM6 unified DiffPane (R7), R7.11 exit protocol with proactive sibling cleanup, and crash resilience (R8). **State**: `main` (2.0.1-beta4) carries no `src/diff2/` code; the `diff2` branch has shipped Phase 9a (TrashStore subsystem — full R3, sync2 carve-out wired). Remaining phases (0–8, 9b, 10–11) and the recommended sequencing are catalogued in §R12. When working on `src/diff2/` (on the branch) or any change that touches the diff-edit widget, read the plan first — and in tandem with [`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md), which the plan repeatedly cross-references (§5 Phase A/B, §8 byte-match rule, §9.4/§9.5 staging protocols, §9.7 filesystem-authoritative, §10 Scenarios C/E, §11 cross-platform, §12 push pipeline).
 
 Behaviour described in the article is locked in by the unit + integration suites. If you change anything in the engine and the article disagrees, fix the code OR update the article — don't let them drift.
 
@@ -91,7 +91,7 @@ src/
         └── pre-sync-conflict-modal.ts     # Pre-Sync confirmation modal
 ```
 
-`src/diff2/` does not exist yet in 2.0.1-beta. It is the planned home for the Diff-Edit widget per [`docs/DIFF2_IMPLEMENTATION_PLAN.md`](./docs/DIFF2_IMPLEMENTATION_PLAN.md) (TrashStore, DiffPane, conflict/history/deleted views, R7.11 exit protocol). When implementing diff2 modules, they consume `src/sync2/` (read `ConflictStore`, subscribe to `ConflictCounter`) but `src/sync2/` must not import from `src/diff2/` — see the dependency-direction rule in *Constraints to respect* below.
+`src/diff2/` does not exist on `main` (2.0.1-beta4). On the `diff2` branch, Phase 9a is shipped: `src/diff2/{trash-store, trash-watcher, trash-recovery, trash-disk-helpers, strip-conflict-suffix, types}.ts` (data layer + onload recovery for the trash subsystem — see [`docs/DIFF2_IMPLEMENTATION_PLAN.md`](./docs/DIFF2_IMPLEMENTATION_PLAN.md) §R3.8–R3.12). Sync2-owned cross-edges added on the branch live at `src/sync2/{trash-hooks, timestamp-id}.ts`; `Sync2Manager` accepts an optional `trashHooks` (last param). DiffPane, conflict/history/deleted views, and the rest of R7 still TBD per §R12 sequencing. When implementing diff2 modules, they consume `src/sync2/` (read `ConflictStore`, subscribe to `ConflictCounter`, use sync2 utils) but `src/sync2/` must not import from `src/diff2/` — see the dependency-direction rule in *Constraints to respect* below.
 
 ## Testing
 
@@ -135,6 +135,8 @@ sync2/
 ```
 
 Tests use **branch-per-test** on the persistent private int-test repo. Bootstrap is the exception — it needs delete+recreate, so uses the public ephemeral repo.
+
+On the `diff2` branch, additional buckets exist: `tests/diff2/` (unit + crash-resilience for the trash subsystem) and `tests/integration/scenarios/diff2/n-series-trash/` (end-to-end against real GitHub). They run automatically under `pnpm test` / `pnpm test:integration`.
 
 ### Single-spec runs
 
