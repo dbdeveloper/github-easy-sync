@@ -5,6 +5,7 @@
 import { Vault } from "obsidian";
 import { calculateGitBlobSHA, hasTextExtension } from "../utils";
 import { normalizeText } from "./text-normalize";
+import { newBatchId, parseTimestampId } from "./timestamp-id";
 import { FileChange, QueueBatch } from "./types";
 
 // Layout:
@@ -31,21 +32,6 @@ const IN_PROGRESS_FILE = ".in-progress";
 const ATTEMPTED_FILE = ".attempted";
 const DELETIONS_FILE = "deleted-paths.txt";
 const VAULT_SUBDIR = "vault";
-
-// Batch ID format: YYYYMMDDhhmmssfff in UTC. Lexicographic order
-// equals chronological order, so list() can sort cheaply by name.
-function newBatchId(now: Date = new Date()): string {
-  const pad = (n: number, width = 2) => n.toString().padStart(width, "0");
-  return (
-    `${now.getUTCFullYear()}` +
-    pad(now.getUTCMonth() + 1) +
-    pad(now.getUTCDate()) +
-    pad(now.getUTCHours()) +
-    pad(now.getUTCMinutes()) +
-    pad(now.getUTCSeconds()) +
-    pad(now.getUTCMilliseconds(), 3)
-  );
-}
 
 export type EnqueueMeta = {
   parentCommitSha: string | null;
@@ -662,16 +648,4 @@ export default class PushQueue {
     return out;
   }
 
-}
-
-function parseTimestampId(id: string): number {
-  // "YYYYMMDDhhmmssfff" → ms epoch (UTC).
-  const y = parseInt(id.slice(0, 4), 10);
-  const mo = parseInt(id.slice(4, 6), 10) - 1;
-  const d = parseInt(id.slice(6, 8), 10);
-  const h = parseInt(id.slice(8, 10), 10);
-  const mi = parseInt(id.slice(10, 12), 10);
-  const s = parseInt(id.slice(12, 14), 10);
-  const ms = parseInt(id.slice(14, 17), 10);
-  return Date.UTC(y, mo, d, h, mi, s, ms);
 }
