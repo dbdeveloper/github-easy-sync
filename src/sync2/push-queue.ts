@@ -42,6 +42,14 @@ export type EnqueueMeta = {
   // legacy meta.json without the field is coerced to false in
   // readMeta. See docs/PSEUDO-MERGE-MODE.md §10 Scenario E.
   synthetic?: boolean;
+  // Phase B resolution side-batches set this to the base-path whose
+  // conflict the side-batch closes. After successful push of such a
+  // batch, sync2 fires trashHooks.confirmResolved(basePath) — TrashStore
+  // R3.5 layer 1b wipes all sibling-trash entries for that path. Only
+  // synthetic batches carry this field; legacy meta.json without it
+  // reads back as undefined and no layer-1b sweep fires.
+  // See docs/DIFF2_IMPLEMENTATION_PLAN.md §R3.5.
+  resolvesConflictForBasePath?: string;
 };
 
 export interface PushQueueDeps {
@@ -139,6 +147,12 @@ export default class PushQueue {
     contentSha: string | null;
     parentCommitSha: string;
     parentTreeSha: string;
+    // Set to the base-path whose conflict this side-batch closes. After
+    // a successful push, processBatch fires trashHooks.confirmResolved
+    // with this value — TrashStore R3.5 layer 1b wipes sibling-trash
+    // for that path. Optional for back-compat; legacy callers without
+    // this field just don't trigger layer 1b. See R3.5.
+    resolvesConflictForBasePath?: string;
   }): Promise<string> {
     const id = await this.allocateUniqueId();
     await this.ensureDir(this.queueRoot);
@@ -175,6 +189,7 @@ export default class PushQueue {
       parentTreeSha: args.parentTreeSha,
       createdAt: Date.now(),
       synthetic: true,
+      resolvesConflictForBasePath: args.resolvesConflictForBasePath,
     });
 
     return id;
@@ -214,6 +229,7 @@ export default class PushQueue {
       deletions,
       uploadedBlobs: meta.uploadedBlobs,
       fileMtimes: meta.fileMtimes,
+      resolvesConflictForBasePath: meta.resolvesConflictForBasePath,
     };
   }
 
@@ -290,6 +306,7 @@ export default class PushQueue {
         uploadedBlobs: updated,
         fileMtimes: meta.fileMtimes,
         synthetic: meta.synthetic,
+        resolvesConflictForBasePath: meta.resolvesConflictForBasePath,
       });
     });
     // Swallow errors on the chained queue value (so one failure
@@ -573,9 +590,10 @@ export default class PushQueue {
       uploadedBlobs?: Record<string, string>;
       fileMtimes?: Record<string, number>;
       synthetic?: boolean;
+      resolvesConflictForBasePath?: string;
     },
   ): Promise<void> {
-    const out = {
+    const out: Record<string, unknown> = {
       ...meta,
       uploadedBlobs: meta.uploadedBlobs ?? {},
       fileMtimes: meta.fileMtimes ?? {},
@@ -583,6 +601,11 @@ export default class PushQueue {
       // deserialize as `false` via the readMeta default.
       synthetic: meta.synthetic === true,
     };
+    // Only persist the resolution marker when actually set — keeps
+    // legacy non-synthetic batches' meta.json identical to before.
+    if (typeof meta.resolvesConflictForBasePath === "string") {
+      out.resolvesConflictForBasePath = meta.resolvesConflictForBasePath;
+    }
     await this.vault.adapter.write(
       `${batchDir}/${META_FILE}`,
       JSON.stringify(out),
@@ -596,6 +619,7 @@ export default class PushQueue {
     uploadedBlobs: Record<string, string>;
     fileMtimes: Record<string, number>;
     synthetic: boolean;
+    resolvesConflictForBasePath?: string;
   }> {
     const text = await this.vault.adapter.read(`${batchDir}/${META_FILE}`);
     const raw = JSON.parse(text) as Record<string, unknown>;
@@ -625,6 +649,10 @@ export default class PushQueue {
       uploadedBlobs,
       fileMtimes,
       synthetic: typeof raw.synthetic === "boolean" ? raw.synthetic : false,
+      resolvesConflictForBasePath:
+        typeof raw.resolvesConflictForBasePath === "string"
+          ? raw.resolvesConflictForBasePath
+          : undefined,
     };
   }
 

@@ -30,6 +30,7 @@ import ConflictStore from "../../../../src/sync2/conflict-store";
 import PendingDeletionsStore from "../../../../src/sync2/pending-deletions-store";
 import { ConflictWatcher } from "../../../../src/sync2/conflict-watcher";
 import { ConflictCounter } from "../../../../src/sync2/conflict-counter";
+import { TrashStore } from "../../../../src/diff2/trash-store";
 import {
   GitHubSyncSettings,
   DEFAULT_SETTINGS,
@@ -80,6 +81,13 @@ export interface Sync2TestClient {
   // it directly to assert on pending records / sibling files.
   conflictStore: ConflictStore;
   conflictWatcher: ConflictWatcher;
+  // Always present in the integration fixture; n-series tests inspect
+  // .trash state directly. Wired into Sync2Manager via trashHooks so
+  // pull-delete capture (R3.4) + the three R3.5 cleanup layers fire
+  // end-to-end. For tests that don't exercise trash, the store is
+  // simply unused — TrashStore.init() creates an empty .trash/ dir
+  // which has no effect on assertions about remote/vault state.
+  trashStore: TrashStore;
   branch: string;
   // Live settings reference — same object the detector reads
   // through. I-series tests mutate fields here (e.g. syncConfigDir,
@@ -160,6 +168,16 @@ export async function createSync2Client(
     selfPluginId: SELF_PLUGIN_ID,
   });
   await pendingDeletions.load();
+  // TrashStore — always wired into the integration fixture so trash
+  // hooks fire end-to-end in any test that pull-deletes or pushes
+  // batches. Tests that don't care about trash get an empty .trash/
+  // dir which doesn't affect any remote/vault assertion.
+  const trashStore = new TrashStore({
+    vault,
+    configDir: CONFIG_DIR,
+    selfPluginId: SELF_PLUGIN_ID,
+  });
+  await trashStore.init();
   // ConflictCounter + counter-only ConflictWatcher. The watcher's
   // only side effect is `counter.markDirty()` on relevant vault
   // events. Production main.ts wires identically.
@@ -199,6 +217,7 @@ export async function createSync2Client(
     conflictWatcher,
     conflictCounter,
     pendingDeletions,
+    trashHooks: trashStore.asHooks(),
     accumulateOfflineSyncs: opts.accumulateOfflineSyncs ?? false,
     autoCanonicalize: () => opts.autoCanonicalize ?? true,
     // POSIX-flavoured rename via mock-obsidian's adapter — no wiki-link
@@ -225,6 +244,7 @@ export async function createSync2Client(
     logger,
     conflictStore,
     conflictWatcher,
+    trashStore,
     branch: opts.branch,
     settings,
     cleanup() {

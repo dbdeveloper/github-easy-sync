@@ -42,6 +42,8 @@ import { evaluateConflictState } from "./conflict-classifier";
 import { ConflictWatcher } from "./conflict-watcher";
 import { ConflictCounter } from "./conflict-counter";
 import { buildConflictBranchName } from "./conflict-branch";
+import { newBatchId } from "./timestamp-id";
+import type { TrashHooks } from "./trash-hooks";
 import { normalizeText } from "./text-normalize";
 import { FileChange } from "./types";
 
@@ -270,6 +272,18 @@ export interface Sync2ManagerDeps {
   // (the corresponding code paths guard on `!this.pendingDeletions`
   // and skip the queue operation).
   pendingDeletions?: PendingDeletionsStore;
+  // TrashStore integration (R3.4 + R3.5). Optional — when omitted,
+  // every trash-relevant touchpoint silently skips (no captureForDelete
+  // on pull-delete, no confirmDeleted/confirmResolved/sweepOlderThan
+  // at the push/drain-end boundaries). diff2's TrashStore.asHooks()
+  // returns a conforming implementation; main.ts wires it in.
+  //
+  // Position MATTERS: this is the LAST field in this interface and the
+  // ONLY new optional field added since pre-PR-5b helpers were written.
+  // Existing test-fixture call sites (createSync2Client, etc.) construct
+  // Sync2ManagerDeps positionally — adding the field anywhere else
+  // would break them and violate Principle #4 ("tests pass unchanged").
+  trashHooks?: TrashHooks;
   // Pseudo-merge ConflictWatcher (stage 9 wiring). The drain wraps
   // its batch loop in pause/resume so mid-drain vault writes from
   // sibling-create don't trigger nested evaluateConflictState
@@ -380,6 +394,7 @@ export class Sync2Manager {
   private readonly pendingDeletions: PendingDeletionsStore | undefined;
   private readonly conflictWatcher: ConflictWatcher | undefined;
   private readonly conflictCounter: ConflictCounter | undefined;
+  private readonly trashHooks: TrashHooks | undefined;
   private readonly accumulateOfflineSyncs: boolean;
   private readonly onProgress: ProgressFactory | undefined;
   private readonly onLocalCommitted:
@@ -428,6 +443,7 @@ export class Sync2Manager {
     this.pendingDeletions = deps.pendingDeletions;
     this.conflictWatcher = deps.conflictWatcher;
     this.conflictCounter = deps.conflictCounter;
+    this.trashHooks = deps.trashHooks;
     this.accumulateOfflineSyncs = deps.accumulateOfflineSyncs ?? false;
     this.onProgress = deps.onProgress;
     this.onLocalCommitted = deps.onLocalCommitted;
@@ -1631,6 +1647,20 @@ export class Sync2Manager {
     const localChange = await this.detector.findChangeForPath(path);
     if (localChange === null) {
       // Local matches the version that just got deleted. Apply.
+      // Best-effort trash capture before removal — gives the user one
+      // drain-cycle recovery window if they didn't expect this delete
+      // (R3.4). Failure of capture is logged and swallowed; the actual
+      // adapter.remove proceeds either way.
+      if (this.trashHooks) {
+        try {
+          await this.trashHooks.captureForDelete(path);
+        } catch (err) {
+          this.logger.warn(
+            "Sync2 applyRemoteDeletion: trash capture failed",
+            { path, err: `${err}` },
+          );
+        }
+      }
       await this.vault.adapter.remove(path);
       this.detector.recordDeletion(path);
       return;
@@ -1998,6 +2028,11 @@ export class Sync2Manager {
         contentSha,
         parentCommitSha: this.store.getLastSyncCommitSha() ?? "",
         parentTreeSha: this.store.getLastSyncTreeSha() ?? "",
+        // R3.5 layer 1b marker. After this side-batch lands on GitHub,
+        // processBatch fires trashHooks.confirmResolved(closedPath) →
+        // TrashStore wipes sibling-trash entries for the just-resolved
+        // base path. See docs/DIFF2_IMPLEMENTATION_PLAN.md §R3.5.
+        resolvesConflictForBasePath: closedPath,
       });
     }
   }
@@ -2222,6 +2257,11 @@ export class Sync2Manager {
   ): Promise<void> {
     if (this.running) return;
     this.running = true;
+    // R3.5 layer 2 anchor — capture inside the re-entrant guard so
+    // skipped invocations (interval tick during a user click) don't
+    // burn their own timestamp. One drain cycle = one drain.startedAt.
+    const drainStartedAt = newBatchId(new Date());
+    let drainSucceeded = false;
     const ownProgress = sharedProgress === null;
     let progress: ProgressHandle | null = sharedProgress;
     let commitNum = 0;
@@ -2359,7 +2399,23 @@ export class Sync2Manager {
         const handle = this.onProgress(doneMessage);
         setTimeout(() => handle.hide(), 1000);
       }
+      // Drain reached the end of the try block without throwing — queue
+      // is empty, finalize ran. Anything reachable here is a success.
+      drainSucceeded = true;
     } finally {
+      // R3.5 layer 2 — drain-end backstop sweep. ONLY runs on full
+      // success (queue empty + no exception). Best-effort: a sweep
+      // failure is logged and doesn't break the drain semantics that
+      // already succeeded by this point.
+      if (drainSucceeded && this.trashHooks) {
+        try {
+          await this.trashHooks.sweepOlderThan(drainStartedAt);
+        } catch (err) {
+          this.logger.warn("Sync2 drain: trash sweep failed", {
+            err: `${err}`,
+          });
+        }
+      }
       this.running = false;
       // No listener resume — ConflictWatcher is read-only and was
       // never paused. Drain doesn't own listener lifecycle.
@@ -2697,6 +2753,26 @@ export class Sync2Manager {
       await this.queue.delete(id);
       // PSEUDO-MERGE-MODE §12.3: queue depth dropped after successful push.
       await this.fireQueueDepth();
+      // R3.5 layers 1a + 1b — trash cleanup confirmation. Best-effort:
+      // hook failure is logged and swallowed; the push itself already
+      // succeeded, so we don't roll back. Drain's layer 2 sweep at end
+      // catches anything 1a/1b miss.
+      if (this.trashHooks) {
+        try {
+          if (batch.deletions.length > 0) {
+            await this.trashHooks.confirmDeleted(batch.deletions);
+          }
+          if (batch.resolvesConflictForBasePath) {
+            await this.trashHooks.confirmResolved(
+              batch.resolvesConflictForBasePath,
+            );
+          }
+        } catch (err) {
+          this.logger.warn(`Sync2 push batch ${id} trash confirm failed`, {
+            err: `${err}`,
+          });
+        }
+      }
       this.logger.info(`Sync2 push batch ${id} succeeded`, {
         commitSha,
         treeSha: newTreeSha,
