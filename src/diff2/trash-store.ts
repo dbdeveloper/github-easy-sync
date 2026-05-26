@@ -33,9 +33,11 @@
 import { Vault } from "obsidian";
 import { calculateGitBlobSHA } from "../utils";
 import { newBatchId, parseTimestampId } from "../sync2/timestamp-id";
+import { stripConflictSuffix } from "./strip-conflict-suffix";
 import {
   atomicWriteJson,
   ensureParentDirs,
+  rmrf,
   tryReadMetaJson,
 } from "./trash-disk-helpers";
 import { TrashHooks, TrashRecord } from "./types";
@@ -133,22 +135,11 @@ export class TrashStore {
   // Skips trash dirs with missing/invalid meta.json — those are orphan
   // states the recovery sweep (later PR) handles separately.
   async list(): Promise<TrashRecord[]> {
-    const adapter = this.vault.adapter;
-    if (!(await adapter.exists(this.trashRoot))) return [];
-    const { folders } = await adapter.list(this.trashRoot);
-    const out: TrashRecord[] = [];
-    for (const dir of folders) {
-      const meta = await tryReadMetaJson<TrashRecord>(
-        adapter,
-        `${dir}/${META_FILE}`,
-      );
-      // Defensive: dir name must equal meta.id to prevent reading
-      // half-renamed entries from a partial recovery.
-      const dirName = dir.slice(dir.lastIndexOf("/") + 1);
-      if (meta && meta.id === dirName) out.push(meta);
-    }
-    out.sort((a, b) => b.originalDeletedAt.localeCompare(a.originalDeletedAt));
-    return out;
+    const records = await this.readAllRecords();
+    records.sort((a, b) =>
+      b.originalDeletedAt.localeCompare(a.originalDeletedAt),
+    );
+    return records;
   }
 
   // Single-record lookup by id. Returns undefined when the record is
@@ -159,6 +150,87 @@ export class TrashStore {
       `${this.trashRoot}/${id}/${META_FILE}`,
     );
     return meta && meta.id === id ? meta : undefined;
+  }
+
+  // ── cleanup hooks (R3.5 three-layer TTL) ──────────────────────────
+
+  // Layer 1a — base-file deletes confirmed on GitHub. Called by
+  // sync2.processBatch after each successful push, with the batch's
+  // deleted-paths.txt entries. Matching .trash/ records are wiped.
+  // Records with liftedAsSessionId set are skipped (active compare —
+  // R3.7 shield).
+  async confirmDeleted(paths: string[]): Promise<void> {
+    if (paths.length === 0) return;
+    const set = new Set(paths);
+    return this.serialize(() =>
+      this.sweepBy((rec) => set.has(rec.originalPath)),
+    );
+  }
+
+  // Layer 1b — conflict resolution confirmed on GitHub. Called by
+  // sync2.processBatch after a Phase-B side-batch (one whose
+  // meta.resolvesConflictForBasePath is set) successfully pushes. All
+  // sibling-trash entries belonging to that base path (matched via
+  // stripConflictSuffix) are wiped. Lifted records skipped.
+  async confirmResolved(basePath: string): Promise<void> {
+    return this.serialize(() =>
+      this.sweepBy((rec) => stripConflictSuffix(rec.originalPath) === basePath),
+    );
+  }
+
+  // Layer 2 — drain-end backstop. Called by Sync2Manager only when the
+  // drain succeeded fully (queue empty, no abort). Wipes all records
+  // with id < threshold (string compare on 17-digit timestamps).
+  // Catches anything 1a/1b missed: orphan/synthetic siblings,
+  // gitignored deletes (.log etc), pull-delete entries from earlier
+  // drains. Lifted records skipped.
+  async sweepOlderThan(threshold: string): Promise<void> {
+    return this.serialize(() =>
+      this.sweepBy((rec) => rec.id < threshold),
+    );
+  }
+
+  // Shared cleanup body. Iterates current disk state, applies predicate,
+  // rmrfs each match (best-effort — a failed rmrf logs but doesn't stop
+  // the loop), notifies once at end if anything changed.
+  private async sweepBy(
+    predicate: (rec: TrashRecord) => boolean,
+  ): Promise<void> {
+    const records = await this.readAllRecords();
+    let changed = false;
+    for (const rec of records) {
+      if (rec.liftedAsSessionId) continue; // R3.7 shield
+      if (!predicate(rec)) continue;
+      try {
+        await rmrf(this.vault.adapter, `${this.trashRoot}/${rec.id}`);
+        changed = true;
+      } catch {
+        // Best-effort: a failed rmrf leaves the entry on disk; the next
+        // matching cleanup or onload recovery sweep picks it up. Don't
+        // poison the loop — other records still need processing.
+      }
+    }
+    if (changed) this.notify();
+  }
+
+  // Disk-scan helper shared by list() and the three cleanup hooks. No
+  // sort — callers add ordering only when they need it (list()).
+  private async readAllRecords(): Promise<TrashRecord[]> {
+    const adapter = this.vault.adapter;
+    if (!(await adapter.exists(this.trashRoot))) return [];
+    const { folders } = await adapter.list(this.trashRoot);
+    const out: TrashRecord[] = [];
+    for (const dir of folders) {
+      const meta = await tryReadMetaJson<TrashRecord>(
+        adapter,
+        `${dir}/${META_FILE}`,
+      );
+      // Defensive: dir name must equal meta.id so a half-renamed
+      // recovery state can't slip through.
+      const dirName = dir.slice(dir.lastIndexOf("/") + 1);
+      if (meta && meta.id === dirName) out.push(meta);
+    }
+    return out;
   }
 
   // ── subscription (bare signal; UI re-fetches via list()) ──────────
@@ -182,29 +254,17 @@ export class TrashStore {
   // ── sync2 cross-edge: TrashHooks adapter ──────────────────────────
 
   // Returns the bag of callbacks sync2 imports via constructor
-  // injection. captureForDelete is wired to intercept; the other three
-  // hooks are PR-5 work and currently throw to surface accidental
-  // early wire-up.
+  // injection. Wires every hook to the corresponding TrashStore method;
+  // sync2-manager is free to call any of them at the appropriate
+  // moment in its drain cycle (PR-8 wires the actual integration).
   asHooks(): TrashHooks {
     return {
       captureForDelete: async (path) => {
         await this.intercept(path);
       },
-      confirmDeleted: async (_paths) => {
-        throw new Error(
-          "TrashStore.confirmDeleted not implemented in PR-3 (lands in PR-5)",
-        );
-      },
-      confirmResolved: async (_basePath) => {
-        throw new Error(
-          "TrashStore.confirmResolved not implemented in PR-3 (lands in PR-5)",
-        );
-      },
-      sweepOlderThan: async (_threshold) => {
-        throw new Error(
-          "TrashStore.sweepOlderThan not implemented in PR-3 (lands in PR-5)",
-        );
-      },
+      confirmDeleted: (paths) => this.confirmDeleted(paths),
+      confirmResolved: (basePath) => this.confirmResolved(basePath),
+      sweepOlderThan: (threshold) => this.sweepOlderThan(threshold),
     };
   }
 

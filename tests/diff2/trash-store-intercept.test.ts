@@ -357,11 +357,15 @@ describe("TrashStore.intercept", () => {
       expect(records[0].originalPath).toBe("a.md");
     });
 
-    it("confirmDeleted / confirmResolved / sweepOlderThan throw (PR-5 work)", async () => {
+    it("all hooks are wired to TrashStore methods (no stubs)", async () => {
       const hooks = fx.store.asHooks();
-      await expect(hooks.confirmDeleted(["x"])).rejects.toThrow(/PR-5/);
-      await expect(hooks.confirmResolved("x")).rejects.toThrow(/PR-5/);
-      await expect(hooks.sweepOlderThan("0")).rejects.toThrow(/PR-5/);
+      // Smoke check: calling each hook on a fresh store should resolve
+      // without throwing. Full behavior of confirmDeleted /
+      // confirmResolved / sweepOlderThan is covered in
+      // trash-store-cleanup.test.ts (PR-5).
+      await expect(hooks.confirmDeleted([])).resolves.toBeUndefined();
+      await expect(hooks.confirmResolved("nonexistent.md")).resolves.toBeUndefined();
+      await expect(hooks.sweepOlderThan("0")).resolves.toBeUndefined();
     });
   });
 
