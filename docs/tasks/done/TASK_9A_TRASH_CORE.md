@@ -5,8 +5,8 @@
 > list API. **Restore та Deleted-mode UI — Phase 9b, не входять у scope.**
 >
 > Canonical specifications referenced below live in
-> [`../DIFF2_IMPLEMENTATION_PLAN.md`](../DIFF2_IMPLEMENTATION_PLAN.md) (R3.1–R3.7,
-> R8.1, R9.1) and [`../PSEUDO-MERGE-MODE.md`](../PSEUDO-MERGE-MODE.md) (§5, §9.4
+> [`../DIFF2_IMPLEMENTATION_PLAN.md`](../../DIFF2_IMPLEMENTATION_PLAN.md) (R3.1–R3.7,
+> R8.1, R9.1) and [`../PSEUDO-MERGE-MODE.md`](../../PSEUDO-MERGE-MODE.md) (§5, §9.4
 > Path B 3-step protocol, §11 cross-platform contracts). When code comments cite
 > "R3.5 layer 1a" чи "§9.4 Step 3" — це посилання на ці документи.
 
@@ -722,6 +722,6 @@ parametrised під обидві платформи (`describe.each([{platform:"
 ---
 
 **Дотичні документи:**
-- [`../DIFF2_IMPLEMENTATION_PLAN.md`](../DIFF2_IMPLEMENTATION_PLAN.md) — canonical spec; §R3 (Recently deleted/Local trash), §R8.1 (crash resilience), §R9 Phase 9a row.
-- [`../PSEUDO-MERGE-MODE.md`](../PSEUDO-MERGE-MODE.md) — §5 drain pseudocode (interaction з Phase A/B), §9.4 Path B 3-step protocol pattern, §11 cross-platform contracts (safeRename).
-- [`../../CLAUDE.md`](../../CLAUDE.md) — repo-wide instructions; module layout, testing conventions, dependency-direction invariant (sync2 → diff2 forbidden).
+- [`../DIFF2_IMPLEMENTATION_PLAN.md`](../../DIFF2_IMPLEMENTATION_PLAN.md) — canonical spec; §R3 (Recently deleted/Local trash), §R8.1 (crash resilience), §R9 Phase 9a row.
+- [`../PSEUDO-MERGE-MODE.md`](../../PSEUDO-MERGE-MODE.md) — §5 drain pseudocode (interaction з Phase A/B), §9.4 Path B 3-step protocol pattern, §11 cross-platform contracts (safeRename).
+- [`../../CLAUDE.md`](../../../CLAUDE.md) — repo-wide instructions; module layout, testing conventions, dependency-direction invariant (sync2 → diff2 forbidden).
