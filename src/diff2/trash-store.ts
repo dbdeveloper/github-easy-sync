@@ -233,6 +233,125 @@ export class TrashStore {
     return out;
   }
 
+  // ── compare-lift (R3.7) ───────────────────────────────────────────
+
+  // Mark a trash entry as the focus of an active compare session.
+  // Metadata-only: file bytes stay at .trash/<id>/vault/<originalPath>,
+  // only meta.json is rewritten with liftedAsSessionId set. The marker
+  // shields the entry from all three R3.5 cleanup layers (each guards
+  // on `if record.liftedAsSessionId: continue`).
+  //
+  // Throws if `id` doesn't name an existing trash entry, or if the
+  // entry is already lifted (one active compare session per entry —
+  // upper layers handle "you're trying to compare a file already
+  // being compared elsewhere" with a Notice; see R3.7).
+  //
+  // Returns the trash-side path the UI should read bytes from, the
+  // sessionId to thread through later return, and the updated record.
+  async liftForCompare(id: string): Promise<{
+    trashPath: string;
+    sessionId: string;
+    record: TrashRecord;
+  }> {
+    return this.serialize(() => this.liftForCompareImpl(id));
+  }
+
+  private async liftForCompareImpl(id: string): Promise<{
+    trashPath: string;
+    sessionId: string;
+    record: TrashRecord;
+  }> {
+    const adapter = this.vault.adapter;
+    const metaPath = `${this.trashRoot}/${id}/${META_FILE}`;
+    const meta = await tryReadMetaJson<TrashRecord>(adapter, metaPath);
+    if (!meta || meta.id !== id) {
+      throw new Error(`TrashStore.liftForCompare: trash entry ${id} not found`);
+    }
+    if (meta.liftedAsSessionId) {
+      throw new Error(
+        `TrashStore.liftForCompare: ${id} already lifted as session ${meta.liftedAsSessionId}`,
+      );
+    }
+
+    const sessionId = newBatchId(this.nowFn());
+    meta.liftedAsSessionId = sessionId;
+    await atomicWriteJson(adapter, metaPath, meta);
+    this.notify();
+
+    return {
+      trashPath: `${this.trashRoot}/${id}/${VAULT_SUBDIR}/${meta.originalPath}`,
+      sessionId,
+      record: meta,
+    };
+  }
+
+  // Clear the marker on the record whose liftedAsSessionId matches
+  // `sessionId`. Symmetric with liftForCompare: only meta.json is
+  // rewritten; the trash file is untouched. After return, the record
+  // re-enters the normal three-layer cleanup flow with its original
+  // id intact (R3.7 "returned record is treated as if never lifted").
+  //
+  // Throws if no record claims this sessionId — the UI should treat
+  // it as a programmer-error or stale-handle case (the entry may have
+  // been wiped while lifted, e.g., resetLifts cleared the marker; the
+  // session is meaningless without the record on disk).
+  async returnFromCompare(sessionId: string): Promise<void> {
+    return this.serialize(() => this.returnFromCompareImpl(sessionId));
+  }
+
+  private async returnFromCompareImpl(sessionId: string): Promise<void> {
+    const records = await this.readAllRecords();
+    const meta = records.find((r) => r.liftedAsSessionId === sessionId);
+    if (!meta) {
+      throw new Error(
+        `TrashStore.returnFromCompare: no record found for session ${sessionId}`,
+      );
+    }
+    meta.liftedAsSessionId = undefined;
+    await atomicWriteJson(
+      this.vault.adapter,
+      `${this.trashRoot}/${meta.id}/${META_FILE}`,
+      meta,
+    );
+    this.notify();
+  }
+
+  // Defensive normalizer — clears the liftedAsSessionId marker on
+  // every record. Phase 9b UI calls this at the moment the LAST
+  // diff2 detail-view tab closes, enforcing the invariant
+  //   "0 active detail-view tabs → 0 lifted markers".
+  //
+  // Primary path is each tab's own returnFromCompare(its sessionId)
+  // on close; resetLifts catches escapees (programmer-error,
+  // un-caught exceptions, async-race that left a marker without a
+  // live session). Idempotent — when nothing is lifted, no notify
+  // fires.
+  async resetLifts(): Promise<void> {
+    return this.serialize(() => this.resetLiftsImpl());
+  }
+
+  private async resetLiftsImpl(): Promise<void> {
+    const records = await this.readAllRecords();
+    let changed = false;
+    for (const rec of records) {
+      if (!rec.liftedAsSessionId) continue;
+      rec.liftedAsSessionId = undefined;
+      try {
+        await atomicWriteJson(
+          this.vault.adapter,
+          `${this.trashRoot}/${rec.id}/${META_FILE}`,
+          rec,
+        );
+        changed = true;
+      } catch {
+        // Best-effort: a single record's failed meta-write doesn't
+        // poison the rest of the normalization pass. The next reset
+        // attempt or onload recovery sweep picks up the laggard.
+      }
+    }
+    if (changed) this.notify();
+  }
+
   // ── subscription (bare signal; UI re-fetches via list()) ──────────
 
   subscribe(listener: () => void): () => void {
