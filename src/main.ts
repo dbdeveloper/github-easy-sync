@@ -29,6 +29,9 @@ import { ConflictCounter } from "./sync2/conflict-counter";
 import { ConflictWatcher } from "./sync2/conflict-watcher";
 import { ConflictStatusIndicator } from "./sync2/views/conflict-status-indicator";
 import { PreSyncConflictModal } from "./sync2/views/pre-sync-conflict-modal";
+import { TrashStore } from "./diff2/trash-store";
+import { TrashWatcher } from "./diff2/trash-watcher";
+import { sweepOnload as trashSweepOnload } from "./diff2/trash-recovery";
 import manifest from "../manifest.json";
 
 // How long the brief local-phase notices stay visible. 700ms is the
@@ -49,6 +52,13 @@ export default class GitHubSyncPlugin extends Plugin {
   pendingDeletions!: PendingDeletionsStore;
   conflictWatcher!: ConflictWatcher;
   conflictCounter!: ConflictCounter;
+  // diff2 trash subsystem (see docs/tasks/TASK_9A_TRASH_CORE.md).
+  // TrashStore is the data layer; TrashWatcher monkey-patches
+  // vault.delete/trash to feed user-driven deletes into the store.
+  // Both live for the plugin's lifetime; the watcher is uninstalled
+  // in onunload to restore the original vault methods.
+  trashStore!: TrashStore;
+  private trashWatcher: TrashWatcher | null = null;
   logger!: Logger;
   // Exposed for the settings tab's "Push plugins data.json" toggle,
   // which reads/writes the allow line directly via this owner.
@@ -185,6 +195,17 @@ export default class GitHubSyncPlugin extends Plugin {
       this.vaultRenameListener = null;
     }
     this.conflictWatcher?.stop();
+    // Restore vault.delete/trash to whatever they were when our
+    // install() ran. Other plugins that patched on top of us stay
+    // untouched (LIFO unwrap — see TrashWatcher class doc).
+    if (this.trashWatcher) {
+      try {
+        this.trashWatcher.uninstall();
+      } catch (err) {
+        this.logger?.warn("TrashWatcher uninstall failed", { err: `${err}` });
+      }
+      this.trashWatcher = null;
+    }
   }
 
   // ── settings ────────────────────────────────────────────────────────
@@ -266,6 +287,13 @@ export default class GitHubSyncPlugin extends Plugin {
       // lost (the queue records intents to delete remote paths; on
       // Reset the user explicitly opts out of those intents).
       await this.pendingDeletions.clear();
+    }
+    if (this.trashStore) {
+      // Same reset semantics as pending-deletions above: trash is
+      // plugin-managed state; Reset explicitly opts out of pending
+      // recovery for any previously-trashed files. See R3.5
+      // closing-paragraph note on Reset uniformity.
+      await this.trashStore.clearAll();
     }
     this.settings = Object.assign({}, DEFAULT_SETTINGS);
     await this.saveSettings();
@@ -396,6 +424,28 @@ export default class GitHubSyncPlugin extends Plugin {
     await pendingDeletions.load();
     this.pendingDeletions = pendingDeletions;
     await this.migratePhantomSnapshotsToPendingDeletions(store, pendingDeletions);
+
+    // diff2 TrashStore — captures user-driven deletes for one-drain-
+    // cycle recovery (R3.4 + R3.5). Instantiated and recovery-swept
+    // BEFORE Sync2Manager so the engine starts on a consistent trash
+    // state. See docs/tasks/TASK_9A_TRASH_CORE.md.
+    const trashStore = new TrashStore({
+      vault: this.app.vault,
+      configDir: this.app.vault.configDir,
+      selfPluginId: manifest.id,
+    });
+    this.trashStore = trashStore;
+    try {
+      await trashSweepOnload({
+        vault: this.app.vault,
+        configDir: this.app.vault.configDir,
+        selfPluginId: manifest.id,
+        trashStore,
+        logger: this.logger,
+      });
+    } catch (err) {
+      this.logger.error("Trash recovery sweep failed", `${err}`);
+    }
     // Crash-recovery sweep for atomic-write artifacts AND for
     // ConflictStore vault-level `.sync-tmp` staging siblings. Runs BEFORE the
     // engine starts touching the vault so any leftover staging from a
@@ -464,6 +514,10 @@ export default class GitHubSyncPlugin extends Plugin {
       conflictWatcher,
       conflictCounter,
       pendingDeletions,
+      // diff2 trash hooks (R3.4 + R3.5). sync2 fires captureForDelete
+      // before pull-side adapter.remove, confirmDeleted/confirmResolved
+      // after push success, sweepOlderThan at drain end on full success.
+      trashHooks: trashStore.asHooks(),
       accumulateOfflineSyncs: this.settings.accumulateOfflineSyncs ?? false,
       autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? false,
       // Hooked to Obsidian's link-aware rename so the pre-sync
@@ -550,6 +604,22 @@ export default class GitHubSyncPlugin extends Plugin {
     // (Pre-stage-5 deviceLabel was used here; preserved for symmetry
     // with the later stage-9 widget pass.)
     void deviceLabel;
+
+    // diff2 TrashWatcher — monkey-patches vault.delete/trash so
+    // user-driven UI deletes route through TrashStore.intercept.
+    // Installed AFTER Sync2Manager wire-up so any throw during
+    // engine init doesn't leave the vault with patched methods.
+    // The watcher's uninstall (run from onunload) restores the
+    // originals captured at install time, preserving any upper-layer
+    // patch another plugin may have applied between install and
+    // unload. See R3.2.
+    try {
+      const watcher = new TrashWatcher(this.app.vault, this.trashStore, this.logger);
+      watcher.install();
+      this.trashWatcher = watcher;
+    } catch (err) {
+      this.logger.error("TrashWatcher install failed", `${err}`);
+    }
   }
 
   // ── sync triggers ───────────────────────────────────────────────────

@@ -369,6 +369,52 @@ describe("TrashStore.intercept", () => {
     });
   });
 
+  describe("clearAll() — Reset panic button", () => {
+    beforeEach(async () => {
+      await fx.store.init();
+    });
+
+    it("wipes every entry and re-creates an empty .trash root", async () => {
+      fs.writeFileSync(path.join(fx.root, "a.md"), "a");
+      fs.writeFileSync(path.join(fx.root, "b.md"), "b");
+      await fx.store.intercept("a.md");
+      await fx.store.intercept("b.md");
+      expect((await fx.store.list()).length).toBe(2);
+
+      let fired = 0;
+      fx.store.subscribe(() => { fired++; });
+
+      await fx.store.clearAll();
+
+      expect(await fx.store.list()).toEqual([]);
+      // Root dir still exists (re-created), so the store remains
+      // usable post-Reset without a separate init() call.
+      const absRoot = path.join(fx.root, fx.trashRoot);
+      expect(fs.existsSync(absRoot)).toBe(true);
+      expect(fired).toBe(1);
+    });
+
+    it("is idempotent on an already-empty trash", async () => {
+      let fired = 0;
+      fx.store.subscribe(() => { fired++; });
+      await fx.store.clearAll();
+      await fx.store.clearAll();
+      // Each call notifies (cheap — UI just re-renders an empty list).
+      expect(fired).toBeGreaterThanOrEqual(1);
+    });
+
+    it("intercept still works after clearAll (store remains live)", async () => {
+      fs.writeFileSync(path.join(fx.root, "a.md"), "a");
+      await fx.store.intercept("a.md");
+      await fx.store.clearAll();
+
+      fs.writeFileSync(path.join(fx.root, "b.md"), "b");
+      const rec = await fx.store.intercept("b.md");
+      expect(rec.originalPath).toBe("b.md");
+      expect((await fx.store.list()).length).toBe(1);
+    });
+  });
+
   describe("serialize() ordering", () => {
     beforeEach(async () => {
       await fx.store.init();

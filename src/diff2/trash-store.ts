@@ -77,6 +77,25 @@ export class TrashStore {
     }
   }
 
+  // Panic-button wipe — removes every .trash/<id>/ entry and re-
+  // creates the empty trash root. Called from resetPluginState() in
+  // main.ts alongside snapshot/conflict-store/pending-deletions
+  // clearAll. Reset semantics are uniform: trash is plugin-managed
+  // state and the user opting into Reset explicitly opts out of any
+  // pending recovery window for previously-trashed files. Serialized
+  // through the same promise-chain as other mutators.
+  async clearAll(): Promise<void> {
+    return this.serialize(() => this.clearAllImpl());
+  }
+
+  private async clearAllImpl(): Promise<void> {
+    if (await this.vault.adapter.exists(this.trashRoot)) {
+      await rmrf(this.vault.adapter, this.trashRoot);
+    }
+    await this.vault.adapter.mkdir(this.trashRoot);
+    this.notify();
+  }
+
   // ── intercept ─────────────────────────────────────────────────────
 
   // Copy a vault file's bytes into a fresh .trash/<id>/ entry. The
