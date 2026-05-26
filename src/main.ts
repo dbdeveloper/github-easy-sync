@@ -167,6 +167,12 @@ export default class GitHubSyncPlugin extends Plugin {
             vault: this.app.vault,
             conflictStore: this.conflictStore,
             conflictCounter: this.conflictCounter,
+            // Live-read so the user can change deviceLabel in settings
+            // and the next view-open / re-render picks up the new
+            // value. Same pattern Sync2Manager uses for commit
+            // messages.
+            localDeviceLabel: () =>
+              this.settings.deviceLabel ?? "Obsidian",
           }),
       );
       this.addCommand({

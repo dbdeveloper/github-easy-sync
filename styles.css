@@ -128,6 +128,72 @@
     color: var(--text-error);
 }
 
+/* Phase 3 — Conflicts-detail toolbar (R7.9a) */
+.diff2-conflicts-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 4px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    flex-wrap: wrap;
+}
+
+.diff2-toolbar-actions {
+    display: flex;
+    gap: 6px;
+    flex: 1;
+    flex-wrap: wrap;
+}
+
+.diff2-toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    font-size: 0.9em;
+    color: var(--text-muted);
+}
+
+.diff2-btn {
+    padding: 4px 10px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    background: var(--background-secondary);
+    color: var(--text-normal);
+    cursor: pointer;
+    font-size: 0.85em;
+}
+
+.diff2-btn:hover {
+    background: var(--background-modifier-hover);
+}
+
+.diff2-btn-keep-local {
+    border-color: var(--background-modifier-error);
+}
+
+.diff2-btn-apply-remote {
+    border-color: var(--background-modifier-success);
+}
+
+.diff2-btn-join-all {
+    border-color: var(--interactive-accent);
+}
+
+.diff2-detail-title-row {
+    padding: 4px 6px;
+    font-size: 0.9em;
+}
+
+.diff2-detail-base-path {
+    color: var(--text-normal);
+    font-weight: 600;
+}
+
+.diff2-detail-meta {
+    color: var(--text-muted);
+}
+
 /* ── DiffPane (Phase 2) — line + word decorations + markers ────── */
 
 /* Marker block-widgets (<<<<<, =====, >>>>>) */

@@ -24,32 +24,58 @@
 //   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R7.5 (Phase 3 action buttons)
 
 import { WidgetType } from "@codemirror/view";
+import type { ChunkChoice } from "./chunk-actions";
 
 export type MarkerKind = "top" | "middle" | "bottom";
 
-// One widget instance per marker line. Equality based on (kind,
-// label) so CM6 reuses DOM nodes across view-updates that produce
-// the same logical decoration set.
+// Callbacks invoked when the user clicks an action button inside a
+// marker widget. Phase 3 wires these via Compartment-reconfigure
+// hooks on the DiffPane; Phase 4+ extends with R7.11 exit-protocol.
+export interface MarkerWidgetCallbacks {
+  // Fired with the chosen resolution for THIS chunk. The DiffPane
+  // dispatches the text replacement + chunks-list mutation +
+  // decoration recompute.
+  onAction: (chunkIndex: number, choice: ChunkChoice) => void;
+}
+
+// One widget instance per marker line. Equality based on
+// (kind, label, chunkIndex, isMarkdown) so CM6 reuses DOM nodes
+// across view-updates that produce the same logical decoration
+// set. Callbacks are NOT part of equality — they're a stable ref
+// (the DiffPane that owns this widget set captures `this`).
 export class ConflictMarkerWidget extends WidgetType {
   constructor(
     readonly kind: MarkerKind,
     // Device label shown alongside top/bottom markers (R7.2). Empty
-    // string for the middle marker (its decoration constructs it
-    // with label === "").
+    // string for the middle marker (no label per R7.2).
     readonly label: string,
+    // Index into the original chunks list. The chunk-action handler
+    // uses this to know which chunk to resolve.
+    readonly chunkIndex: number,
+    // Whether the base file is markdown — controls [join] button
+    // visibility on the middle marker per R7.5 + R7.9a.
+    readonly isMarkdown: boolean,
+    // Action callbacks. Phase 3 always provides these; tests may
+    // pass an empty implementation.
+    readonly callbacks: MarkerWidgetCallbacks,
   ) {
     super();
   }
 
   eq(other: ConflictMarkerWidget): boolean {
-    return other.kind === this.kind && other.label === this.label;
+    return (
+      other.kind === this.kind &&
+      other.label === this.label &&
+      other.chunkIndex === this.chunkIndex &&
+      other.isMarkdown === this.isMarkdown
+    );
   }
 
   toDOM(): HTMLElement {
     const line = document.createElement("div");
     line.className = `diff2-marker diff2-marker-${this.kind}`;
 
-    // Marker glyph: 5 angle brackets per R7.2.
+    // Marker glyph (5 brackets per R7.2).
     const glyph = document.createElement("span");
     glyph.className = "diff2-marker-glyph";
     glyph.textContent =
@@ -60,14 +86,13 @@ export class ConflictMarkerWidget extends WidgetType {
           : "=====";
     line.appendChild(glyph);
 
-    // Phase 3 inserts action-button DOM here. Phase 2 renders the
-    // device label only (top/bottom). Use a child slot so Phase 3's
-    // patch is a single querySelector + appendChild without touching
-    // marker layout.
+    // Action buttons (R7.5 / R7.6).
     const buttons = document.createElement("span");
     buttons.className = "diff2-marker-buttons";
+    this.renderActionButtons(buttons);
     line.appendChild(buttons);
 
+    // Device label (top/bottom only; middle stays unlabeled per R7.2).
     if (this.kind !== "middle" && this.label !== "") {
       const lab = document.createElement("span");
       lab.className = "diff2-marker-label";
@@ -78,11 +103,55 @@ export class ConflictMarkerWidget extends WidgetType {
     return line;
   }
 
-  // R7.8: the marker line is NOT a real document line — the user
-  // can't navigate into it with arrow keys or place a cursor there.
-  // ignoreEvent + return false from typing handler keeps the widget
-  // visually present but cursorless.
+  private renderActionButtons(parent: HTMLElement): void {
+    // R7.5 semantics + R7.6 arrows:
+    //   top    — [apply ↓] [remove ↓]
+    //              apply on top   = take ours-lines
+    //              remove on top  = drop ours, take theirs-lines
+    //   bottom — [apply ↑] [remove ↑]
+    //              apply on bottom = take theirs-lines
+    //              remove on bottom = drop theirs, take ours-lines
+    //   middle — [apply both ↓↑] [remove both ↓↑]
+    //              plus [join <label>] (markdown only)
+    if (this.kind === "top") {
+      this.addBtn(parent, "apply ↓", "ours");
+      this.addBtn(parent, "remove ↓", "theirs");
+      return;
+    }
+    if (this.kind === "bottom") {
+      this.addBtn(parent, "apply ↑", "theirs");
+      this.addBtn(parent, "remove ↑", "ours");
+      return;
+    }
+    // middle
+    this.addBtn(parent, "apply both ↓↑", "both");
+    this.addBtn(parent, "remove both ↓↑", "neither");
+    if (this.isMarkdown) {
+      this.addBtn(parent, `join ${this.label || "remote"}`, "join");
+    }
+  }
+
+  private addBtn(
+    parent: HTMLElement,
+    label: string,
+    choice: ChunkChoice,
+  ): void {
+    const btn = document.createElement("button");
+    btn.className = `diff2-btn diff2-marker-btn diff2-marker-btn-${choice}`;
+    btn.textContent = label;
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      this.callbacks.onAction(this.chunkIndex, choice);
+    });
+    parent.appendChild(btn);
+  }
+
+  // R7.8: marker is NOT a real document line — events through it
+  // shouldn't reach CM6's editing logic. But button clicks DO need
+  // to reach our handler (we stopPropagation inside addBtn). Return
+  // true: CM6 ignores events bubbling from within this widget.
   ignoreEvent(): boolean {
-    return false;
+    return true;
   }
 }

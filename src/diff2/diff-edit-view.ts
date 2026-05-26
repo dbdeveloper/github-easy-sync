@@ -28,10 +28,13 @@
 //   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R2.7.5 (default sub-tab)
 //   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R7 (DiffPane form — Phase 2)
 
-import { ItemView, type Vault, WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, type Vault, WorkspaceLeaf } from "obsidian";
+import { atomicWriteFile } from "../sync2/atomic-write";
+import type SnapshotStore from "../sync2/snapshot-store";
 import type { ConflictCounter } from "../sync2/conflict-counter";
 import type ConflictStore from "../sync2/conflict-store";
 import { renderConflictsList } from "./conflicts-list";
+import { isMarkdownPath } from "./conflict-merge-all";
 import { DiffPane } from "./diff-pane";
 import {
   DEFAULT_DIFF_EDIT_VIEW_STATE,
@@ -39,6 +42,7 @@ import {
   DiffEditViewState,
 } from "./events";
 import { findAllConflicts, type ConflictEntry } from "./synthetic-detector";
+import { renderConflictsToolbar } from "./toolbar-conflicts";
 
 export const DIFF2_EDIT_VIEW_TYPE = "diff2-edit-view";
 
@@ -46,6 +50,14 @@ export interface DiffEditViewDeps {
   vault: Vault;
   conflictStore: ConflictStore;
   conflictCounter: ConflictCounter;
+  // Snapshot store passed to atomicWriteFile so the post-write
+  // recordSync step lines up with the snapshot's expectations.
+  // Optional in test fixtures; required in production for
+  // crash-safety per PSEUDO-MERGE-MODE.md §9.3 5-step protocol.
+  snapshotStore?: SnapshotStore;
+  // Local device label for the top-marker / "Keep all local
+  // (<label>)" button text. Falls back to "local" when undefined.
+  localDeviceLabel?: () => string;
 }
 
 // Phase 1 owns the navigation state machine inside the view: which
@@ -210,30 +222,47 @@ export class DiffEditView extends ItemView {
   }
 
   private renderDetail(parent: HTMLElement, entry: ConflictEntry): void {
-    // Top toolbar — Phase 2 renders `[←]` back + entry identity.
-    // Phase 3 adds group buttons; Phase 6 adds [Open in external tool].
-    // The toggle for read-only/edit (R7.9b/c) only matters in
-    // History / Compare modes — Conflicts is always editable.
+    // R7.9a toolbar — [← Back] + group resolve buttons + Auto-advance
+    // toggle. Phase 6 will add [Open in external tool] on the right
+    // (desktop-only); Phase 5 may add an "unresolved chunks" footer.
+    const isMd = isMarkdownPath(entry.basePath);
+    const localLabel = this.deps.localDeviceLabel?.() ?? "local";
     const toolbar = parent.createDiv({ cls: "diff2-detail-toolbar" });
-    const back = toolbar.createSpan({
-      cls: "diff2-back-arrow",
-      text: "← Back to list",
-    });
-    back.style.cursor = "pointer";
-    back.addEventListener("click", () => {
-      this.viewState = { mode: "list", tab: "conflicts" };
-      this.render();
-    });
-    const title = toolbar.createSpan({
-      cls: "diff2-detail-title",
-      text: ` ${entry.basePath}  ·  ${entry.deviceLabel} @ ${entry.isoTimestamp}`,
-    });
-    void title;
 
-    // Detail body — DiffPane mount. Read both sides from vault
-    // asynchronously, then construct the pane. Errors (e.g., file
-    // disappeared between list-click and detail-render) fall back
-    // to a Notice; we don't crash the view.
+    renderConflictsToolbar(
+      toolbar,
+      { localLabel, remoteLabel: entry.deviceLabel },
+      {
+        onBack: () => {
+          void this.exitDetailView(entry);
+        },
+        onKeepAllLocal: () => {
+          this.activeDiffPane?.resolveAll("ours");
+        },
+        onApplyAllRemote: () => {
+          this.activeDiffPane?.resolveAll("theirs");
+        },
+        onJoinAll: isMd
+          ? () => {
+              this.activeDiffPane?.resolveAll("join");
+            }
+          : undefined,
+      },
+    );
+
+    // Title row under the toolbar — shows the conflict's identity so
+    // the user always sees which file they're resolving.
+    const titleRow = parent.createDiv({ cls: "diff2-detail-title-row" });
+    titleRow.createEl("span", {
+      cls: "diff2-detail-base-path",
+      text: entry.basePath,
+    });
+    titleRow.createEl("span", {
+      cls: "diff2-detail-meta",
+      text: ` · ${entry.deviceLabel} @ ${entry.isoTimestamp}`,
+    });
+
+    // Detail body — DiffPane mount.
     const body = parent.createDiv({ cls: "diff2-detail-body" });
     void this.mountDiffPane(body, entry);
   }
@@ -244,9 +273,6 @@ export class DiffEditView extends ItemView {
   ): Promise<void> {
     const adapter = this.deps.vault.adapter;
     try {
-      // Read both sides as text. Phase 2 supports text-only diff;
-      // binary base files (e.g., images) will land in a later phase
-      // with a "binary preview" detail variant — for now show error.
       let ours = "";
       const baseExists = await adapter.exists(entry.basePath);
       if (baseExists) {
@@ -254,23 +280,23 @@ export class DiffEditView extends ItemView {
       }
       const theirs = await adapter.read(entry.siblingPath);
 
-      // Stale-state guard: the view may have switched away while we
-      // were awaiting reads. Bail without mounting if we're no
-      // longer in detail mode for the same entry.
+      // Stale-state guard: bail if the user switched away during await.
       if (
         this.viewState.mode !== "detail" ||
-        this.viewState.entry.siblingPath !== entry.siblingPath
+        this.viewState.entry.siblingPath !== entry.siblingPath ||
+        !body.isConnected
       ) {
         return;
       }
-      // Same parent that called us must still be live — if user
-      // clicked `[←]` mid-read, the body was emptied by render().
-      // Check parent is still in the DOM.
-      if (!body.isConnected) return;
 
       this.activeDiffPane = new DiffPane(body, ours, theirs, {
-        oursLabel: "local",
+        oursLabel: this.deps.localDeviceLabel?.() ?? "local",
         theirsLabel: entry.deviceLabel,
+        isMarkdown: isMarkdownPath(entry.basePath),
+        joinContext: {
+          remoteDeviceLabel: entry.deviceLabel,
+          timestamp: entry.isoTimestamp,
+        },
       });
     } catch (err) {
       body.createEl("p", {
@@ -278,5 +304,46 @@ export class DiffEditView extends ItemView {
         text: `Failed to load diff: ${String(err)}`,
       });
     }
+  }
+
+  // R7.7.c step 1 — write current buffer to vault base file.
+  // Step 4 (CM6 history null) is implicit when activeDiffPane is
+  // disposed inside render(). Step 5 (close detail view) is the
+  // `[←]` back-to-list transition done at the end of this method.
+  // Step 2 (proactive sibling cleanup via SHA-compare) is Phase 4.
+  // Step 3 (autosave cleanup) is Phase 5.
+  private async exitDetailView(entry: ConflictEntry): Promise<void> {
+    const pane = this.activeDiffPane;
+    if (!pane) {
+      this.viewState = { mode: "list", tab: "conflicts" };
+      this.render();
+      return;
+    }
+
+    const newOursText = pane.getDocText();
+    try {
+      const bytes = new TextEncoder().encode(newOursText)
+        .buffer as ArrayBuffer;
+      // atomicWriteFile uses the 5-step protocol from
+      // PSEUDO-MERGE-MODE.md §9.3 — crash-safe with .sync-tmp +
+      // .sync-bak. The optional afterCommit hook is used by sync2
+      // for snapshot recordSync; in the diff2-write case we leave
+      // it undefined (sibling cleanup + snapshot bookkeeping happen
+      // on the next [Sync] click via Phase A — see R7.7.c).
+      await atomicWriteFile(
+        this.deps.vault,
+        entry.basePath,
+        bytes,
+        undefined,
+      );
+      new Notice(`Saved ${entry.basePath}`);
+    } catch (err) {
+      new Notice(`Failed to save ${entry.basePath}: ${String(err)}`);
+      // Stay in detail view so the user doesn't lose work.
+      return;
+    }
+
+    this.viewState = { mode: "list", tab: "conflicts" };
+    this.render();
   }
 }
