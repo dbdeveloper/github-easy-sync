@@ -359,7 +359,10 @@ export class TrashStore {
     return () => this.listeners.delete(listener);
   }
 
-  private notify(): void {
+  // Public so trash-recovery.ts can fire one final notify after the
+  // onload sweep completes its disk mutations. Internal callers go
+  // through the same method.
+  notify(): void {
     for (const listener of this.listeners) {
       try {
         listener();
