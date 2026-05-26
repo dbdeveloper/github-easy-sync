@@ -32,6 +32,7 @@ import { PreSyncConflictModal } from "./sync2/views/pre-sync-conflict-modal";
 import { TrashStore } from "./diff2/trash-store";
 import { TrashWatcher } from "./diff2/trash-watcher";
 import { sweepOnload as trashSweepOnload } from "./diff2/trash-recovery";
+import { DiffEditView, DIFF2_EDIT_VIEW_TYPE } from "./diff2/diff-edit-view";
 import manifest from "../manifest.json";
 
 // How long the brief local-phase notices stay visible. 700ms is the
@@ -154,6 +155,40 @@ export default class GitHubSyncPlugin extends Plugin {
         callback: this.syncCurrentFile.bind(this),
       });
 
+      // Diff-Edit widget — Phase 0 scaffolding. Registers the view
+      // type so workspace can instantiate it, plus the four commands
+      // that route into it. Real list/detail content lands in later
+      // phases (see DIFF2_IMPLEMENTATION_PLAN.md §R12).
+      this.registerView(
+        DIFF2_EDIT_VIEW_TYPE,
+        (leaf) => new DiffEditView(leaf),
+      );
+      this.addCommand({
+        id: "open-diff-edit",
+        name: "Open Diff-Edit",
+        icon: "git-merge",
+        callback: () => this.activateDiffEditView(),
+      });
+      // Stub commands — Phase 8 (Compare) and Phase 7 (History) replace
+      // these with real picker / version-list flows. Phase 0 just routes
+      // into the empty view so the commands are discoverable in the
+      // palette from day one.
+      this.addCommand({
+        id: "diff-edit-compare-two",
+        name: "Compare two files…",
+        callback: () => this.activateDiffEditView(),
+      });
+      this.addCommand({
+        id: "diff-edit-compare-active",
+        name: "Compare active file with…",
+        callback: () => this.activateDiffEditView(),
+      });
+      this.addCommand({
+        id: "diff-edit-show-history",
+        name: "Show history of active file",
+        callback: () => this.activateDiffEditView(),
+      });
+
       this.logger.info(
         `Plugin onload complete (duration=${Date.now() - startedAt}ms)`,
       );
@@ -206,6 +241,11 @@ export default class GitHubSyncPlugin extends Plugin {
       }
       this.trashWatcher = null;
     }
+    // Detach any open Diff-Edit view leaves so they don't linger in
+    // a broken state after the plugin disables. Obsidian would
+    // eventually GC them but explicit cleanup keeps the workspace
+    // state-store tidy.
+    this.app.workspace.detachLeavesOfType(DIFF2_EDIT_VIEW_TYPE);
   }
 
   // ── settings ────────────────────────────────────────────────────────
@@ -914,6 +954,20 @@ export default class GitHubSyncPlugin extends Plugin {
   restartSyncInterval(): void {
     this.stopSyncInterval();
     this.startSyncInterval();
+  }
+
+  // Opens the Diff-Edit view in a workspace tab, reusing an existing
+  // leaf if one is already open (single-view model — R2.0). Standard
+  // Obsidian pattern: query workspace.getLeavesOfType, fall back to
+  // getLeaf("tab") + setViewState. Returns once the leaf is revealed.
+  async activateDiffEditView(): Promise<void> {
+    const { workspace } = this.app;
+    let leaf = workspace.getLeavesOfType(DIFF2_EDIT_VIEW_TYPE)[0];
+    if (!leaf) {
+      leaf = workspace.getLeaf("tab");
+      await leaf.setViewState({ type: DIFF2_EDIT_VIEW_TYPE, active: true });
+    }
+    workspace.revealLeaf(leaf);
   }
 
   // ── helpers ─────────────────────────────────────────────────────────
