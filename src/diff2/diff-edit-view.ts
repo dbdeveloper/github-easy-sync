@@ -32,6 +32,7 @@ import { ItemView, type Vault, WorkspaceLeaf } from "obsidian";
 import type { ConflictCounter } from "../sync2/conflict-counter";
 import type ConflictStore from "../sync2/conflict-store";
 import { renderConflictsList } from "./conflicts-list";
+import { DiffPane } from "./diff-pane";
 import {
   DEFAULT_DIFF_EDIT_VIEW_STATE,
   DiffEditSubTab,
@@ -67,6 +68,10 @@ export class DiffEditView extends ItemView {
   // Unsubscribe handle from ConflictCounter.subscribe — set on open,
   // called on close.
   private unsubscribeCounter: (() => void) | null = null;
+  // Active DiffPane lives only while detail-mode is shown. Replaced
+  // on every detail-open; destroyed when leaving detail-mode or on
+  // view close.
+  private activeDiffPane: DiffPane | null = null;
 
   constructor(leaf: WorkspaceLeaf, deps: DiffEditViewDeps) {
     super(leaf);
@@ -124,11 +129,25 @@ export class DiffEditView extends ItemView {
       this.unsubscribeCounter();
       this.unsubscribeCounter = null;
     }
+    this.disposeActiveDiffPane();
+  }
+
+  private disposeActiveDiffPane(): void {
+    if (this.activeDiffPane) {
+      this.activeDiffPane.destroy();
+      this.activeDiffPane = null;
+    }
   }
 
   // ── render dispatch ───────────────────────────────────────────────
 
   private render(): void {
+    // Dispose any active DiffPane before tearing down its parent DOM —
+    // CM6 EditorView.destroy() unhooks its own event listeners + DOM
+    // children. If we just empty() the parent without destroy(), we
+    // leak the listeners.
+    this.disposeActiveDiffPane();
+
     const container = this.contentEl;
     container.empty();
     container.addClass("diff2-edit-view-root");
@@ -191,10 +210,10 @@ export class DiffEditView extends ItemView {
   }
 
   private renderDetail(parent: HTMLElement, entry: ConflictEntry): void {
-    // Top toolbar — Phase 1 only renders `[←]` back. Phase 3 adds
-    // group buttons; Phase 6 adds [Open in external tool]; the
-    // toggle for read-only/edit (R7.9b/c) only matters in History/
-    // Compare modes — Conflicts is always editable.
+    // Top toolbar — Phase 2 renders `[←]` back + entry identity.
+    // Phase 3 adds group buttons; Phase 6 adds [Open in external tool].
+    // The toggle for read-only/edit (R7.9b/c) only matters in
+    // History / Compare modes — Conflicts is always editable.
     const toolbar = parent.createDiv({ cls: "diff2-detail-toolbar" });
     const back = toolbar.createSpan({
       cls: "diff2-back-arrow",
@@ -205,27 +224,59 @@ export class DiffEditView extends ItemView {
       this.viewState = { mode: "list", tab: "conflicts" };
       this.render();
     });
+    const title = toolbar.createSpan({
+      cls: "diff2-detail-title",
+      text: ` ${entry.basePath}  ·  ${entry.deviceLabel} @ ${entry.isoTimestamp}`,
+    });
+    void title;
 
-    // Phase 1 detail body is a stub — actual DiffPane lands in
-    // Phase 2. Show the selected entry's identity so the click→detail
-    // transition is visibly working.
+    // Detail body — DiffPane mount. Read both sides from vault
+    // asynchronously, then construct the pane. Errors (e.g., file
+    // disappeared between list-click and detail-render) fall back
+    // to a Notice; we don't crash the view.
     const body = parent.createDiv({ cls: "diff2-detail-body" });
-    body.createEl("h3", { text: entry.basePath });
-    const info = body.createDiv({ cls: "diff2-detail-info" });
-    info.createEl("p", { text: `Sibling: ${entry.siblingPath}` });
-    info.createEl("p", { text: `Device: ${entry.deviceLabel}` });
-    info.createEl("p", { text: `Timestamp: ${entry.isoTimestamp}` });
-    info.createEl("p", {
-      text: `Kind: ${entry.kind}${
-        entry.kind === "tracked" ? " (ConflictStore record present)" : ""
-      }`,
-    });
-    body.createEl("p", {
-      cls: "diff2-detail-placeholder",
-      text:
-        "DiffPane (CM6 unified merge view, R7) lands in Phase 2. " +
-        "Phase 3 adds per-chunk apply/remove buttons + group toolbar; " +
-        "Phase 4 wires R7.11 exit protocol with proactive sibling cleanup.",
-    });
+    void this.mountDiffPane(body, entry);
+  }
+
+  private async mountDiffPane(
+    body: HTMLElement,
+    entry: ConflictEntry,
+  ): Promise<void> {
+    const adapter = this.deps.vault.adapter;
+    try {
+      // Read both sides as text. Phase 2 supports text-only diff;
+      // binary base files (e.g., images) will land in a later phase
+      // with a "binary preview" detail variant — for now show error.
+      let ours = "";
+      const baseExists = await adapter.exists(entry.basePath);
+      if (baseExists) {
+        ours = await adapter.read(entry.basePath);
+      }
+      const theirs = await adapter.read(entry.siblingPath);
+
+      // Stale-state guard: the view may have switched away while we
+      // were awaiting reads. Bail without mounting if we're no
+      // longer in detail mode for the same entry.
+      if (
+        this.viewState.mode !== "detail" ||
+        this.viewState.entry.siblingPath !== entry.siblingPath
+      ) {
+        return;
+      }
+      // Same parent that called us must still be live — if user
+      // clicked `[←]` mid-read, the body was emptied by render().
+      // Check parent is still in the DOM.
+      if (!body.isConnected) return;
+
+      this.activeDiffPane = new DiffPane(body, ours, theirs, {
+        oursLabel: "local",
+        theirsLabel: entry.deviceLabel,
+      });
+    } catch (err) {
+      body.createEl("p", {
+        cls: "diff2-detail-error",
+        text: `Failed to load diff: ${String(err)}`,
+      });
+    }
   }
 }

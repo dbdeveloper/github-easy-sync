@@ -7,3 +7,181 @@
     height: 100%;
     width: 100%;
 }
+
+/* ── diff2 widget — Phase 1 / Phase 2 ───────────────────────────── */
+
+.diff2-edit-view-root {
+    padding: 8px;
+}
+
+/* Sub-tabs header (Conflicts | Deleted) */
+.diff2-view-header {
+    display: flex;
+    gap: 12px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    margin-bottom: 8px;
+}
+
+.diff2-tab {
+    padding: 6px 10px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted);
+}
+
+.diff2-tab-active {
+    color: var(--text-normal);
+    border-bottom-color: var(--interactive-accent);
+}
+
+/* Conflicts list */
+.diff2-conflicts-empty {
+    color: var(--text-muted);
+    padding: 16px;
+    text-align: center;
+}
+
+.diff2-conflicts-group {
+    margin-bottom: 12px;
+}
+
+.diff2-conflicts-group-header {
+    font-weight: 600;
+    color: var(--text-normal);
+    padding: 4px 0;
+}
+
+.diff2-conflicts-version-count {
+    color: var(--text-muted);
+    font-weight: normal;
+    font-size: 0.9em;
+}
+
+.diff2-conflicts-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    margin: 2px 0;
+    border-radius: 4px;
+    background: var(--background-secondary);
+}
+
+.diff2-conflicts-row:hover {
+    background: var(--background-modifier-hover);
+}
+
+.diff2-conflicts-row-meta {
+    flex: 1;
+    color: var(--text-muted);
+    font-size: 0.9em;
+}
+
+.diff2-conflicts-device-label {
+    color: var(--text-normal);
+    margin-right: 4px;
+}
+
+.diff2-conflicts-badge {
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.75em;
+    font-weight: 600;
+}
+
+.diff2-conflicts-badge-tracked {
+    background: var(--background-modifier-border);
+    color: var(--text-normal);
+}
+
+.diff2-conflicts-badge-synthetic {
+    background: var(--color-orange);
+    color: var(--background-primary);
+}
+
+/* Detail toolbar */
+.diff2-detail-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--background-modifier-border);
+    margin-bottom: 6px;
+}
+
+.diff2-back-arrow {
+    font-weight: 600;
+    color: var(--interactive-accent);
+}
+
+.diff2-detail-title {
+    color: var(--text-muted);
+    font-size: 0.9em;
+}
+
+.diff2-detail-body {
+    height: calc(100% - 80px);
+    overflow: auto;
+}
+
+.diff2-detail-error {
+    color: var(--text-error);
+}
+
+/* ── DiffPane (Phase 2) — line + word decorations + markers ────── */
+
+/* Marker block-widgets (<<<<<, =====, >>>>>) */
+.diff2-marker {
+    padding: 2px 6px;
+    font-family: var(--font-monospace);
+    font-size: 0.85em;
+    user-select: none;
+}
+
+.diff2-marker-top {
+    background: var(--background-modifier-error);
+    color: var(--text-on-accent);
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+.diff2-marker-middle {
+    background: var(--background-secondary-alt);
+    color: var(--text-muted);
+}
+
+.diff2-marker-bottom {
+    background: var(--background-modifier-success);
+    color: var(--text-on-accent);
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.diff2-marker-glyph {
+    font-weight: bold;
+    margin-right: 8px;
+}
+
+.diff2-marker-label {
+    margin-left: 8px;
+    opacity: 0.85;
+}
+
+/* Line decorations — red for ours, green for theirs */
+.diff2-line-ours {
+    background: var(--background-modifier-error);
+}
+
+.diff2-line-theirs {
+    background: var(--background-modifier-success);
+}
+
+.diff2-line-common {
+    /* No tint — keep common lines on the editor's default background. */
+}
+
+/* Word-level overlay (R7.4) — yellow over the line tint gives
+ * orange (on red) and salad (on green). The semi-transparent fill
+ * lets the underlying line color show through.
+ */
+.diff2-word-changed {
+    background: rgba(255, 235, 59, 0.45);
+}
