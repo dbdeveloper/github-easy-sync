@@ -15,6 +15,7 @@ An Obsidian plugin that syncs a local vault with a GitHub repository using **onl
 ## Where to read what
 
 - **User-facing overview, installation, settings reference, conflict-resolution UX, migration from other plugins**: [`README.md`](./README.md).
+- **Per-release notes** (Keep-a-Changelog format): [`CHANGELOG.md`](./CHANGELOG.md). README links here for "What's new"; do NOT add per-release notes back into README. New release → add a section to `CHANGELOG.md` and bump the version in `package.json` + `manifest.json` + `manifest-beta.json` + `versions.json`.
 - **Canonical spec for the whole sync engine** — conflict-resolution layer (sibling files, conflict branches, three-step / five-step atomic protocols, scenarios A–E) AND push pipeline layer (pre-flight validation, pending-deletions queue, push-queue depth signal) AND cross-cutting infrastructure (cross-platform contracts, typed error hierarchy, skip-class discipline): [`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md). **Read this first** when working on anything under `src/sync2/`, `src/errors.ts`, the GitHub client (`src/github/client.ts`), or any test that exercises the engine. Code comments cross-reference the article's section numbers (§4.3, §9.4, §10 Scenario E, §11 cross-platform, §12.1 pre-flight validation, §12.2 pending-deletions, §13 error taxonomy, §14 skip-class, §16 field postmortems, etc.).
 - **Diff2 widget design** (in-progress UX layer on top of pseudo-merge mode, lives on the `diff2` branch): [`docs/DIFF2_IMPLEMENTATION_PLAN.md`](./docs/DIFF2_IMPLEMENTATION_PLAN.md).
 
