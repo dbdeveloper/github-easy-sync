@@ -68,10 +68,16 @@ describe.skipIf(!integrationEnabled())(
     );
 
     it(
-      "spaces + parentheses + brackets in filename round-trip",
+      "spaces + parentheses in filename round-trip",
       async () => {
+        // Spaces and parentheses are NOT in the sanitized ASCII set
+        // (cross-platform.ts FORBIDDEN_REGEX), so they round-trip
+        // unchanged. Brackets `[ ]` are sanitized (Obsidian-wiki-
+        // forbidden chars) and are covered by the "covers the 11
+        // forbidden chars" test below; do not test their round-trip
+        // here.
         client = await createSync2Client({ branch });
-        const filePath = "Notes/My Note [v1] (draft).md";
+        const filePath = "Notes/My Note (draft).md";
         const content = "title with spaces and punctuation\n";
         await client.vault.adapter.write(filePath, content);
         await sync2AllAndAssertNoErrors(client);
