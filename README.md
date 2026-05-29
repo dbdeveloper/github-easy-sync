@@ -8,83 +8,15 @@ Version `2.0.1-beta` · AGPL-3.0 · Fork of
 
 ---
 
-## What's new in 2.0.1-beta5
+## What's new
 
-Hotfix release. Fixes a critical sync bug that could overwrite
-remote files larger than 1 MB with truncated local copies.
+Per-release notes live in [`CHANGELOG.md`](./CHANGELOG.md).
+Latest: **2.0.1-beta5** — hotfix for >1 MB-file sync; see
+[CHANGELOG.md](./CHANGELOG.md#201-beta5--2026-05-29) for the
+recovery checklist if you were affected.
 
-- **Files larger than 1 MB now sync correctly.** GitHub's Contents
-  API truncates inline content for files above ~1 MB; previous
-  releases decoded the truncated response as 0 bytes, then ran the
-  3-way reconcile against `remote = ∅` and (incorrectly) chose the
-  local side. The fix transparently fetches the actual bytes via
-  the Blobs API when the Contents API reports a large file. Affects
-  every user with any single file above 1 MB; see
-  [§16.6 of the design doc](./docs/PSEUDO-MERGE-MODE.md) for the
-  full postmortem.
-- **No behaviour change for files at or below 1 MB.** The fast
-  path is unchanged; the Blobs-API roundtrip only runs when the
-  Contents response shows `size > 0` with empty inline content.
-
-If you suspect you were affected (a recent sync replaced one of
-your notes on GitHub with much smaller content), the previous
-versions of every file remain in your repo's history — restore via
-`git revert <commit>` from a clone, or copy from a previous commit
-on GitHub Web.
-
-## What's new in 2.0.1-beta4
-
-Sync engine rebuilt from the ground up — both the conflict-
-resolution layer and the push pipeline. Full mechanics in
-[§Conflict resolution](#conflict-resolution) below; full design
-rationale in [docs/PSEUDO-MERGE-MODE.md](./docs/PSEUDO-MERGE-MODE.md).
-Headline changes:
-
-- **Resolve conflicts with plain file operations.** No modal
-  dialogs, no `<<<<<<<` markers in your notes. Each conflict
-  becomes an ordinary sibling file you handle with delete / rename
-  / edit. *(A dedicated diff-edit GUI is planned for the next
-  release; this release uses only the native Obsidian operations
-  you already know.)*
-- **Keep typing on a conflicted file.** Your in-progress edits
-  flow to a private GitHub branch invisible to other devices until
-  you finalise; the conflict doesn't block you.
-- **Full edit history preserved on GitHub — forever.** Every commit
-  the plugin produces — including every iteration during a
-  conflict-resolution session — stays reachable in the Network
-  graph. Nothing is silently squashed or discarded.
-- **Auto-merge first.** Text three-way merge, plugin-bundle
-  semver, modify-vs-delete favours the modification. Only
-  genuinely irreconcilable cases surface as siblings.
-- **Crash-tolerant atomic writes.** Multi-step disk operations
-  have a documented recovery sweep on plugin load; an interruption
-  leaves the vault in either the pre- or post-state, never
-  half-applied.
-- **Three visibility surfaces for pending conflicts.** Status bar
-  `🔀 N`, ribbon badge, pre-sync confirmation modal listing every
-  pending file.
-- **Multi-file conflict sessions resolve one file at a time.** Each
-  per-file resolution lands on `main` as a regular commit; the
-  conflict branch merges back only when the last file is settled.
-- **`Reset` cleanly relabels siblings.** A wiped plugin state
-  renames `*.conflict-from-*` files to
-  `<file>.unresolved-<original-ts>.<ext>` so a future re-enable
-  starts clean.
-- **Cross-platform filename safety.** Files named with Windows-
-  forbidden characters (`< > : " | ? * \`) or Obsidian-wiki-
-  forbidden characters (`# ^ [ ]`) are automatically rewritten to
-  canonical Unicode replacements on both push and pull. A vault
-  authored on one platform stays usable from any other; see
-  [§11 of the design doc](./docs/PSEUDO-MERGE-MODE.md).
-- **Pre-flight validation on every push.** Stale deletion entries
-  (a path another device already removed) are detected before the
-  tree-create request is sent and dropped silently — no more 422
-  `GitRPC::BadObjectState` failures from multi-device race
-  conditions; see [§12.1 of the design doc](./docs/PSEUDO-MERGE-MODE.md).
-- **Push-queue depth visible on the ribbon.** The `[Sync with
-  GitHub]` icon shows `(N)` when batches are waiting to drain —
-  click feedback you can see, offline accumulations you can count,
-  reconnection progress that decrements in front of you.
+The full design rationale behind any release is in
+[`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md).
 
 ---
 
@@ -121,7 +53,7 @@ mid-range Android devices without OOM crashes.
 > GitHub Easy Sync 2.0.1-beta takes a different route — each
 > conflict becomes an ordinary sibling file in the vault, resolved
 > by the file operations every Obsidian user already knows. See
-> [What's new in 2.0.1-beta](#whats-new-in-201-beta) above and
+> [CHANGELOG](./CHANGELOG.md) above and
 > [the design rationale](./docs/PSEUDO-MERGE-MODE.md) for details.
 
 ### What this plugin does well
@@ -153,7 +85,7 @@ mid-range Android devices without OOM crashes.
   backgrounded, network drop) finishes on the next trigger without
   duplicating commits. The conflict-resolution layer adds a
   matching guarantee for its own multi-step writes — see
-  [What's new in 2.0.1-beta](#whats-new-in-201-beta).
+  [CHANGELOG](./CHANGELOG.md).
 - **Privacy-conservative defaults.** Plugin `data.json` files
   (which routinely store API tokens) and per-device configs
   (`workspace.json`, `community-plugins.json`) are blocked from
