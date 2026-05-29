@@ -1873,6 +1873,63 @@ intent is recorded in an explicit store, not as a phantom snapshot
 entry; the snapshot invariant "every row is an observation, not a
 delete-intent" is restored).
 
+### 16.6 `theirsBytes:0` on >1 MB files → silent overwrite of remote (2026-05-29)
+
+**Symptom.** A Desktop sync push converted eight remote files on
+GitHub `main` into 47-byte stubs that contained only the heading
+inserted by another Obsidian plugin (filename-as-heading
+auto-prepender). Three of the affected files had been >1 MB
+markdown notes on GitHub; the overwriting commit was authored by
+sync2 with the standard `Sync at <ts> (<device>)` message. Plugin
+log showed `Sync2 reconcile path bytes-resident
+oursBytes:47 theirsBytes:0` for each file, then silently chose
+"ours wins" with no explicit decision log.
+
+**Cause.** Two faults stacked.
+
+1. *Local trigger.* The three large notes had previously become
+   0 bytes on Desktop (root cause not in sync2 — most likely an
+   external write or a crash mid-write through an unrelated
+   plugin). When the user next opened them, the filename-as-heading
+   plugin observed empty content and prepended a `# <basename>`
+   line, leaving a 47-byte file. Local-only state is by definition
+   sync2's input, not sync2's output — so the plugin had no notion
+   that the change was unintended.
+
+2. *Reconcile blind spot (the structural bug).* GitHub's Contents
+   API has a hard ~1 MB inline-content limit. For files between
+   1 MB and 100 MB the API returns status 200 with
+   `content: ""` and `encoding: "none"`, expecting the caller to
+   fall back to the Blobs API by the file's blob SHA.
+   `GithubClient.getContentsAtRef` returned the empty `content`
+   verbatim. The reconcile call site decoded it as a 0-byte
+   `ArrayBuffer`, computed a 3-way merge against `base=∅, theirs=∅,
+   ours=47 bytes`, and concluded `modify-wins → push ours`. The
+   resulting tree carried 47-byte blobs for paths that had been
+   ~1 MB on remote, and the push committed cleanly because GitHub
+   itself does not care about size delta.
+
+**Now-covered-by:** §11 *Cross-Platform Contracts* extended with
+the Contents-API size discipline.
+`GithubClient.getContentsAtRef` now inspects `size` and `encoding`
+on the response: when `size > 0` and `content === ""` (the
+documented "too large for inline" case), it fetches the actual
+bytes via `getBlob({ sha })`. The fallback path is INFO-logged
+with `{ path, ref, size, encoding, sha }` so a production sync
+that hits a large file leaves a visible breadcrumb. A unit suite
+(`tests/sync2/github-client-large-file.test.ts`, 5 cases) covers
+the four branches — inline-content path, legitimately-empty file,
+documented-empty large file with Blobs fallback, defensive
+`content: null` variant — and an integration suite
+(`tests/integration/scenarios/sync2/edges/F-large-file-over-1mb.test.ts`)
+exercises a real 1.5 MB markdown round-trip through push, remote
+read, and an incremental reconcile cycle. The companion
+defensive-guard work (zero-byte → conflict instead of push;
+>90 % shrink heuristic; explicit reconcile decision logging) is
+tracked as separate hardening tasks and ships in a follow-up
+release; this postmortem covers the structural fix that resolves
+the primary failure mode.
+
 ---
 
 ## 17. Glossary

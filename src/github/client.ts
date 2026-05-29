@@ -343,6 +343,29 @@ export default class GithubClient {
    * (currentHead) sides of a 3-way merge during conflict
    * reconciliation. Returns null on 404 (path absent at that commit
    * — e.g. force-pushed history).
+   *
+   * **Large-file fallback (P0 fix for 2.0.1-beta5):**
+   * GitHub's Contents API has a hard ~1 MB inline-content limit. For
+   * files >1 MB and ≤100 MB the API returns status 200 with
+   * `content: ""` (empty string) and `encoding: "none"`, expecting
+   * the caller to fall back to the Blobs API to fetch the actual
+   * bytes via the file's blob SHA. Before this fix, sync2 silently
+   * decoded the empty content to a 0-byte ArrayBuffer, ran the 3-way
+   * merge against "remote=∅", and concluded "ours wins" — pushing the
+   * local content (which could itself be corrupted) over the
+   * legitimate >1 MB remote file. This was reproduced as a
+   * catastrophic data-loss incident on a user vault containing
+   * ~1.5 MB markdown notes. See docs/PSEUDO-MERGE-MODE.md §16 Field
+   * Postmortems.
+   *
+   * Fix: when Contents API returns empty content but reports `size > 0`,
+   * fetch the actual bytes via `getBlob({ sha })`. Blobs API has its
+   * own ~100 MB limit (separate from Contents API's 1 MB limit) and
+   * works correctly for the entire range we care about for vault
+   * sync. Logged at WARN level so the fallback path is visible in
+   * production logs.
+   *
+   * See: https://docs.github.com/en/rest/repos/contents
    */
   async getContentsAtRef({
     path: filePath,
@@ -377,10 +400,42 @@ export default class GithubClient {
         `Failed to get contents at ref, status ${response.status}`,
       );
     }
-    return {
-      content: response.json.content,
-      sha: response.json.sha,
-    };
+
+    const sha = response.json.sha as string;
+    const size = (response.json.size as number) ?? 0;
+    const content = (response.json.content as string | null) ?? "";
+    const encoding = (response.json.encoding as string | undefined) ?? "";
+
+    // Inline content present → use it directly. The typical < 1 MB
+    // case. Encoding is "base64" with non-empty content.
+    if (content !== "") {
+      return { content, sha };
+    }
+
+    // Edge: file is actually empty on the server (size === 0). Treat
+    // as a regular empty file — `content` of "" is correct already
+    // (base64ToArrayBuffer("") gives a 0-byte ArrayBuffer, which is
+    // what callers expect for an empty file).
+    if (size === 0) {
+      return { content: "", sha };
+    }
+
+    // File is >1 MB → Contents API truncated inline content per the
+    // documented behavior (https://docs.github.com/en/rest/repos/contents).
+    // `encoding` is "none" in this case. Fall back to Blobs API to fetch
+    // the actual bytes (base64-encoded) via the file's blob SHA.
+    this.logger.info(
+      "getContentsAtRef: Contents API returned empty content for >1MB file; falling back to Blobs API",
+      {
+        path: filePath,
+        ref: ref.slice(0, 7),
+        size,
+        encoding,
+        sha,
+      },
+    );
+    const blob = await this.getBlob({ sha, retry, maxRetries });
+    return { content: blob.content, sha };
   }
 
   /**
