@@ -142,10 +142,11 @@ built around. Full rationale in
 ## 2.0.0-beta — 2026-05-15
 
 **Rename and refocus.** The plugin was renamed from
-`github-gitless-sync` to **`github-easy-sync`** to reflect a
-year-long rework that turned a desktop-leaning REST-API sync into
-a mobile-first, crash-tolerant engine with conflict-resolution as
-a first-class feature. The fork started from
+`github-gitless-sync` to **`github-easy-sync`** to reflect a deep
+architectural rework: the original synchronous, single-pass
+REST-API sync was replaced by an asynchronous, queue-based,
+mobile-first, crash-tolerant engine, with conflict resolution
+promoted to a first-class concern. The fork started from
 `github-gitless-sync@1.0.7` (see entry below); 96 commits later
 this version landed.
 
