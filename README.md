@@ -8,6 +8,30 @@ Version `2.0.1-beta` · AGPL-3.0 · Fork of
 
 ---
 
+## What's new in 2.0.1-beta5
+
+Hotfix release. Fixes a critical sync bug that could overwrite
+remote files larger than 1 MB with truncated local copies.
+
+- **Files larger than 1 MB now sync correctly.** GitHub's Contents
+  API truncates inline content for files above ~1 MB; previous
+  releases decoded the truncated response as 0 bytes, then ran the
+  3-way reconcile against `remote = ∅` and (incorrectly) chose the
+  local side. The fix transparently fetches the actual bytes via
+  the Blobs API when the Contents API reports a large file. Affects
+  every user with any single file above 1 MB; see
+  [§16.6 of the design doc](./docs/PSEUDO-MERGE-MODE.md) for the
+  full postmortem.
+- **No behaviour change for files at or below 1 MB.** The fast
+  path is unchanged; the Blobs-API roundtrip only runs when the
+  Contents response shows `size > 0` with empty inline content.
+
+If you suspect you were affected (a recent sync replaced one of
+your notes on GitHub with much smaller content), the previous
+versions of every file remain in your repo's history — restore via
+`git revert <commit>` from a clone, or copy from a previous commit
+on GitHub Web.
+
 ## What's new in 2.0.1-beta4
 
 Sync engine rebuilt from the ground up — both the conflict-

@@ -55,7 +55,8 @@ src/
 ├── errors.ts                        # SyncError class hierarchy: NetworkError, GithubAPIError +
 │                                    #  4 status subclasses, PlatformError, StaleStateError, makeGithubAPIError
 │                                    #  dispatcher. PSEUDO-MERGE-MODE §13.
-├── github/client.ts                 # Thin requestUrl wrapper, retryUntil; throws via makeGithubAPIError
+├── github/client.ts                 # Thin requestUrl wrapper, retryUntil; throws via makeGithubAPIError;
+│                                    #  getContentsAtRef does Blobs-API fallback for >1MB files (PSEUDO-MERGE-MODE §16.6)
 ├── settings/
 │   ├── settings.ts                  # GitHubSyncSettings + DEFAULT_SETTINGS
 │   └── tab.ts                       # Settings UI (trim onChange, Reset modal)
