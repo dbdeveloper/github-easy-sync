@@ -130,9 +130,164 @@ round-trip. Now part of the broader cross-platform contract in
 
 ---
 
-## 2.0.1-beta — earlier 2026
+## 2.0.1-beta — 2026-05-23
 
 Initial release of **pseudo-merge mode** — the
 sibling-file-based conflict-resolution model that this plugin is
 built around. Full rationale in
 [`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md).
+
+---
+
+## 2.0.0-beta — 2026-05-15
+
+**Rename and refocus.** The plugin was renamed from
+`github-gitless-sync` to **`github-easy-sync`** to reflect a
+year-long rework that turned a desktop-leaning REST-API sync into
+a mobile-first, crash-tolerant engine with conflict-resolution as
+a first-class feature. The fork started from
+`github-gitless-sync@1.0.7` (see entry below); 96 commits later
+this version landed.
+
+### Engine — `sync2` rewrite
+
+- **State machine for first sync**, with a user-facing modal only
+  when the divergence is truly ambiguous. No more silent
+  overwrites at adoption time; the engine mtime-checks every
+  divergence and keeps local when local is newer.
+- **Manifest as a first-class invariant.** A separate JSON file
+  tracks the last-synced commit + per-path SHA snapshot;
+  ChangeDetector walks the vault on each sync click instead of
+  subscribing to live events, so edits made while the plugin was
+  disabled are picked up on the next click — no "missed events"
+  failure mode.
+- **Atomic bare-repo bootstrap.** A brand-new GitHub repo (no
+  commits yet) is seeded via the Contents API; subsequent writes
+  retry on the documented 409 race.
+- **Crash-resume across four layers** — adoption pull,
+  incremental pull, push blob upload, and the find-changes →
+  queue bridge. A sync interrupted mid-flight (Obsidian closed,
+  phone backgrounded, network drop) finishes on the next trigger
+  without duplicating commits.
+- **Single network entry point.** `drain` (formerly
+  `processQueue`) handles every pull + push combination; the
+  legacy `SyncManager` is gone.
+- **Reconcile handles all conflict types.** Delete-vs-modify
+  promotes to a real conflict; auto-resolution short-circuits
+  when both sides match; mtime-based "atomic conflicts" resolve
+  without prompting.
+
+### Conflict resolution — first complete UI
+
+- **`DiffPane` widget** with per-chunk `[Theirs] / [Both] /
+  [Ours]` action bar (CM6 widget decorations), keyboard
+  navigation, and a status footer.
+- **Vim-mappable chunk operations** exposed as Obsidian commands
+  so power users can resolve from the keyboard alone.
+- **"Resolve now" auto-opens the diff editor** for the affected
+  file rather than dumping the user at a generic conflicts list.
+- **Conflict sibling labelling.** Siblings carry the **GitHub
+  author** of the incoming version, not the local device name —
+  multi-device users can tell at a glance whose change is
+  pending.
+- **`ConflictStore` orphan cleanup on load.** A previous session
+  that crashed mid-resolve leaves no dangling sibling rows.
+
+### Filtering, settings, and per-device hygiene
+
+- **Sync filtering moved to user-managed `.gitignore` files.** A
+  unified `isSyncable` rule set drives every push and pull
+  decision; users edit one well-known file instead of toggling
+  thirty plugin settings.
+- **`community-plugins.json` stops syncing by default** — it's
+  per-device state, not vault content.
+- **"Push plugins data.json to GitHub" toggle.** Off by default
+  (most `data.json` files store API tokens); flip-on opt-in
+  routes them through the same `.gitignore` machinery.
+- **`syncConfigDir` default → false.** A first-time install no
+  longer pushes the entire `.obsidian/` tree; opt in per device.
+- **Auto-detect repo / owner / branch change** in settings, with
+  a `[Reset]` button that wipes the local manifest cleanly when
+  the user re-points the plugin at a new GitHub repo.
+- **Settings UX polish.** Live preview under both commit-message
+  templates; the `{date}` placeholder split into separate
+  `{date}` and `{time}`; clearer labelling on Auto-commit and
+  Sync-interval; default interval bumped 1 → 5 minutes.
+
+### Notices and progress
+
+- **Live N/M file counter** during push AND pull (text + binary
+  both count toward the same denominator).
+- **Click-time notice** confirms the sync started; **"Sync done"
+  finale** summarises file counts updated from GitHub. Single-
+  notice UX replaces the previous stacked-toast spam.
+- **Bytes-based progress threshold + lazy notice.** Quick syncs
+  stay silent; only the runs that take real time get a progress
+  notice.
+
+### Test infrastructure
+
+- **Integration suite (~20 min, real GitHub)** with structured
+  bucket series A through K plus the bootstrap suite. Buckets
+  cover: bootstrap (A), adoption (B), resume after crash (C),
+  incremental + delete races (D), edge cases (E), special chars
+  + content (F), multi-device convergence (G), out-of-band drift
+  (H), settings lifecycle (I), API failures (J), manifest
+  corruption / recovery (K).
+- **P-series performance baselines** (opt-in via
+  `npm run test:perf`) for upload throughput.
+- **Test-only `RequestFaultInjector`** lets J / K tests feed
+  deterministic 429 / 5xx / network-drop responses into the retry
+  loop without burning real PAT quota.
+
+### Mobile robustness
+
+- **Android first-sync crash fixed** — large initial syncs now
+  use per-file Contents API calls instead of a single tree-blob
+  download that OOM'd Capacitor.
+- **Adoption-time path trimming and canonicalisation** so a vault
+  bootstrapped on desktop arrives on Android without
+  `FILE_NOTCREATED` errors.
+
+### Developer tooling
+
+- **`OBSIDIAN_PLUGIN_DIR` env var** (with `~` expansion fixed for
+  IDE-set values) mirrors `main.js` / `manifest.json` /
+  `styles.css` straight into a vault on every `pnpm dev` build —
+  no more manual `cp` between rebuilds.
+
+For the canonical engine spec, see
+[`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md);
+the design rationale article was written immediately after this
+release to capture the model in one place.
+
+---
+
+## github-gitless-sync 1.0.7 — 2025-05-22 (fork point)
+
+The version of the upstream
+[`github-gitless-sync`](https://github.com/silvanocerza/github-gitless-sync)
+plugin from which this fork was taken. Authored by
+[Silvano Cerza](https://silvanocerza.com); the fork inherits
+that work, the AGPL-3.0 licence, and the original
+"vault-to-GitHub via REST API only" idea.
+
+### Carried forward into the fork
+
+- **GitHub REST API only.** No `git` binary, no `isomorphic-git`
+  — the architectural decision that lets the same code run on
+  desktop and on Obsidian Mobile.
+- **Commit-message templating** with placeholders.
+- **`Sync now` command + ribbon + status bar** entry points.
+- **Settings tab** with token / owner / repo / branch
+  configuration and a connection-test probe.
+
+### Notable fixes shipped in upstream's 1.0.7 itself
+
+- **Sync correctly handles deleted, moved, and renamed files.**
+  Previously a delete or rename on either side could leave the
+  vault and remote tree mismatched.
+
+For the upstream changelog and earlier versions of the
+gitless-sync line, see
+[silvanocerza/github-gitless-sync](https://github.com/silvanocerza/github-gitless-sync).
