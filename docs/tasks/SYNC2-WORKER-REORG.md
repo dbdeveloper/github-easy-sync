@@ -736,7 +736,54 @@ and Blobs-API fallback (§3 item 7).
 on the main thread; the Blobs-API fallback lives entirely inside
 the network worker.
 
-### Stage 7: Cancellation + Settings rework + UX polish (~5-7 hours)
+### Stage 7: Cancellation + Settings rework + UX polish — STATUS
+
+**Done (commits 17cc378, f9f345d, 1768bcc, c3db1b7, 84c2878):**
+
+- ✅ Settings model: `syncStartsWithCommit` (master, default true),
+  `showCommitRibbonButton` (UI, default false), `consolidateCommits`
+  (renamed from accumulateOfflineSyncs). Migration: none — manual
+  data.json update.
+- ✅ Manual `data.json` migration notice — first-load detection of
+  old key names; log + 30s Notice surface.
+- ✅ Settings tab UI: master toggle, "Show commit ribbon button"
+  toggle, unusable-shape warning, "Sync plugins data.json" label
+  rename, "Consolidate commits into one (if possible)".
+- ✅ `Sync2Manager.commitOnly()` — engine API for the [Commit] click.
+- ✅ [Commit] ribbon icon + command-palette entry; `plugin.commit()`.
+- ✅ `sync()` click branches on master toggle: true → syncAll,
+  false → resumeQueue.
+- ✅ `Sync2Manager.cancelDrain()` + `abortRequested` flag + reconcile
+  check; bails at file boundary when set.
+- ✅ `DrainStatus` interface + `setDrainStatusListener` subscription;
+  drain() emits updates at entry/exit + per file.
+- ✅ Settings "Drain status" section at top: live timer, current
+  path, file counter (N of M), [Stop drain] button.
+- ✅ `Sync2Manager.recordDrainError(err)` from sync() + backgroundDrain
+  catch blocks → "⚠ Last error (Ns ago): …" in the status section.
+
+**Deferred to focused follow-ups:**
+
+- ⏳ Split-mode confirmation modal on second [Sync] click during
+  drain. For now in split mode repeated clicks queue identically
+  to default mode; Settings [Stop drain] is the cancel path until
+  this lands.
+- ⏳ Stuck-batch passive Notice (>5 min). Data is in
+  DrainStatus.startedAt; needs a setInterval check + Notice.
+- ⏳ Per-file Notice "Reconciling X/N: <path>". Data is in the
+  drain-status callback; needs a Notice consumer alongside the
+  Settings tab subscription.
+- ⏳ Unit tests for the new Stage 7 branches.
+
+**Acceptance (current):** Settings model is in place; the
+split-button layout works end-to-end (Commit enqueues; Sync drains
+in split mode); cancel works from the Settings section; errors
+surface visibly. The modal-on-second-click polish is the remaining
+UX item.
+
+---
+
+### Original Stage 7 brief (~5-7 hours)
 
 Goal: user can abort a stuck sync without the cancel UI getting
 in the way of the common case (committing new changes while the
