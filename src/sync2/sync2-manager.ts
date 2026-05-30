@@ -568,6 +568,40 @@ export class Sync2Manager {
     }
   }
 
+  // Stage 7 — commit-only entry point. Runs change-detection +
+  // enqueue + persists the snapshot, but does NOT drain. Used by
+  // the [Commit] ribbon button when the user wants to stage edits
+  // without touching the network.
+  //
+  // Reuses syncAll's pre-enqueue invariants (filename sanitization,
+  // gitignore invariants) so the bytes that land in .push-queue
+  // match what a full sync would have enqueued. Skips bootstrap
+  // entirely — first-time bootstrap is the drain's responsibility;
+  // there's no need to fetch the remote tree just to stage local
+  // changes.
+  async commitOnly(): Promise<void> {
+    this.logger.info("Sync2 commitOnly start");
+    await this.reconcileRemoteIdentity();
+    if (this.invariants) await this.invariants.enforce();
+    await this.sanitizeForbiddenFilenames();
+    const changes = await this.detector.findChanges();
+    if (changes.length === 0) {
+      await this.store.save();
+      this.onNoLocalChanges?.();
+      this.logger.info("Sync2 commitOnly: nothing to commit");
+      return;
+    }
+    const enqueued = await this.enqueueOrMerge(changes, this.fullSyncMeta());
+    await this.fireQueueDepth();
+    if (enqueued > 0) {
+      this.onLocalCommitted?.(enqueued);
+      this.logger.info("Sync2 commitOnly committed", {
+        count: enqueued,
+        changes: changes.map((c) => `${c.kind} ${c.path}`),
+      });
+    }
+  }
+
   // Action 2 — sync just the file at `path`.
   //
   // Behaviour when there's nothing to push (file matches snapshot,

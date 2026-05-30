@@ -375,18 +375,19 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Auto-commit on interval sync")
+      .setName("Sync starts with commit")
       .setDesc(
-        "Governs interval-driven syncs AND sync-on-startup. " +
-          "When ENABLED, every automatic tick does a full commit + pull + " +
-          "push of your local edits (same as clicking the Sync button) — " +
-          "no confirmation, every interval. When DISABLED (default), " +
-          "automatic ticks only pull remote changes silently; your local " +
-          "edits stay uncommitted until you click Sync yourself.",
+        "Master toggle (default ON). When ON, every Sync surface " +
+          "(manual click, interval, startup) does change-detection + " +
+          "commit + drain — today's default behaviour. When OFF, Sync " +
+          "only drains the existing .push-queue (or pulls when empty); " +
+          "commit becomes the user's separate action via the [Commit] " +
+          "ribbon button. Turn the [Commit] ribbon button ON below if " +
+          "you choose this — otherwise nothing ever gets enqueued.",
       )
       .addToggle((toggle) => {
         toggle
-          .setValue(this.plugin.settings.syncStartsWithCommit ?? false)
+          .setValue(this.plugin.settings.syncStartsWithCommit ?? true)
           .onChange(async (value) => {
             this.plugin.settings.syncStartsWithCommit = value;
             await this.plugin.saveSettings();
@@ -414,11 +415,15 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Accumulate offline syncs into one commit")
+      .setName("Consolidate commits into one (if possible)")
       .setDesc(
-        "When the network is unavailable and a previous push is still " +
-          "pending, fold subsequent Sync clicks into the same batch. " +
-          "Eventual replay produces a single commit instead of one per click.",
+        "Fold consecutive commit-enqueue actions into the same " +
+          ".push-queue batch when no drain has happened in between. " +
+          "Covers two cases: (1) offline-accumulate — when push is " +
+          "pending and new Sync clicks arrive, they merge into the " +
+          "stuck batch so eventual replay is one commit; (2) split-mode " +
+          "[Commit] taps — clicking [Commit] several times in a row " +
+          "without an intervening [Sync] collapses into one batch.",
       )
       .addToggle((toggle) =>
         toggle
@@ -450,7 +455,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Push plugins data.json to GitHub")
+      .setName("Sync plugins data.json")
       .setDesc(
         "ENABLE WITH CAUTION! Plugin data.json files may contain " +
         "sensitive data (API tokens, credentials, license keys) that you " +
@@ -506,7 +511,11 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Show sync ribbon button")
-      .setDesc("Display a refresh-cw ribbon button to trigger a full sync.")
+      .setDesc(
+        "Display the Sync ribbon button (action depends on the " +
+          "`Sync starts with commit` master toggle above). The icon's " +
+          "badge shows the count of unsent commits in .push-queue.",
+      )
       .addToggle((toggle) => {
         toggle
           .setValue(this.plugin.settings.showSyncRibbonButton)
@@ -517,6 +526,54 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
             else this.plugin.hideSyncRibbonIcon();
           });
       });
+
+    new Setting(containerEl)
+      .setName("Show commit ribbon button")
+      .setDesc(
+        "Independent of the master toggle. When ON, shows a " +
+          "separate [Commit] ribbon button that enqueues local " +
+          "changes to .push-queue without touching the network. " +
+          "Most useful in split mode (`Sync starts with commit` " +
+          "OFF) where it's the only way to add commits — Settings " +
+          "shows a warning if you turn the master toggle OFF " +
+          "without enabling this.",
+      )
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.showCommitRibbonButton ?? false)
+          .onChange(async (value) => {
+            this.plugin.settings.showCommitRibbonButton = value;
+            await this.plugin.saveSettings();
+            if (value) this.plugin.showCommitRibbonIcon();
+            else this.plugin.hideCommitRibbonIcon();
+            // Re-render to refresh the unusable-shape warning.
+            this.display();
+          });
+      });
+
+    // Unusable-shape warning surface: master toggle OFF AND commit
+    // ribbon button OFF means there's no way to commit anything.
+    // Sync only drains, but nothing ever gets enqueued. Surface
+    // a Notice-style warning right where the toggles live so the
+    // user can spot the misconfiguration without leaving the page.
+    if (
+      this.plugin.settings.syncStartsWithCommit === false &&
+      (this.plugin.settings.showCommitRibbonButton ?? false) === false
+    ) {
+      const warn = containerEl.createDiv();
+      warn.style.background = "var(--background-modifier-error)";
+      warn.style.color = "var(--text-on-accent)";
+      warn.style.padding = "0.75em 1em";
+      warn.style.borderRadius = "4px";
+      warn.style.margin = "0.5em 0 1em 0";
+      warn.style.fontSize = "0.9em";
+      warn.setText(
+        "⚠ Misconfigured: `Sync starts with commit` is OFF and " +
+          "`Show commit ribbon button` is OFF too. Nothing will " +
+          "ever be enqueued — Sync clicks only drain an already-empty " +
+          "queue. Turn one of the two ON to make the plugin usable.",
+      );
+    }
 
     // ── Logging ─────────────────────────────────────────────────────
     new Setting(containerEl).setName("Logging").setHeading();

@@ -134,9 +134,20 @@ export default class GitHubSyncPlugin extends Plugin {
       this.app.workspace.onLayoutReady(() => {
         if (this.settings.showStatusBarItem) this.showStatusBarItem();
         if (this.settings.showSyncRibbonButton) this.showSyncRibbonIcon();
+        if (this.settings.showCommitRibbonButton)
+          this.showCommitRibbonIcon();
         if (this.settings.syncOnStartup && this.isConfigured()) {
           void this.runStartupSync();
         }
+      });
+
+      // Stage 7: a separate command for the [Commit] action so users
+      // can map a keyboard shortcut even without the ribbon icon.
+      this.addCommand({
+        id: "commit-local",
+        name: "Commit local changes (no upload)",
+        icon: "git-commit",
+        callback: this.commit.bind(this),
       });
 
       this.addCommand({
@@ -582,7 +593,16 @@ export default class GitHubSyncPlugin extends Plugin {
     }
     if (!(await this.confirmPendingConflictsBeforeSync())) return;
     try {
-      await this.sync2Manager.syncAll();
+      // Stage 7: master toggle controls semantic
+      //   true  (default) → commit + drain (syncAll)
+      //   false           → drain only (resumeQueue)
+      // The [Commit] ribbon button is the user's separate path
+      // for enqueueing when the master toggle is false.
+      if (this.settings.syncStartsWithCommit ?? true) {
+        await this.sync2Manager.syncAll();
+      } else {
+        await this.sync2Manager.resumeQueue();
+      }
     } catch (err) {
       // Log BEFORE the Notice so the user-visible toast and the
       // logged record always agree. Without this, the only artifact
@@ -812,6 +832,43 @@ export default class GitHubSyncPlugin extends Plugin {
     this.syncRibbonIcon = null;
   }
 
+  // ── commit ribbon (Stage 7) ─────────────────────────────────────────
+
+  // Independent of the Sync ribbon icon. When the user enables
+  // `showCommitRibbonButton`, a separate [Commit] icon appears.
+  // Clicking it triggers change-detection + enqueue ONLY — never
+  // touches the network. In split mode (master toggle false) this
+  // is the only way to add commits to .push-queue.
+  commitRibbonIcon: HTMLElement | null = null;
+
+  showCommitRibbonIcon(): void {
+    if (this.commitRibbonIcon) return;
+    this.commitRibbonIcon = this.addRibbonIcon(
+      "git-commit",
+      "Commit local changes (no upload)",
+      this.commit.bind(this),
+    );
+  }
+
+  hideCommitRibbonIcon(): void {
+    this.commitRibbonIcon?.remove();
+    this.commitRibbonIcon = null;
+  }
+
+  // Click handler for [Commit]: enqueue local changes to .push-queue
+  // without triggering drain. Uses Sync2Manager.commitOnly() which
+  // runs the change-detection + enqueue path and stops there.
+  async commit(): Promise<void> {
+    try {
+      await this.sync2Manager.commitOnly();
+    } catch (err) {
+      this.logger?.error("Commit ribbon click failed", {
+        error: String(err),
+      });
+      new Notice(`Commit failed: ${err}`, 10000);
+    }
+  }
+
   // ── auto-sync interval ──────────────────────────────────────────────
 
   startSyncInterval(): void {
@@ -825,7 +882,7 @@ export default class GitHubSyncPlugin extends Plugin {
       isConfigured: () => this.isConfigured(),
       intervalEnabled: () => this.settings.syncStrategy === "interval",
       intervalMinutes: () => this.settings.syncInterval,
-      syncStartsWithCommit: () => this.settings.syncStartsWithCommit ?? false,
+      syncStartsWithCommit: () => this.settings.syncStartsWithCommit ?? true,
       hasPendingBatches: () => this.sync2Manager.hasPendingBatches(),
       // Background drain skips the pre-sync confirmation modal —
       // interval timers and the startup pulse are not user-driven,
