@@ -4,6 +4,7 @@
 
 import { Vault } from "obsidian";
 import { calculateGitBlobSHA, hasTextExtension } from "../utils";
+import WorkerClient from "../worker/worker-client";
 import { normalizeText } from "./text-normalize";
 import { FileChange, QueueBatch } from "./types";
 
@@ -69,6 +70,12 @@ export interface PushQueueDeps {
   // overwrites batch files byte-exact — no CRLF/BOM rewrite. Optional;
   // when omitted, canonicalization is on (legacy behaviour).
   autoCanonicalize?: () => boolean;
+  // Shared Worker orchestra controller. When provided, the SHA
+  // computation that backs `findBlobShaForPath` dispatches through
+  // the worker pool — threshold-gated, only big files round-trip.
+  // Optional; when omitted, a fallback-mode WorkerClient is
+  // constructed which runs everything inline on the main thread.
+  workerClient?: WorkerClient;
 }
 
 export default class PushQueue {
@@ -76,6 +83,7 @@ export default class PushQueue {
   private readonly queueRoot: string;
   private readonly now: () => Date;
   private readonly autoCanonicalize: () => boolean;
+  private readonly workerClient: WorkerClient;
   // Serializes meta-file rewrites so concurrent `recordBlobUpload`
   // callers (parallel `createBlob` callbacks in TreeBuilder) don't
   // clobber each other's appends. Each call awaits the previous one
@@ -88,6 +96,7 @@ export default class PushQueue {
     this.queueRoot = `${deps.configDir}/plugins/${deps.selfPluginId}/${QUEUE_DIRNAME}`;
     this.now = deps.now ?? (() => new Date());
     this.autoCanonicalize = deps.autoCanonicalize ?? (() => true);
+    this.workerClient = deps.workerClient ?? new WorkerClient();
   }
 
   // Materialize a new batch on disk from `changes` and return its id.
@@ -276,7 +285,7 @@ export default class PushQueue {
       const snapshotPath = `${batchDir}/${VAULT_SUBDIR}/${path}`;
       if (!(await this.vault.adapter.exists(snapshotPath))) continue;
       const buf = await this.vault.adapter.readBinary(snapshotPath);
-      return await calculateGitBlobSHA(buf);
+      return await this.workerClient.computeGitBlobSHA(buf);
     }
     return null;
   }

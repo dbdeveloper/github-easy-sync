@@ -345,11 +345,13 @@ export default class GitHubSyncPlugin extends Plugin {
     // files owned by conflict records via record.theirsBlobSha
     // SHA-verify, not just snapshot-based reasoning.
     const gi = new GI(vaultRoot);
+    this.workerClient = new WorkerClient();
     const queue = new PushQueue({
       vault: this.app.vault,
       configDir: this.app.vault.configDir,
       selfPluginId: manifest.id,
       autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? false,
+      workerClient: this.workerClient,
     });
     const detector = new ChangeDetector({
       vault: this.app.vault,
@@ -447,7 +449,6 @@ export default class GitHubSyncPlugin extends Plugin {
     conflictWatcher.start();
     this.conflictWatcher = conflictWatcher;
 
-    this.workerClient = new WorkerClient();
     this.sync2Manager = new Sync2Manager({
       vault: this.app.vault,
       store,
