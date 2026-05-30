@@ -442,9 +442,42 @@ export default class PushQueue {
   // Read a single file's bytes from inside the batch's vault/ snapshot.
   // Used by Sync2Manager during conflict reconciliation to obtain the
   // "ours" side for a 3-way merge.
+  // Read a single file's bytes from inside the batch's vault/
+  // snapshot. Used by Sync2Manager during conflict reconciliation
+  // to obtain the "ours" side bytes for the 3-way merge.
+  //
+  // Primary path: `vault.adapter.getResourcePath(target)` returns
+  // a URL the WebView can fetch directly. On Obsidian Mobile this
+  // is `http://localhost/_capacitor_file_/...` — a
+  // Capacitor-internal scheme designed so WebView's native fetch
+  // resolves local files without a JS↔native bridge round-trip.
+  // On desktop it's an `app://` URL. `getResourcePath` is part of
+  // the documented `DataAdapter` API (Obsidian uses it itself for
+  // `<img src>` rendering of vault images); using it via `fetch` is
+  // not a hack but a deliberate choice to avoid the
+  // `readBinary` bridge bottleneck that empirically blocked the
+  // sync flow on mobile for files >1 MB.
+  //
+  // Fallback: `mock-obsidian` in unit tests doesn't expose
+  // `getResourcePath`, so we drop down to `adapter.readBinary`.
+  // The fallback also covers any future Obsidian build / platform
+  // where `getResourcePath` becomes unavailable.
   async readFile(id: string, vaultPath: string): Promise<ArrayBuffer> {
     const target = `${this.queueRoot}/${id}/${VAULT_SUBDIR}/${vaultPath}`;
-    return await this.vault.adapter.readBinary(target);
+    const getResourcePath = (
+      this.vault.adapter as { getResourcePath?: (p: string) => string }
+    ).getResourcePath;
+    if (typeof getResourcePath !== "function") {
+      return await this.vault.adapter.readBinary(target);
+    }
+    const url = getResourcePath.call(this.vault.adapter, target);
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      throw new Error(
+        `PushQueue.readFile fetch failed for ${vaultPath}: status ${resp.status}`,
+      );
+    }
+    return await resp.arrayBuffer();
   }
 
   // Replace a single file's content inside an existing batch. Used by
