@@ -541,7 +541,66 @@ AND 3-way merge — all three hot-path CPU operations that
 motivated the rework are now off the main thread when they cross
 their respective size thresholds.
 
-### Stage 5: SHA-first as default (manifest mtime+size cache + reconcile rework) (~5-7 hours)
+### Stage 5: SHA-first as default — STATUS UPDATE (2026-05-30)
+
+**Done (commit cfb5fe4):**
+
+- ✅ Manifest mtime+size cache — **already existed** pre-rework.
+  `FileSnapshot` carries `{ path, remoteSha, mtime, size }` and
+  ChangeDetector short-circuits unchanged files via mtime+size
+  match + falls back to SHA recompute on drift. No code change
+  needed for this piece.
+
+- ✅ `GithubClient.getContentsMetadataAtRef` — new API that
+  returns `{ sha, size }` without ever downloading the blob
+  content; no Blobs-API fallback for >1 MB files.
+
+- ✅ `Sync2Manager.safeFetchMetadata` — graceful-degradation
+  wrapper.
+
+- ✅ SHA-first reconcile decision tree (4 branches):
+  1. base.sha === theirs.sha → no remote change
+  2. ours.sha === theirs.sha → drop from batch (NEW — subsumes
+     old convergence short-circuit)
+  3. ours.sha === base.sha → atomic theirs wins (NEW — also
+     catches the binary-file ours-unchanged case that previously
+     registered conflicts unnecessarily)
+  4. all differ → genuine 3-way divergence (fall through to
+     full content + decode + merge)
+
+- ✅ Removed dead code: byte-level convergence short-circuit and
+  size-guard SHA-skip — both subsumed by Branch 2.
+
+- ✅ 663/663 unit tests pass; mock client gains a
+  `getContentsMetadataAtRef` implementation.
+
+**Estimated bandwidth savings:** paths where base.sha ===
+theirs.sha (very common during "sync while another device
+hasn't moved") now skip 2 blob fetches each. For a 1.9 MB
+file that's ~5 MB unused download avoided per path.
+
+**Deferred / scope-cut:**
+
+- ⏳ Push-side SHA-first (GitHub blob-existence check before
+  `createBlob`). The existing per-batch `uploadedBlobs` cache
+  already handles crash-resume; the reconcile-side Branch 2
+  already prevents pushing bytes whose SHA matches the remote.
+  The remaining case (push of new content that happens to
+  match an existing GitHub blob from elsewhere in the repo) is
+  rare and naturally addressed once Stage 6 routes
+  `createBlob` through the network worker — that's the right
+  place to add the existence check.
+
+- ⏳ Dedicated unit tests for the new reconcile branches —
+  existing tests cover them indirectly (the SHA-first path is
+  observable-equivalent to the old behaviour for the cases
+  they exercise). Stage 8 perf tests + Stage 4/8 integration
+  tests against real GitHub will provide the empirical
+  baseline.
+
+---
+
+### Original Stage 5 brief (~5-7 hours)
 
 Goal: implement §0 P2 fully. Universal SHA-first strategy with
 manifest cache so we never read or push what we already know.
