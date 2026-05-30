@@ -159,7 +159,7 @@ These need explicit answers as each stage starts:
 | node-diff3 in worker | full library / extracted merge | full library (smaller delta) |
 | SHA-first reconcile | in scope here / follow-up | in scope (pairs with Worker) |
 | Worker threshold | 500 KB / 1 MB / 2 MB | 1 MB recommended (will test) |
-| Cancellation API | yes / no | yes (`[Cancel sync]` button) |
+| Cancellation API | yes / no | yes (second click on `[Sync]` opens confirm-cancel modal — no separate button) |
 | Raise size guard limit | 1 MB → ? after Workers | empirically determine after perf tests |
 
 ---
@@ -263,18 +263,38 @@ Goal: eliminate the entire "mobile bridge hang" risk class.
 
 Goal: user can abort a stuck sync; sees progress per file.
 
-- `[Cancel sync]` button in ribbon / command palette
-- Per-file progress Notice during reconcile drain (replaces static
-  "Push N/M" counter)
-- Cancellation calls `worker.terminate()` if a Worker job is in
-  flight
-- Stuck-batch detection: if drain attempt has been "running" for
-  > 5 min, surface Notice with `[Force-cancel]`
-- New unit tests: cancellation during merge, cancellation propagates
-  to Worker
+**Cancellation UX — second click on [Sync] = confirm-cancel modal.**
+No separate `[Cancel sync]` button; the existing Sync ribbon icon /
+command becomes context-aware:
+- When idle → opens the regular sync flow
+- When a sync is in flight → opens a small confirmation modal:
+  "A sync is currently in progress. Would you like to cancel it?"
+  with buttons `[Cancel sync]` (red) / `[Keep going]` (default).
+- Modal also shows live progress: "Currently processing N of M
+  files (path: …)" so the user knows whether to wait.
+- The pre-sync conflict modal (PreSyncConflictModal) is unaffected
+  — that's a separate guard before sync starts.
 
-**Acceptance:** in a deliberate-hang test, the [Cancel] button
-returns UI to interactive state within 1 second.
+Implementation:
+- Per-file progress state held on `Sync2Manager` (`current`, `total`,
+  `currentPath`), surfaced via callback the UI subscribes to.
+- The same callback also drives a per-file Notice
+  ("Reconciling X/N: <path>") that replaces the static "Push 0/4
+  files to GitHub" counter the user found unhelpful in the field
+  incident.
+- Cancellation flag on `Sync2Manager` (`abortRequested`); drain
+  checks between files. If a Worker job is in flight, also calls
+  `worker.terminate()` so CPU-heavy operations stop immediately.
+- Stuck-batch detection: if drain attempt has been "running" for
+  > 5 min, surface a passive Notice — but the second-click modal
+  is the primary recovery path.
+- New unit tests: cancellation during merge, cancellation propagates
+  to Worker, second-click modal lifecycle.
+
+**Acceptance:** in a deliberate-hang test, the second Sync click
+opens the confirmation modal within 1 second; choosing
+`[Cancel sync]` returns the UI to interactive state in another
+~1 second.
 
 ### Stage 8: Perf tests + final size-guard tuning (~3 hours)
 
