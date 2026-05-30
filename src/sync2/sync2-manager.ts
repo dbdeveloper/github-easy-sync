@@ -1560,12 +1560,13 @@ export class Sync2Manager {
       pluginJs = await this.readPluginJsContext(path, headRef);
     }
 
-    const auto = attemptAutoMerge({
+    const auto = await attemptAutoMerge({
       path,
       ours: oursBytes,
       theirs: theirsBytes,
       base: baseBytes,
       configDir: this.configDir,
+      mergeFn: (o, b, t) => this.workerClient.mergeText(o, b, t),
       pluginJs,
     });
 
@@ -3009,12 +3010,13 @@ export class Sync2Manager {
         );
       }
 
-      const auto = attemptAutoMerge({
+      const auto = await attemptAutoMerge({
         path,
         ours: oursBytes,
         theirs: theirsBytes,
         base: baseBytes,
         configDir: this.configDir,
+        mergeFn: (o, b, t) => this.workerClient.mergeText(o, b, t),
         pluginJs,
       });
 
@@ -3222,12 +3224,13 @@ export class Sync2Manager {
       for (const path of intersection) {
         const { oldOurs, newOurs } = resolvedPerPath.get(path)!;
         const oursBytes = await this.queue.readFile(id, path);
-        const auto = attemptAutoMerge({
+        const auto = await attemptAutoMerge({
           path,
           ours: oursBytes,
           theirs: newOurs,
           base: oldOurs,
           configDir: this.configDir,
+          mergeFn: (o, b, t) => this.workerClient.mergeText(o, b, t),
         });
         if (auto.type === "clean") {
           await this.queue.overwriteFile(id, path, auto.content);
