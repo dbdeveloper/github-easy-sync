@@ -333,7 +333,66 @@ user clicks the `[Cancel sync]` modal (Stage 7), it:
 4. Drain returns gracefully, batch stays in `.attempted` state on
    disk so the next sync retries cleanly.
 
-### 5.7 Bundle size impact
+### 5.7 What workers CAN and CANNOT do (boundary)
+
+This boundary informs every operation-placement decision in Stages
+3-6 and prevents over-engineering toward a "do everything in
+workers" design that physics won't allow.
+
+**Workers CAN:**
+- Call `fetch(url)` — including local files via URLs the main
+  thread provides through `getResourcePath(...)`.
+- Use Web Crypto API for SHA-1 (`crypto.subtle.digest`).
+- Use `atob` for base64 decode.
+- Bundle and run arbitrary pure-JS libraries (node-diff3, etc.).
+- Receive transferable `ArrayBuffer`s zero-copy via postMessage.
+
+**Workers CANNOT:**
+- Call any Obsidian API (`vault.adapter.write`, `vault.read`,
+  `app.workspace`, settings, etc.). These are main-thread only.
+- Mutate the vault. **Every vault write — text, binary, rename,
+  delete — must round-trip back to main thread via postMessage.**
+- Construct other workers (nested workers are unsupported on
+  Capacitor; even where supported, adds complexity for no
+  measurable gain).
+
+**Implication for read-from-disk:** for files already in
+`.push-queue`, pass the worker a URL (`getResourcePath(target)`,
+resolved on main thread) instead of bytes. The worker fetches
+and processes — bytes never visit the main thread heap. Pattern:
+
+```typescript
+// Main:
+const url = adapter.getResourcePath(`${queueRoot}/${id}/vault/${path}`);
+const { sha } = await workerClient.computeSha({ url });
+// `sha` is a tiny string — postMessage cost negligible.
+
+// Inside CPU worker:
+case "compute-sha": {
+  const buf = await fetch(msg.url).then((r) => r.arrayBuffer());
+  const sha = await crypto.subtle.digest("SHA-1", buf);
+  return { sha: hex(sha) };
+}
+```
+
+This pairs naturally with §0 P2 (SHA-first): the worker computes
+SHAs without ever materializing bytes on the main thread.
+
+**Implication for "main drain worker":** rejected. Drain
+orchestration would have to round-trip every vault write back to
+main anyway, eliminating the parallelism win; the main thread is
+already a thin shim in the orchestra design. Keep main thread as
+the orchestrator; let workers do CPU + network. Documented as
+out-of-scope in §11.
+
+**Implication for inter-worker filesystem channels:** rejected.
+Transferable ArrayBuffers are zero-copy across postMessage —
+they're not a memory cost. `.push-queue` already serves as the
+durable filesystem channel; layering additional worker-to-worker
+file coordination adds concurrency control, cleanup logic, and
+error recovery for no measurable gain.
+
+### 5.8 Bundle size impact
 
 Current `main.js`: ~150 KB. Worker sources add:
 - CPU worker (with node-diff3): ~60 KB
@@ -696,6 +755,18 @@ as separate backlog items.
 - Web Worker for ChangeDetector vault scan — future
 - Mobile binary file > 1 MB push optimization beyond what Worker
   buys — future
+- **"Main drain worker" that orchestrates everything from a
+  worker thread.** Vault writes (`adapter.write/writeBinary/
+  remove/rename`) are main-thread-only Obsidian APIs; any drain
+  worker would have to round-trip every write back to main,
+  eliminating the parallelism win. Main thread stays as the
+  orchestrator (thin shim that dispatches to workers and performs
+  writes). See §5.7 for the boundary analysis.
+- **Filesystem-based inter-worker communication.** Transferable
+  ArrayBuffers via postMessage are zero-copy, and `.push-queue`
+  already serves as the durable filesystem channel. Layering
+  worker-to-worker file coordination adds concurrency control
+  and cleanup logic for no measurable gain. See §5.7.
 
 ---
 
