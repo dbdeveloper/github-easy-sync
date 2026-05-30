@@ -30,6 +30,8 @@ import { ConflictWatcher } from "./sync2/conflict-watcher";
 import { ConflictStatusIndicator } from "./sync2/views/conflict-status-indicator";
 import WorkerClient from "./worker/worker-client";
 import { PreSyncConflictModal } from "./sync2/views/pre-sync-conflict-modal";
+import { TokenExpiredModal } from "./sync2/views/token-expired-modal";
+import { AuthError } from "./errors";
 import manifest from "../manifest.json";
 
 // How long the brief local-phase notices stay visible. 700ms is the
@@ -69,6 +71,13 @@ export default class GitHubSyncPlugin extends Plugin {
   // re-entry inside Obsidian's settings pipeline and freezes the
   // renderer. Synchronous read of this cache sidesteps the issue.
   pushPluginsDataJsonCached: boolean = false;
+
+  // Stage 7 / token-expiry UX. We throttle the
+  // "GitHub token expired" modal to at most once per hour so a
+  // background-drain failure every 5 minutes doesn't spam the
+  // user. Set to 0 (never shown) on plugin onload; updated to
+  // Date.now() each time the modal opens.
+  private lastAuthModalShownMs = 0;
 
   // UI elements that come and go with toggle settings.
   statusBarItem: HTMLElement | null = null;
@@ -675,6 +684,7 @@ export default class GitHubSyncPlugin extends Plugin {
       // Stage 7: surface in the Settings drain-status section so
       // the user sees "Last error: …" without opening the log.
       this.sync2Manager.recordDrainError(err);
+      this.maybeShowTokenExpiredModal(err);
       new Notice(`Error syncing. ${err}`);
     }
     // Drain may have mutated ConflictStore (Phase A SHA-match
@@ -696,6 +706,7 @@ export default class GitHubSyncPlugin extends Plugin {
     } catch (err) {
       void this.logger.error("Interval drain failed", `${err}`);
       this.sync2Manager.recordDrainError(err);
+      this.maybeShowTokenExpiredModal(err);
     }
   }
 
@@ -952,9 +963,49 @@ export default class GitHubSyncPlugin extends Plugin {
         err: describeError(err),
       });
       this.sync2Manager.recordDrainError(err);
+      this.maybeShowTokenExpiredModal(err);
       new Notice(`Upload failed: ${err}`, 10000);
     }
     this.conflictCounter?.markDirty();
+  }
+
+  // Detects AuthError (401 / 403) — typically an expired
+  // fine-grained PAT — and opens the TokenExpiredModal with
+  // step-by-step recovery guidance. Throttled to at most once per
+  // hour so a 5-minute background drain doesn't spam the user.
+  private maybeShowTokenExpiredModal(err: unknown): void {
+    if (!(err instanceof AuthError)) return;
+    const now = Date.now();
+    const ONE_HOUR = 60 * 60 * 1000;
+    if (now - this.lastAuthModalShownMs < ONE_HOUR) return;
+    this.lastAuthModalShownMs = now;
+    try {
+      const modal = new TokenExpiredModal(this.app, () => {
+        // Reveal the plugin's settings tab. Obsidian's
+        // setting.open + openTabById API gives us the deep link.
+        const setting = (
+          this.app as unknown as {
+            setting: {
+              open(): void;
+              openTabById(id: string): void;
+            };
+          }
+        ).setting;
+        try {
+          setting.open();
+          setting.openTabById(manifest.id);
+        } catch {
+          // Best effort — older Obsidian versions may not expose
+          // openTabById. The modal still ran, the user can open
+          // settings manually.
+        }
+      });
+      modal.open();
+    } catch (modalErr) {
+      this.logger?.warn("TokenExpiredModal open failed", {
+        err: String(modalErr),
+      });
+    }
   }
 
   // ── auto-sync interval ──────────────────────────────────────────────
