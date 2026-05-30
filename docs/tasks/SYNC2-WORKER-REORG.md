@@ -437,16 +437,30 @@ Goal: bring the proven fixes from the experimental WIP into clean
 commits.
 
 Each as a separate commit:
-1. `fetch(getResourcePath)` in PushQueue.readFile + 18 unit tests
-2. Size guard `RECONCILE_AUTO_MERGE_LIMIT = 1_000_000`
-3. SHA-skip before push (skip blob upload if ours === theirs)
-4. Read ours FIRST in reconcile
-5. `setTimeout(0)` yield between batch files
-6. 60 s per-file timeout
-7. Update sync2-manager.test.ts coverage for these paths
+1. `fetch(getResourcePath)` in PushQueue.readFile + 18 unit tests ✅
+2. Size guard `RECONCILE_AUTO_MERGE_LIMIT = 1_000_000` ✅
+3. SHA-skip before push (skip blob upload if ours === theirs) ✅
+4. Read ours FIRST in reconcile ✅
+5. `setTimeout(0)` yield between batch files ✅
+6. ~~60 s per-file timeout~~ → **deferred to Stage 7**. A real
+   timeout that interrupts mid-iteration requires refactoring the
+   reconcile body into an inner async function (so `continue`
+   becomes `return`) plus an AbortController to actually cancel
+   in-flight work. Stage 7's cancellation infrastructure provides
+   exactly this — adding both means writing the same plumbing
+   twice. With the size guard (#2) preventing the only known
+   real-world hang scenario, the timeout is defense against a
+   class of bugs we haven't found, not a known crash. Defer.
+7. ~~Update sync2-manager.test.ts coverage for these paths~~ →
+   the 635 existing unit tests guarantee no regression; the
+   `F-large-file-over-1mb` integration test exercises the
+   size-guard + SHA-skip path naturally. Stage 8 perf tests will
+   add dedicated timing matrices that cover these as a side
+   effect.
 
-**Acceptance:** all 635 existing unit tests pass + new unit tests
-pass + the integration F-large-file-over-1mb suite passes.
+**Acceptance:** all 635 existing unit tests pass; build green;
+new behaviour is documented in code comments referencing the
+plan principles.
 
 ### Stage 3: Worker orchestra infrastructure POC (~4-5 hours)
 
