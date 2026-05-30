@@ -629,17 +629,18 @@ The user-driven design rests on three orthogonal toggles. The
 first one is semantic (changes engine behaviour); the other two
 are purely UI.
 
-**Semantic toggle: `syncStartsWithCommit` (default: true)**
+**Semantic toggle: `syncStartsWithCommit` (default: `true`)**
 
 | Value | Behaviour |
 |---|---|
-| `true` | Single-click `[Sync with GitHub]` performs commit (change-detection + enqueue) **then** drains. Interval ticks and startup sync also do commit + drain. This matches today's behaviour and is the default. |
-| `false` | `[Sync with GitHub]` only drains the existing `.push-queue`. Commit is the user's separate action. Interval ticks and startup sync also drain only — if the queue is empty, they fall through to pull. |
+| `true` (default) | Single-click `[Sync with GitHub]` performs commit (change-detection + enqueue) **then** drains. Interval ticks and startup sync also do commit + drain. This matches today's manual-click behaviour; new users get the same UX as before. |
+| `false` | `[Sync with GitHub]` only drains the existing `.push-queue`. Commit is the user's separate action via the `[Commit]` ribbon button (so `showCommitRibbonButton` should also be on for usability — Settings warns if not). Interval ticks and startup sync also drain only — if the queue is empty, they fall through to pull. |
 
-This single toggle replaces the existing `autoCommitOnInterval`
-setting (which becomes redundant) and unifies the
-manual-vs-interval and startup-vs-runtime semantics under one
-choice.
+This single toggle replaces the existing `autoCommitOnSync`
+setting (which previously controlled only interval/startup
+surfaces — manual click always committed). The new semantics
+unify manual / interval / startup under one choice. Default `true`
+preserves the current manual-click behaviour.
 
 **UI toggle 1: `showSyncRibbonButton` (existing, default: true)**
 
@@ -670,9 +671,9 @@ Independent of `syncStartsWithCommit`:
 
 | Old name | New name | Why |
 |---|---|---|
-| `Auto-commit on interval sync` | (removed) | Subsumed by `syncStartsWithCommit` |
-| `Accumulate offline syncs into one commit` | `Consolidate commits into one (if possible)` | Now applies to offline batches **and** the case where Sync starts with commit + multiple files changed. |
-| `Push plugins data.json to GitHub` | `Sync plugins data.json` | Cleaner; same action |
+| `autoCommitOnSync` (settings key) / "Auto-commit on interval sync" (UI label) | removed; replaced by `syncStartsWithCommit` (default `true`) | Old key only controlled interval+startup; new key unifies all three surfaces |
+| `accumulateOfflineSyncs` / "Accumulate offline syncs into one commit" | `consolidateCommits` / "Consolidate commits into one (if possible)" | Now applies to offline batches **and** the case where Sync starts with commit + multiple files changed |
+| "Push plugins data.json to GitHub" (UI label) | "Sync plugins data.json" | Pure UI label rename. The underlying storage is `<configDir>/.gitignore` (a line, not a settings field) — `data.json` is unchanged |
 
 #### Settings migration — none. Manual `data.json` update.
 
