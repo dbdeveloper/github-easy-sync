@@ -615,6 +615,42 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
         });
     }
 
+    // ── Performance ─────────────────────────────────────────────────
+    new Setting(containerEl).setName("Performance").setHeading();
+
+    new Setting(containerEl)
+      .setName("Maximum auto-merge file size (KB)")
+      .setDesc(
+        "Skip the 3-way text auto-merge for files larger than this. " +
+          "Above the threshold the engine just uploads your local " +
+          "bytes (no automated merge) — useful to sidestep multi-MB " +
+          "merge slowdowns. Default 1024 KB (1 MB). Increasing past " +
+          "~2 MB may cause noticeable hangs even with worker offload; " +
+          "see docs/tasks/SYNC2-WORKER-REORG.md and tests/perf/README.md.",
+      )
+      .addText((text) => {
+        const current = Math.round(
+          (this.plugin.settings.maxAutoMergeSizeBytes ?? 1_000_000) / 1024,
+        );
+        text
+          .setPlaceholder("1024")
+          .setValue(String(current))
+          .onChange(async (value) => {
+            const kb = Number((value ?? "").trim());
+            if (!Number.isFinite(kb) || kb <= 0) {
+              // Invalid input — fall back to default. Don't surface
+              // a modal; the placeholder + description tell the user
+              // what's expected.
+              this.plugin.settings.maxAutoMergeSizeBytes = 1_000_000;
+            } else {
+              this.plugin.settings.maxAutoMergeSizeBytes = Math.round(
+                kb * 1024,
+              );
+            }
+            await this.plugin.saveSettings();
+          });
+      });
+
     // ── Danger zone ─────────────────────────────────────────────────
     new Setting(containerEl).setName("Danger zone").setHeading();
 

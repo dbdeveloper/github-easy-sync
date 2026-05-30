@@ -360,6 +360,10 @@ export interface Sync2ManagerDeps {
   // -NL rewrites — the engine treats text the same as binary at the
   // byte level. Optional; default is true (canonicalization on).
   autoCanonicalize?: () => boolean;
+  // Stage 7: live getter for the `maxAutoMergeSizeBytes` setting.
+  // Read on every reconcile path so the user can tune the
+  // threshold without restarting. Defaults to 1 MB when undefined.
+  maxAutoMergeSizeBytes?: () => number;
   // Cross-platform filename sanitization callback. Invoked by syncAll
   // before findChanges to rename any vault file whose path contains a
   // Windows-forbidden ASCII char (`< > : " | ? * \`) to its canonical
@@ -444,6 +448,7 @@ export class Sync2Manager {
   private readonly remoteIdentity: (() => RemoteIdentity) | undefined;
   private readonly progressBytesThreshold: number;
   private readonly autoCanonicalize: () => boolean;
+  private readonly maxAutoMergeSizeBytes: () => number;
   private readonly renameFile:
     | ((oldPath: string, newPath: string) => Promise<void>)
     | undefined;
@@ -508,6 +513,8 @@ export class Sync2Manager {
     this.progressBytesThreshold =
       deps.progressBytesThreshold ?? PROGRESS_BYTES_THRESHOLD;
     this.autoCanonicalize = deps.autoCanonicalize ?? (() => true);
+    this.maxAutoMergeSizeBytes =
+      deps.maxAutoMergeSizeBytes ?? (() => 1_000_000);
     this.renameFile = deps.renameFile;
     this.now = deps.now ?? (() => Date.now());
   }
@@ -3160,11 +3167,10 @@ export class Sync2Manager {
       // accepted vs. the user-facing "infinite hang" we'd
       // otherwise reach.
       //
-      // Provisional 1 MB — Stage 8 perf tests + Worker offload
-      // (Stage 4) will likely lift this. Exposed as a constant
-      // for adjustability; future revision will pipe through
-      // settings.
-      const RECONCILE_AUTO_MERGE_LIMIT = 1_000_000;
+      // Stage 7: read from settings live so the user can tune
+      // without restarting the plugin. Default 1 MB per the Stage 8
+      // perf-test recommendation (tests/perf/README.md).
+      const RECONCILE_AUTO_MERGE_LIMIT = this.maxAutoMergeSizeBytes();
       const oursIsLarge =
         oursBytes.byteLength > RECONCILE_AUTO_MERGE_LIMIT;
       const baseIsLarge =

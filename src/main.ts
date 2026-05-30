@@ -558,6 +558,8 @@ export default class GitHubSyncPlugin extends Plugin {
       pendingDeletions,
       consolidateCommits: this.settings.consolidateCommits ?? false,
       autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? false,
+      maxAutoMergeSizeBytes: () =>
+        this.settings.maxAutoMergeSizeBytes ?? 1_000_000,
       // Hooked to Obsidian's link-aware rename so the pre-sync
       // filename-sanitizer rewrites containing wiki-links automatically.
       // `getAbstractFileByPath` returns null when the path vanished

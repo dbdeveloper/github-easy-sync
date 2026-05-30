@@ -116,6 +116,28 @@ export interface GitHubSyncSettings {
   // whose trailing-newline matters). With this off, plugin treats
   // text the same as binary at the byte level.
   autoCanonicalizeTextFiles?: boolean;
+
+  // ── Performance ─────────────────────────────────────────────────
+  // Stage 7: maximum input size for the reconcile-time 3-way auto
+  // merge, in BYTES. Above this size the engine skips the
+  // attemptAutoMerge dance and pushes the local bytes as-is —
+  // documented loss of automated 3-way merge for big files, in
+  // exchange for sidestepping (a) the node-diff3 scaling cliff
+  // (~85 s at 4.6 MB on mobile) and (b) the multi-MB base64 decode
+  // bridge stalls observed in the May 2026 field investigation.
+  //
+  // Defaults to 1_000_000 (1 MB), matching the Stage 8 perf-test
+  // recommendation. Conservative on purpose — the Stage 4 Worker
+  // offload keeps the UI responsive during merge, but the
+  // wall-clock at 5 MB on a phone is still 30-80 s extrapolated
+  // from Node baselines. Tune up only if the corpus genuinely
+  // needs auto-merge above 1 MB AND you've measured the wall-clock
+  // on the slowest device.
+  //
+  // Stored in bytes (not KB / MB) so the wire format never has a
+  // decimal-point ambiguity (e.g., "1.5" vs "1500000"). Settings UI
+  // surfaces the input in KB for readability and converts.
+  maxAutoMergeSizeBytes?: number;
 }
 
 // NOTE: "Push plugins data.json to GitHub" is NOT a per-device
@@ -155,4 +177,5 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   // the safe behavior and lets users who actually want canonical
   // text on disk turn it on knowingly.
   autoCanonicalizeTextFiles: false,
+  maxAutoMergeSizeBytes: 1_000_000,
 };
