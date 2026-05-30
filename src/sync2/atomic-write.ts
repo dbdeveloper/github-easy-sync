@@ -236,18 +236,24 @@ export async function atomicWriteFile(
       //   3. modifyBinary(target, newBytes) — in-place write that
       //      preserves any open editor's cursor + scroll.
       //   4. afterCommit() — caller updates snapshot.
-      //   5. remove(marker) — flips recovery's signal off.
-      //   6. remove(`.sync-tmp`) — staging file no longer needed.
+      //   5. remove(`.sync-tmp`) — staging file no longer needed.
+      //   6. remove(marker) — flips recovery's signal off LAST,
+      //      so the marker is a true "this was in progress" signal
+      //      throughout its lifetime (never present without
+      //      forward-recovery context).
       //
       // Crash recovery (AtomicWriteRecovery.sweep):
-      //   - marker + sync-tmp present → rename sync-tmp → target.
-      //     Forward-completes the operation. (Recovery runs at
-      //     onload before any editor is open, so the rename's
-      //     side-effect of closing the editor is moot.)
-      //   - marker without sync-tmp → defensive cleanup of marker
-      //     (something unexpected happened; we have nothing to land).
+      //   - marker + sync-tmp present → remove(target), rename
+      //     sync-tmp → target, remove(marker). Forward-completes
+      //     the operation. (Recovery runs at onload before any
+      //     editor is open, so the rename's side-effect of closing
+      //     the editor is moot.)
+      //   - marker without sync-tmp → just remove(marker). Step 5
+      //     ran (sync-tmp gone) but step 6 crashed; the modify
+      //     completed successfully and the marker is a stale
+      //     leftover.
       //   - sync-tmp without marker → existing Path A logic drops
-      //     it as a transient.
+      //     it as a transient (crash before step 2).
       const tmpPath = stagingPathFor(path, "tmp");
       const markerPath = modifyMarkerPathFor(path);
       // Step 1: stage new bytes in .sync-tmp. Existing transient
@@ -265,12 +271,13 @@ export async function atomicWriteFile(
         if (afterCommit) {
           await afterCommit();
         }
-        // Step 5: remove marker FIRST. If we crash between this
-        // and step 6, sync-tmp becomes a transient orphan and the
-        // existing Path A sweep handles it.
-        await vault.adapter.remove(markerPath);
-        // Step 6: remove staging.
+        // Step 5: remove staging FIRST. If we crash between this
+        // and step 6, the marker alone remains and recovery's
+        // "marker without sync-tmp → cleanup" branch drops it.
         await vault.adapter.remove(tmpPath);
+        // Step 6: remove marker last. The marker's presence has
+        // always been a true "in progress" signal up to this point.
+        await vault.adapter.remove(markerPath);
       } catch (err) {
         // Best-effort cleanup; sweep handles whatever's left.
         try {
