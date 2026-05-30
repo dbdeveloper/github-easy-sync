@@ -2903,6 +2903,34 @@ export class Sync2Manager {
         theirsBytes !== null &&
         theirsBytes.byteLength > RECONCILE_AUTO_MERGE_LIMIT;
       if (oursIsLarge || baseIsLarge || theirsIsLarge) {
+        // SHA-skip: before falling through to "push ours as-is",
+        // check if ours is already byte-identical to theirs on
+        // the remote side. If yes, the push step would just send
+        // ~2 MB of network traffic for GitHub to no-op on the
+        // tree — wasteful. Compute ours sha (cheap on a
+        // 1.9 MB ArrayBuffer, ~50 ms on phone) and compare to
+        // theirs sha (already returned by the GitHub fetch).
+        // Identical means drop from batch entirely: no upload,
+        // no commit overhead.
+        //
+        // This is the §0 P2 (SHA-first by default) principle
+        // applied to the size-guard path. Stage 5 generalises
+        // the same idea across the entire reconcile flow.
+        const oursSha = await calculateGitBlobSHA(oursBytes);
+        if (theirsFetched !== null && oursSha === theirsFetched.sha) {
+          await this.detector.recordSync(path, theirsFetched.sha);
+          await this.queue.removeFile(batchId, path);
+          dropFromBatchInMemory(path);
+          this.logger.info(
+            "Sync2 reconcile path SHA-skip — ours already matches theirs on remote, no push",
+            () => ({
+              path,
+              oursSha,
+              theirsSha: theirsFetched.sha,
+            }),
+          );
+          continue;
+        }
         this.logger.warn(
           "Sync2 reconcile path SKIP auto-merge — file > size limit, ours pushed as-is",
           () => ({
@@ -2911,6 +2939,8 @@ export class Sync2Manager {
             oursBytes: oursBytes.byteLength,
             theirsBytes: theirsBytes?.byteLength ?? 0,
             baseBytes: baseBytes?.byteLength ?? 0,
+            oursSha,
+            theirsSha: theirsFetched?.sha ?? null,
           }),
         );
         continue;
