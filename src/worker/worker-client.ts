@@ -7,6 +7,7 @@ import type {
   WorkerResponse,
   WorkerKind,
   MergeTextResult,
+  HttpRequestResult,
 } from "./types";
 import { workerKindForOp } from "./types";
 import { merge as diff3Merge } from "node-diff3";
@@ -142,6 +143,35 @@ const FALLBACK_HANDLERS: Record<WorkerRequest["op"], FallbackHandler> = {
   "merge-text": async (req) => {
     const r = req as Extract<WorkerRequest, { op: "merge-text" }>;
     return fallbackMergeText(r.ours, r.base, r.theirs);
+  },
+  "http-request": async (req) => {
+    const r = req as Extract<WorkerRequest, { op: "http-request" }>;
+    // Main-thread fallback for the network op. Uses native fetch
+    // — same API the worker uses. Test environments mock
+    // globalThis.fetch; the integration tests that exercise the
+    // GithubClient also stub the HTTP layer at the client level,
+    // so this path being identical to the worker keeps semantics
+    // uniform.
+    const init: RequestInit = {
+      method: r.method ?? "GET",
+      headers: r.headers,
+    };
+    if (r.body !== undefined) {
+      init.body = r.body;
+    }
+    const resp = await fetch(r.url, init);
+    const text = await resp.text();
+    let json: unknown = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      // not JSON — leave null
+    }
+    const headers: Record<string, string> = {};
+    resp.headers.forEach((v, k) => {
+      headers[k] = v;
+    });
+    return { status: resp.status, text, json, headers };
   },
 };
 
@@ -348,6 +378,30 @@ export default class WorkerClient {
       ours,
       base,
       theirs,
+    });
+  }
+
+  // Stage 6: dispatch an HTTP request through the dedicated network
+  // worker. Used by GithubClient to put every GitHub API call on
+  // the network worker thread instead of the JS main thread —
+  // single point of execution, simpler retry-loop accounting, and
+  // (incidentally) main thread stays free for UI even during slow
+  // network round-trips. The CORS feasibility test on Pixel 6 Pro
+  // confirmed Capacitor's WebView allows worker-scope fetch
+  // against api.github.com.
+  async httpRequest(args: {
+    url: string;
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  }): Promise<HttpRequestResult> {
+    return await this.dispatch<HttpRequestResult>({
+      id: this.newRequestId(),
+      op: "http-request",
+      url: args.url,
+      method: args.method,
+      headers: args.headers,
+      body: args.body,
     });
   }
 

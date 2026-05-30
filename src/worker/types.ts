@@ -33,6 +33,22 @@ export type WorkerRequest =
       ours: string;
       base: string;
       theirs: string;
+    }
+  // Stage 6 — network worker. Sends one HTTP request and returns
+  // the response payload along with retry-loop state. The actual
+  // retry policy lives main-thread-side (per-call: getContentsAtRef
+  // distinguishes 404 from 5xx differently than createBlob does),
+  // but each individual fetch happens in the worker so the engine
+  // stays single-point-of-network-execution.
+  | {
+      id: string;
+      op: "http-request";
+      url: string;
+      method?: string;
+      headers?: Record<string, string>;
+      // Body for POST/PUT/PATCH. Strings only — JSON.stringify on the
+      // main side so the wire-format stays a flat string.
+      body?: string;
     };
 
 export type WorkerResponse =
@@ -45,6 +61,20 @@ export type WorkerResponse =
 export type MergeTextResult =
   | { kind: "clean"; content: string }
   | { kind: "conflict"; conflictMarkedContent: string };
+
+// Result shape for the http-request op. Mirrors the subset of
+// Obsidian's RequestUrlResponse the engine actually reads — body
+// text + status + parsed JSON when applicable. Worker can't
+// import obsidian, so we shape the response ourselves.
+export interface HttpRequestResult {
+  status: number;
+  text: string;
+  // null when the response isn't JSON-parseable. Engine code reads
+  // `response.json` directly in many places; preserving the shape
+  // keeps the GithubClient delegation a one-line swap.
+  json: unknown;
+  headers: Record<string, string>;
+}
 
 // Which worker should handle a given op. Stage 4 keeps all CPU
 // ops on the pool; Stage 6 routes network ops to the dedicated
@@ -59,5 +89,7 @@ export function workerKindForOp(op: WorkerRequest["op"]): WorkerKind {
     case "compute-git-blob-sha":
     case "merge-text":
       return "cpu";
+    case "http-request":
+      return "network";
   }
 }

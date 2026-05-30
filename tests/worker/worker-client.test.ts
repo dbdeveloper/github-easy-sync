@@ -579,3 +579,105 @@ describe("WorkerClient.mergeText", () => {
     fallbackClient.terminate();
   });
 });
+
+describe("WorkerClient.httpRequest", () => {
+  beforeEach(() => {
+    setupGlobals();
+    resetGlobals();
+  });
+
+  afterEach(() => {
+    resetGlobals();
+  });
+
+  it("fallback path uses globalThis.fetch + parses JSON body", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      calls.push({ url: input.toString(), init });
+      return new Response(JSON.stringify({ ok: true, n: 7 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    const client = new WorkerClient({
+      hardwareConcurrency: 4,
+      cpuWorkerSource: "",
+      networkWorkerSource: "",
+      workerCtor: FakeWorker as unknown as typeof Worker,
+    });
+    try {
+      const out = await client.httpRequest({
+        url: "https://api.example.com/x",
+        method: "GET",
+        headers: { Authorization: "Bearer t" },
+      });
+      expect(out.status).toBe(200);
+      expect(out.json).toEqual({ ok: true, n: 7 });
+      expect(out.text).toContain("\"n\":7");
+      expect(out.headers["content-type"]).toBe("application/json");
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe("https://api.example.com/x");
+      expect(
+        (calls[0].init?.headers as Record<string, string>)?.Authorization,
+      ).toBe("Bearer t");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it("returns json: null when response is not JSON-parseable", async () => {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response("not-json-content", { status: 200 })) as typeof fetch;
+    const client = new WorkerClient({
+      hardwareConcurrency: 4,
+      cpuWorkerSource: "",
+      networkWorkerSource: "",
+      workerCtor: FakeWorker as unknown as typeof Worker,
+    });
+    try {
+      const out = await client.httpRequest({
+        url: "https://api.example.com/y",
+      });
+      expect(out.status).toBe(200);
+      expect(out.text).toBe("not-json-content");
+      expect(out.json).toBeNull();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it("forwards POST body to fetch", async () => {
+    let captured: RequestInit | undefined;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      captured = init;
+      return new Response("{}", { status: 201 });
+    }) as typeof fetch;
+    const client = new WorkerClient({
+      hardwareConcurrency: 4,
+      cpuWorkerSource: "",
+      networkWorkerSource: "",
+      workerCtor: FakeWorker as unknown as typeof Worker,
+    });
+    try {
+      const out = await client.httpRequest({
+        url: "https://api.example.com/z",
+        method: "POST",
+        body: '{"hello":"world"}',
+      });
+      expect(out.status).toBe(201);
+      expect(captured?.method).toBe("POST");
+      expect(captured?.body).toBe('{"hello":"world"}');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});

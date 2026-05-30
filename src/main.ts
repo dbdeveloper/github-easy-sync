@@ -333,7 +333,15 @@ export default class GitHubSyncPlugin extends Plugin {
     const vaultRoot =
       (this.app.vault.adapter as unknown as { basePath?: string }).basePath ??
       "";
-    const client = new GithubClient(this.settings, this.logger);
+    // Stage 6: construct WorkerClient BEFORE GithubClient so the
+    // network worker handles every GitHub HTTP call. Same shared
+    // workerClient is passed into Sync2Manager + PushQueue below.
+    this.workerClient = new WorkerClient();
+    const client = new GithubClient(
+      this.settings,
+      this.logger,
+      this.workerClient,
+    );
     const store = new SnapshotStore(this.app.vault);
     await store.load();
     this.logger.info("initSync2: SnapshotStore loaded", {
@@ -345,7 +353,6 @@ export default class GitHubSyncPlugin extends Plugin {
     // files owned by conflict records via record.theirsBlobSha
     // SHA-verify, not just snapshot-based reasoning.
     const gi = new GI(vaultRoot);
-    this.workerClient = new WorkerClient();
     const queue = new PushQueue({
       vault: this.app.vault,
       configDir: this.app.vault.configDir,

@@ -32,7 +32,43 @@ const w = self as unknown as {
   postMessage: (msg: WorkerResponse) => void;
 };
 
-w.addEventListener("message", (e) => {
+// Stage 6: native fetch executor. The CORS feasibility test on a
+// Pixel 6 Pro confirmed that Capacitor's WebView allows fetch()
+// inside a Web Worker to call api.github.com cross-origin with
+// Authorization Bearer headers — round-trip ~800 ms including
+// worker construction overhead. That validated the migration.
+async function executeHttpRequest(
+  msg: Extract<WorkerRequest, { op: "http-request" }>,
+): Promise<{
+  status: number;
+  text: string;
+  json: unknown;
+  headers: Record<string, string>;
+}> {
+  const init: RequestInit = {
+    method: msg.method ?? "GET",
+    headers: msg.headers,
+  };
+  if (msg.body !== undefined) {
+    init.body = msg.body;
+  }
+  const resp = await fetch(msg.url, init);
+  const text = await resp.text();
+  let json: unknown = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // Not JSON-shaped (e.g., empty body for 204; rate-limit HTML
+    // body for 429). The caller decides what that means.
+  }
+  const headers: Record<string, string> = {};
+  resp.headers.forEach((v, k) => {
+    headers[k] = v;
+  });
+  return { status: resp.status, text, json, headers };
+}
+
+w.addEventListener("message", async (e) => {
   const msg = e.data;
   try {
     switch (msg.op) {
@@ -45,6 +81,11 @@ w.addEventListener("message", (e) => {
         // works for sanity-checking either side, even though
         // production traffic will dispatch ping/echo to CPU.
         w.postMessage({ id: msg.id, ok: true, result: msg.payload });
+        return;
+      }
+      case "http-request": {
+        const result = await executeHttpRequest(msg);
+        w.postMessage({ id: msg.id, ok: true, result });
         return;
       }
     }
