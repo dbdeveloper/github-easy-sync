@@ -650,7 +650,57 @@ manifest cache so we never read or push what we already know.
 suite; SHA-skip path covered for all eight cells of the
 ours/base/theirs SHA matrix.
 
-### Stage 6: Network worker — GitHub API migration (~5-7 hours)
+### Stage 6: Network worker — STATUS UPDATE (2026-05-30)
+
+**CORS feasibility validated.** Pixel 6 Pro / Capacitor Android,
+Worker spawned via Blob URL successfully called
+`GET /repos/{owner}/{repo}` on api.github.com:
+  - status 200
+  - 6124-byte JSON body
+  - 787 ms round-trip including worker construction
+
+This validated the original plan; the conservative "rescope to
+SHA-first only" fallback wasn't needed.
+
+**Done (commits b4feea9, cb1da7d, f29f665):**
+
+- ✅ `http-request` op in types.ts (url + method + headers + body)
+  routed to the network worker.
+- ✅ network-worker.ts: native `fetch` executor with header
+  serialization and best-effort JSON parsing.
+- ✅ `WorkerClient.httpRequest()` typed wrapper + main-thread
+  fallback handler using `globalThis.fetch`.
+- ✅ `GithubClient` takes an optional `WorkerClient` constructor
+  param. The internal `timed()` wrapper routes through
+  `WorkerClient.httpRequest` when provided, falls back to
+  Obsidian's `requestUrl` when omitted. Existing retry policy
+  (`retryUntil` + `isRetriableStatus`) unchanged and runs on top.
+- ✅ main.ts: WorkerClient constructed once at onload BEFORE
+  GithubClient; shared across CPU pool, Sync2Manager, PushQueue.
+- ✅ Settings-tab connection probe + 663 existing unit tests
+  preserve `requestUrl` path (no workerClient injected).
+- ✅ 3 new unit tests for httpRequest (JSON response, non-JSON
+  body, POST body forward). 666 total — no regressions.
+- ✅ Temporary CORS diagnostic button reverted (commit cb1da7d).
+
+**Deferred / scope-cut:**
+
+- ⏳ Push-side SHA-first blob existence check — could now ride
+  on top of the network worker. Scope as Stage 6 follow-up if
+  bandwidth metrics in Stage 8 perf tests show it's worth the
+  extra round-trip.
+
+**Acceptance met:** every GitHub HTTP call from the engine now
+runs in the network worker. Single point of execution; main
+thread is free during network round-trips (already true under
+requestUrl since it's async, but now also true at architectural
+level). The blobs-API fallback inside `getContentsAtRef` rides
+on top of the same `workerClient.httpRequest` path with no
+special handling.
+
+---
+
+### Original Stage 6 brief (~5-7 hours)
 
 Goal: every GitHub HTTP call goes through the dedicated network
 worker. Single point of retry, rate-limit, error classification,
