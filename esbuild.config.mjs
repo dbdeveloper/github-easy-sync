@@ -13,6 +13,58 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = process.argv[2] === "production";
 
+// ── Worker bundle pipeline ───────────────────────────────────────
+// Two separate worker entry points are bundled as standalone IIFE
+// scripts and their contents inlined into the main bundle as string
+// constants. The main-thread `WorkerClient` (src/worker/worker-client.ts)
+// then turns each string into a Blob URL at runtime and constructs
+// a `new Worker(url)` from it. This sidesteps the Capacitor `app://`
+// URL pattern (unproven in worker scope) and the `importScripts(url)`
+// approach (network round-trip + caching concerns).
+//
+// We build each worker once at config-loading time (before the main
+// bundle), capture the output as a UTF-8 string, then pass through
+// esbuild's `define` mechanism so references to
+// `__CPU_WORKER_SOURCE__` / `__NETWORK_WORKER_SOURCE__` in the main
+// code become literal string constants in the final main.js.
+async function buildWorkerSource(entry, label) {
+  const result = await esbuild.build({
+    entryPoints: [entry],
+    bundle: true,
+    format: "iife", // worker scope expects a self-executing script
+    target: "es2018",
+    minify: prod,
+    write: false, // produce in-memory output so we can read text directly
+    treeShaking: true,
+    external: [
+      // Workers never touch Obsidian APIs — but the type imports
+      // from "obsidian" need to be tree-shaken cleanly. The runtime
+      // doesn't import obsidian; we still mark it external so esbuild
+      // doesn't try to bundle a missing module if a type-only import
+      // ever sneaks in.
+      "obsidian",
+      // Node-only modules — must never appear in worker bundle (worker
+      // runs in browser context only).
+      ...builtins.filter((m) => m !== "path"),
+    ],
+    logLevel: "info",
+  });
+  if (result.errors.length > 0) {
+    throw new Error(`worker bundle (${label}) failed`);
+  }
+  // result.outputFiles[0].text is the bundled IIFE source.
+  return result.outputFiles[0].text;
+}
+
+const cpuWorkerSource = await buildWorkerSource(
+  "./src/worker/cpu-worker.ts",
+  "cpu-worker",
+);
+const networkWorkerSource = await buildWorkerSource(
+  "./src/worker/network-worker.ts",
+  "network-worker",
+);
+
 // Optional: after each successful build, mirror the plugin outputs into a
 // vault's plugin folder so Obsidian picks them up immediately. Set
 // OBSIDIAN_PLUGIN_DIR to <Vault>/.obsidian/plugins/github-easy-sync.
@@ -86,6 +138,16 @@ const context = await esbuild.context({
   treeShaking: true,
   outfile: "main.js",
   minify: prod,
+  // Inject the pre-built worker sources as string constants. The
+  // `WorkerClient` references `__CPU_WORKER_SOURCE__` /
+  // `__NETWORK_WORKER_SOURCE__` directly; `define` substitutes
+  // them with JSON-encoded strings before bundling. Each gets
+  // wrapped in surrounding quotes by JSON.stringify so the final
+  // main.js contains literal `const x = "...iife source..."`.
+  define: {
+    __CPU_WORKER_SOURCE__: JSON.stringify(cpuWorkerSource),
+    __NETWORK_WORKER_SOURCE__: JSON.stringify(networkWorkerSource),
+  },
   plugins: [mirrorPlugin],
 });
 
