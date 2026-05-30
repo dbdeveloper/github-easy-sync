@@ -117,6 +117,18 @@ export default class GitHubSyncPlugin extends Plugin {
         syncStrategy: this.settings.syncStrategy,
         configured: this.isConfigured(),
       });
+      // Stage 7: surface the manual-migration notice once Logger
+      // is initialised. Visible via the plugin log file AND as a
+      // long-duration Notice so the user can act without trawling
+      // the log.
+      if (this.settingsMigrationNotice !== null) {
+        this.logger.info(this.settingsMigrationNotice);
+        try {
+          new Notice(this.settingsMigrationNotice, 30000);
+        } catch {
+          // Notice may not be available in some environments
+        }
+      }
 
       this.addSettingTab(new GitHubSyncSettingsTab(this.app, this));
       this.logger.info("Plugin onload: settings tab registered");
@@ -211,8 +223,45 @@ export default class GitHubSyncPlugin extends Plugin {
 
   // ── settings ────────────────────────────────────────────────────────
 
+  // Stage 7 migration notice — populated by loadSettings when an
+  // old key name is detected in data.json. The text is buffered
+  // here because loadSettings runs BEFORE Logger init in onload;
+  // onload prints this once Logger is up.
+  private settingsMigrationNotice: string | null = null;
+
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const raw = await this.loadData();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, raw);
+
+    // Stage 7 manual data.json migration detection. The user base
+    // is currently one person with two devices; the maintainer
+    // updates data.json by hand on each device. loadSettings
+    // detects the OLD key names if present and stages a log line
+    // for onload to surface — no runtime migration code path,
+    // just a one-time observation.
+    if (raw && typeof raw === "object") {
+      const rec = raw as Record<string, unknown>;
+      const renames: Array<[string, string]> = [
+        ["autoCommitOnSync", "syncStartsWithCommit"],
+        ["accumulateOfflineSyncs", "consolidateCommits"],
+      ];
+      const found: Array<[string, string, unknown]> = [];
+      for (const [oldName, newName] of renames) {
+        if (oldName in rec) {
+          found.push([oldName, newName, rec[oldName]]);
+        }
+      }
+      if (found.length > 0) {
+        const lines = found.map(
+          ([o, n, v]) => `  • ${o} (currently ${JSON.stringify(v)}) → ${n}`,
+        );
+        this.settingsMigrationNotice =
+          "Stage 7 settings rename detected — update each device's data.json:\n" +
+          lines.join("\n") +
+          "\nThe OLD keys are still loaded for now but no longer read by the engine. " +
+          "Removing them is safe; see docs/tasks/SYNC2-WORKER-REORG.md §7.";
+      }
+    }
     // One-pass sanitize for GitHub identity fields: Android's
     // paste-with-suggestion-bar appends trailing whitespace silently,
     // and a single trailing space in any of these makes the entire
