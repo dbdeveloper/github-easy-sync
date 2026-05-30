@@ -22,7 +22,7 @@ import {
   sync2AllAndAssertNoErrors,
 } from "../helpers";
 
-// L1 — accumulateOfflineSyncs=ON, three sequential successful Sync
+// L1 — consolidateCommits=ON, three sequential successful Sync
 // clicks. Each click's processQueue completes (B1 commits and is
 // deleted from the queue) before the next click fires, so the next
 // click finds an empty queue and enqueues a fresh batch. End state:
@@ -61,7 +61,7 @@ describe.skipIf(!integrationEnabled())(
       async () => {
         client = await createSync2Client({
           branch,
-          accumulateOfflineSyncs: true,
+          consolidateCommits: true,
         });
 
         // Prime: invariants land in their own commit.

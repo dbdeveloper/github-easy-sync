@@ -485,7 +485,7 @@ export default class GitHubSyncPlugin extends Plugin {
       conflictWatcher,
       conflictCounter,
       pendingDeletions,
-      accumulateOfflineSyncs: this.settings.accumulateOfflineSyncs ?? false,
+      consolidateCommits: this.settings.consolidateCommits ?? false,
       autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? false,
       // Hooked to Obsidian's link-aware rename so the pre-sync
       // filename-sanitizer rewrites containing wiki-links automatically.
@@ -601,7 +601,7 @@ export default class GitHubSyncPlugin extends Plugin {
   }
 
   // Background drain — entry point for the interval timer when
-  // autoCommitOnSync is off. Errors are swallowed + logged because
+  // syncStartsWithCommit is off. Errors are swallowed + logged because
   // network blips during a background tick are common and shouldn't
   // surface a toast.
   async backgroundDrain(): Promise<void> {
@@ -825,7 +825,7 @@ export default class GitHubSyncPlugin extends Plugin {
       isConfigured: () => this.isConfigured(),
       intervalEnabled: () => this.settings.syncStrategy === "interval",
       intervalMinutes: () => this.settings.syncInterval,
-      autoCommitOnSync: () => this.settings.autoCommitOnSync ?? false,
+      syncStartsWithCommit: () => this.settings.syncStartsWithCommit ?? false,
       hasPendingBatches: () => this.sync2Manager.hasPendingBatches(),
       // Background drain skips the pre-sync confirmation modal —
       // interval timers and the startup pulse are not user-driven,

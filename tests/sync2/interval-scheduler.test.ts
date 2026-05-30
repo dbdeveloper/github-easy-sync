@@ -90,7 +90,7 @@ function makeDeps(
     isConfigured: () => cfg.isConfigured ?? true,
     intervalEnabled: () => cfg.intervalEnabled ?? false,
     intervalMinutes: () => cfg.intervalMinutes ?? 5,
-    autoCommitOnSync: () => cfg.autoCommit ?? false,
+    syncStartsWithCommit: () => cfg.autoCommit ?? false,
     hasPendingBatches: ops.deps.hasPendingBatches,
     drain: ops.deps.drain,
     fullSync: ops.deps.fullSync,

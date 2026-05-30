@@ -49,7 +49,7 @@ export type QueueBatch = {
   // when processBatch begins and NEVER cleared (the only cleanup is
   // queue.delete on commit success). Once set, the batch is
   // "frozen": mergeIntoLatestPending refuses to fold new changes
-  // into it even when accumulateOfflineSyncs is on. Models the
+  // into it even when consolidateCommits is on. Models the
   // user's rule "in-progress OR failed batch is blocked from
   // merges; new sync clicks create a new batch instead".
   attempted: boolean;

@@ -340,7 +340,7 @@ export interface Sync2ManagerDeps {
   // earlier push attempt failed — typically offline) folds the new
   // changes into the latest pending batch instead of stacking. The
   // eventual replay produces one commit instead of N.
-  accumulateOfflineSyncs?: boolean;
+  consolidateCommits?: boolean;
   // (owner, repo, branch) currently configured in settings. Read live
   // at the start of every syncAll: if it differs from the triplet the
   // snapshot was last reconciled against, the manager treats the
@@ -399,7 +399,7 @@ export class Sync2Manager {
   private readonly pendingDeletions: PendingDeletionsStore | undefined;
   private readonly conflictWatcher: ConflictWatcher | undefined;
   private readonly conflictCounter: ConflictCounter | undefined;
-  private readonly accumulateOfflineSyncs: boolean;
+  private readonly consolidateCommits: boolean;
   private readonly workerClient: WorkerClient;
   private readonly onProgress: ProgressFactory | undefined;
   private readonly onLocalCommitted:
@@ -448,7 +448,7 @@ export class Sync2Manager {
     this.pendingDeletions = deps.pendingDeletions;
     this.conflictWatcher = deps.conflictWatcher;
     this.conflictCounter = deps.conflictCounter;
-    this.accumulateOfflineSyncs = deps.accumulateOfflineSyncs ?? false;
+    this.consolidateCommits = deps.consolidateCommits ?? false;
     this.workerClient = deps.workerClient ?? new WorkerClient();
     this.onProgress = deps.onProgress;
     this.onLocalCommitted = deps.onLocalCommitted;
@@ -2195,7 +2195,7 @@ export class Sync2Manager {
     // they're routed to the per-device conflict branch on GitHub
     // (not main). The conflict's local "ours" history accumulates
     // server-side, invisible to other devices until resolution.
-    if (this.accumulateOfflineSyncs) {
+    if (this.consolidateCommits) {
       const target = await this.queue.mergeIntoLatestPending(changes);
       if (target !== null) {
         // Commit messages are hardcoded, so accumulate-merge does

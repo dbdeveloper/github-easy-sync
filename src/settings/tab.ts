@@ -386,9 +386,9 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       )
       .addToggle((toggle) => {
         toggle
-          .setValue(this.plugin.settings.autoCommitOnSync ?? false)
+          .setValue(this.plugin.settings.syncStartsWithCommit ?? false)
           .onChange(async (value) => {
-            this.plugin.settings.autoCommitOnSync = value;
+            this.plugin.settings.syncStartsWithCommit = value;
             await this.plugin.saveSettings();
           });
       });
@@ -422,9 +422,9 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       )
       .addToggle((toggle) =>
         toggle
-          .setValue(this.plugin.settings.accumulateOfflineSyncs ?? false)
+          .setValue(this.plugin.settings.consolidateCommits ?? false)
           .onChange(async (value) => {
-            this.plugin.settings.accumulateOfflineSyncs = value;
+            this.plugin.settings.consolidateCommits = value;
             await this.plugin.saveSettings();
           }),
       );

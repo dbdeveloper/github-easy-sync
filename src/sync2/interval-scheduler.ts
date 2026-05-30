@@ -32,7 +32,7 @@ export interface IntervalSchedulerDeps {
   isConfigured: () => boolean;
   intervalEnabled: () => boolean;
   intervalMinutes: () => number;
-  autoCommitOnSync: () => boolean;
+  syncStartsWithCommit: () => boolean;
 
   // Sync2Manager ops the scheduler drives. All async; rejections are
   // caught and routed to logError so a single failed tick doesn't
@@ -113,7 +113,7 @@ export class IntervalScheduler {
   }
 
   private async fullCycle(label: "Interval" | "Startup"): Promise<void> {
-    if (this.deps.autoCommitOnSync()) {
+    if (this.deps.syncStartsWithCommit()) {
       try {
         await this.deps.fullSync();
       } catch (err) {
