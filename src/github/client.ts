@@ -69,11 +69,19 @@ export type BlobFile = {
 // catch sites that duck-type on `err.status` keep working
 // unchanged; new catch sites use `err instanceof NotFoundError` etc.
 import { makeGithubAPIError } from "src/errors";
+import type WorkerClient from "src/worker/worker-client";
 
 export default class GithubClient {
+  // Optional Worker orchestra controller. When provided, every
+  // HTTP request below routes through the network worker (Stage 6:
+  // GitHub API in worker). When omitted (most unit tests, the
+  // settings-tab connection probe), falls back to Obsidian's
+  // requestUrl. Either way the same logging, retry, and error
+  // classification logic runs.
   constructor(
     private settings: GitHubSyncSettings,
     private logger: Logger,
+    private workerClient?: WorkerClient,
   ) {}
 
   headers() {
@@ -102,6 +110,47 @@ export default class GithubClient {
         ? body.byteLength
         : 0;
     const t0 = Date.now();
+
+    // Stage 6: route every GitHub HTTP call through the network
+    // worker when the orchestra is wired up. The worker uses
+    // native fetch — CORS-validated on Capacitor mobile via the
+    // Stage 6 diagnostic test. Falls back to Obsidian's
+    // requestUrl when no workerClient is provided (most unit
+    // tests, settings-tab connection probe, etc.).
+    if (this.workerClient !== undefined) {
+      // requestUrl accepts body as string OR ArrayBuffer; the
+      // network worker only handles strings (we don't currently
+      // need binary uploads from the engine — base64-encoded blob
+      // content travels as a JSON string through createBlob).
+      const reqBody =
+        typeof body === "string"
+          ? body
+          : body instanceof ArrayBuffer
+          ? new TextDecoder().decode(body)
+          : undefined;
+      const wr = await this.workerClient.httpRequest({
+        url: (opts as { url: string }).url,
+        method,
+        headers: (opts as { headers?: Record<string, string> }).headers,
+        body: reqBody,
+      });
+      const dt = Date.now() - t0;
+      void this.logger.info(
+        `HTTP ${method} ${label} duration=${dt}ms status=${wr.status} reqKB=${(reqBytes / 1024).toFixed(1)} respKB=${(wr.text.length / 1024).toFixed(1)}`,
+      );
+      // Shape the worker response to match requestUrl's
+      // RequestUrlResponse — the rest of GithubClient reads
+      // status / json / text without caring whether it came
+      // from the worker or the main-thread path.
+      return {
+        status: wr.status,
+        text: wr.text,
+        json: wr.json,
+        headers: wr.headers,
+        arrayBuffer: new TextEncoder().encode(wr.text).buffer,
+      } as ReturnType<typeof requestUrl> extends Promise<infer R> ? R : never;
+    }
+
     const res = await requestUrl(opts);
     const dt = Date.now() - t0;
     const respBytes = res.arrayBuffer?.byteLength ?? 0;
@@ -436,6 +485,60 @@ export default class GithubClient {
     );
     const blob = await this.getBlob({ sha, retry, maxRetries });
     return { content: blob.content, sha };
+  }
+
+  /**
+   * Fetches just the metadata (sha + size) for a path at a ref, without
+   * ever downloading the file content. Used by the Stage 5 SHA-first
+   * reconcile path so the engine can decide based on SHAs alone before
+   * paying for blob fetches and base64 decoding.
+   *
+   * Returns `null` when the path doesn't exist at the ref (404).
+   * Throws on unexpected statuses (matches `getContentsAtRef` behavior).
+   *
+   * Implementation note: the Contents API response carries both `sha`
+   * and `size`. For files ≤1 MB it also includes inline content, which
+   * this method intentionally discards — we want the small "is anything
+   * actually different" check to be uniform across all file sizes, and
+   * the caller is responsible for fetching content via getBlob when
+   * the SHA comparison shows it's needed.
+   */
+  async getContentsMetadataAtRef({
+    path: filePath,
+    ref,
+    retry = false,
+    maxRetries = 5,
+  }: {
+    path: string;
+    ref: string;
+    retry?: boolean;
+    maxRetries?: number;
+  }): Promise<{ sha: string; size: number } | null> {
+    const response = await retryUntil(
+      async () => {
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/contents/${encodePathForGithub(filePath)}?ref=${ref}`,
+            headers: this.headers(),
+            throw: false,
+          },
+          `contents-meta/${filePath}@${ref.slice(0, 7)}`,
+        );
+      },
+      (res) => !isRetriableStatus(res.status),
+      retry ? maxRetries : 0,
+    );
+    if (response.status === 404) return null;
+    if (response.status < 200 || response.status >= 400) {
+      this.logger.error("Failed to get contents metadata at ref", response);
+      throw makeGithubAPIError(
+        response.status,
+        `Failed to get contents metadata at ref, status ${response.status}`,
+      );
+    }
+    const sha = response.json.sha as string;
+    const size = (response.json.size as number) ?? 0;
+    return { sha, size };
   }
 
   /**

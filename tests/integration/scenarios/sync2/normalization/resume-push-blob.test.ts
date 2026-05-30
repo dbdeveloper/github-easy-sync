@@ -94,7 +94,7 @@ describe.skipIf(!integrationEnabled())(
     it(
       "kill on the Nth createBlob, then resume → fewer createBlobs on second pass, all files land",
       async () => {
-        // Default settings (accumulateOfflineSyncs=false). The C2
+        // Default settings (consolidateCommits=false). The C2
         // semantics — "interrupted commit must finish before any
         // other batch ships" — is achieved by ChangeDetector
         // consulting the push-queue: a file already snapshotted into

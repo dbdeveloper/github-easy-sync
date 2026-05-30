@@ -23,15 +23,15 @@ function decode(content: ArrayBuffer): string {
 // ── classifyConflictKind ──────────────────────────────────────────────
 
 describe("classifyConflictKind", () => {
-  it("modified + modified → modify-vs-modify", () => {
+  it("modified + modified → modify-vs-modify", async () => {
     expect(classifyConflictKind("modified", "modified")).toBe("modify-vs-modify");
   });
 
-  it("deleted + modified → delete-vs-modify (ours deleted, theirs modified)", () => {
+  it("deleted + modified → delete-vs-modify (ours deleted, theirs modified)", async () => {
     expect(classifyConflictKind("deleted", "modified")).toBe("delete-vs-modify");
   });
 
-  it("modified + deleted → null (auto-resolves at push: local-modify wins, file resurrects)", () => {
+  it("modified + deleted → null (auto-resolves at push: local-modify wins, file resurrects)", async () => {
     // modify-vs-delete is no longer a registered conflict kind — it
     // routes through attemptAutoMerge's "modify-wins" branch.
     // classifyConflictKind returns null for this pair so the caller
@@ -39,7 +39,7 @@ describe("classifyConflictKind", () => {
     expect(classifyConflictKind("modified", "deleted")).toBeNull();
   });
 
-  it("deleted + deleted → null (both agree, not a conflict)", () => {
+  it("deleted + deleted → null (both agree, not a conflict)", async () => {
     expect(classifyConflictKind("deleted", "deleted")).toBeNull();
   });
 });
@@ -47,11 +47,11 @@ describe("classifyConflictKind", () => {
 // ── attemptAutoMerge: text 3-way ──────────────────────────────────────
 
 describe("attemptAutoMerge — text 3-way", () => {
-  it("clean merge (non-overlapping edits) → returns merged content", () => {
+  it("clean merge (non-overlapping edits) → returns merged content", async () => {
     const base = "alpha\nbeta\ngamma\n";
     const ours = "alpha-edited\nbeta\ngamma\n";
     const theirs = "alpha\nbeta\ngamma-edited\n";
-    const r = attemptAutoMerge({
+    const r = await attemptAutoMerge({
       path: "Notes/note.md",
       ours: arr(ours),
       theirs: arr(theirs),
@@ -64,11 +64,11 @@ describe("attemptAutoMerge — text 3-way", () => {
     }
   });
 
-  it("overlapping edits → register-conflict (markers would appear)", () => {
+  it("overlapping edits → register-conflict (markers would appear)", async () => {
     const base = "alpha\nbeta\ngamma\n";
     const ours = "alpha\nOURS-LINE\ngamma\n";
     const theirs = "alpha\nTHEIRS-LINE\ngamma\n";
-    const r = attemptAutoMerge({
+    const r = await attemptAutoMerge({
       path: "Notes/note.md",
       ours: arr(ours),
       theirs: arr(theirs),
@@ -78,11 +78,11 @@ describe("attemptAutoMerge — text 3-way", () => {
     expect(r.type).toBe("register-conflict");
   });
 
-  it("same edit both sides → clean (excludeFalseConflicts collapses)", () => {
+  it("same edit both sides → clean (excludeFalseConflicts collapses)", async () => {
     const base = "alpha\nbeta\ngamma\n";
     const ours = "alpha\nBOTH-CHANGE\ngamma\n";
     const theirs = "alpha\nBOTH-CHANGE\ngamma\n";
-    const r = attemptAutoMerge({
+    const r = await attemptAutoMerge({
       path: "Notes/note.md",
       ours: arr(ours),
       theirs: arr(theirs),
@@ -95,8 +95,8 @@ describe("attemptAutoMerge — text 3-way", () => {
     }
   });
 
-  it("null base (no shared ancestor) → register-conflict", () => {
-    const r = attemptAutoMerge({
+  it("null base (no shared ancestor) → register-conflict", async () => {
+    const r = await attemptAutoMerge({
       path: "Notes/note.md",
       ours: arr("ours\n"),
       theirs: arr("theirs\n"),
@@ -122,8 +122,8 @@ function pluginCtx(over: Partial<PluginJsContext> = {}): PluginJsContext {
 }
 
 describe("attemptAutoMerge — plugin-js semver", () => {
-  it("ours version higher → atomic ours", () => {
-    const r = attemptAutoMerge({
+  it("ours version higher → atomic ours", async () => {
+    const r = await attemptAutoMerge({
       path: PLUGIN_PATH,
       ours: arr("//ours\n"),
       theirs: arr("//theirs\n"),
@@ -134,8 +134,8 @@ describe("attemptAutoMerge — plugin-js semver", () => {
     expect(r).toEqual({ type: "atomic", side: "ours" });
   });
 
-  it("theirs version higher → atomic theirs", () => {
-    const r = attemptAutoMerge({
+  it("theirs version higher → atomic theirs", async () => {
+    const r = await attemptAutoMerge({
       path: PLUGIN_PATH,
       ours: arr("//ours\n"),
       theirs: arr("//theirs\n"),
@@ -146,8 +146,8 @@ describe("attemptAutoMerge — plugin-js semver", () => {
     expect(r).toEqual({ type: "atomic", side: "theirs" });
   });
 
-  it("versions tied, ours mtime newer → atomic ours", () => {
-    const r = attemptAutoMerge({
+  it("versions tied, ours mtime newer → atomic ours", async () => {
+    const r = await attemptAutoMerge({
       path: PLUGIN_PATH,
       ours: arr("//ours\n"),
       theirs: arr("//theirs\n"),
@@ -158,8 +158,8 @@ describe("attemptAutoMerge — plugin-js semver", () => {
     expect(r).toEqual({ type: "atomic", side: "ours" });
   });
 
-  it("versions tied, theirs mtime newer → atomic theirs", () => {
-    const r = attemptAutoMerge({
+  it("versions tied, theirs mtime newer → atomic theirs", async () => {
+    const r = await attemptAutoMerge({
       path: PLUGIN_PATH,
       ours: arr("//ours\n"),
       theirs: arr("//theirs\n"),
@@ -170,8 +170,8 @@ describe("attemptAutoMerge — plugin-js semver", () => {
     expect(r).toEqual({ type: "atomic", side: "theirs" });
   });
 
-  it("both versions parseable, semver tie, mtime tie → register-conflict (spec R5)", () => {
-    const r = attemptAutoMerge({
+  it("both versions parseable, semver tie, mtime tie → register-conflict (spec R5)", async () => {
+    const r = await attemptAutoMerge({
       path: PLUGIN_PATH,
       ours: arr("//ours\n"),
       theirs: arr("//theirs\n"),
@@ -182,8 +182,8 @@ describe("attemptAutoMerge — plugin-js semver", () => {
     expect(r).toEqual({ type: "register-conflict" });
   });
 
-  it("only ours version available → atomic ours", () => {
-    const r = attemptAutoMerge({
+  it("only ours version available → atomic ours", async () => {
+    const r = await attemptAutoMerge({
       path: PLUGIN_PATH,
       ours: arr("//ours\n"),
       theirs: arr("//theirs\n"),
@@ -194,8 +194,8 @@ describe("attemptAutoMerge — plugin-js semver", () => {
     expect(r).toEqual({ type: "atomic", side: "ours" });
   });
 
-  it("only theirs version available → atomic theirs", () => {
-    const r = attemptAutoMerge({
+  it("only theirs version available → atomic theirs", async () => {
+    const r = await attemptAutoMerge({
       path: PLUGIN_PATH,
       ours: arr("//ours\n"),
       theirs: arr("//theirs\n"),
@@ -206,8 +206,8 @@ describe("attemptAutoMerge — plugin-js semver", () => {
     expect(r).toEqual({ type: "atomic", side: "theirs" });
   });
 
-  it("both versions unparseable, mtimes differ → atomic by mtime", () => {
-    const r = attemptAutoMerge({
+  it("both versions unparseable, mtimes differ → atomic by mtime", async () => {
+    const r = await attemptAutoMerge({
       path: PLUGIN_PATH,
       ours: arr("//ours\n"),
       theirs: arr("//theirs\n"),
@@ -223,8 +223,8 @@ describe("attemptAutoMerge — plugin-js semver", () => {
     expect(r).toEqual({ type: "atomic", side: "theirs" });
   });
 
-  it("missing pluginJs context for a plugin path → register-conflict (defensive)", () => {
-    const r = attemptAutoMerge({
+  it("missing pluginJs context for a plugin path → register-conflict (defensive)", async () => {
+    const r = await attemptAutoMerge({
       path: PLUGIN_PATH,
       ours: arr("//ours\n"),
       theirs: arr("//theirs\n"),
@@ -234,9 +234,9 @@ describe("attemptAutoMerge — plugin-js semver", () => {
     expect(r).toEqual({ type: "register-conflict" });
   });
 
-  it("manifest.json is also routed to plugin-js (not text merge)", () => {
+  it("manifest.json is also routed to plugin-js (not text merge)", async () => {
     const path = ".obsidian/plugins/my-plugin/manifest.json";
-    const r = attemptAutoMerge({
+    const r = await attemptAutoMerge({
       path,
       ours: arr('{"version":"1.0.0"}\n'),
       theirs: arr('{"version":"2.0.0"}\n'),
@@ -251,8 +251,8 @@ describe("attemptAutoMerge — plugin-js semver", () => {
 // ── attemptAutoMerge: binary always-register ─────────────────────────
 
 describe("attemptAutoMerge — binary", () => {
-  it("PNG → register-conflict (no silent atomic mtime)", () => {
-    const r = attemptAutoMerge({
+  it("PNG → register-conflict (no silent atomic mtime)", async () => {
+    const r = await attemptAutoMerge({
       path: "attachments/photo.png",
       ours: new Uint8Array([0x89, 0x50, 0x4e]).buffer as ArrayBuffer,
       theirs: new Uint8Array([0x89, 0x50, 0x4e, 0xff]).buffer as ArrayBuffer,
@@ -262,8 +262,8 @@ describe("attemptAutoMerge — binary", () => {
     expect(r).toEqual({ type: "register-conflict" });
   });
 
-  it("PDF → register-conflict", () => {
-    const r = attemptAutoMerge({
+  it("PDF → register-conflict", async () => {
+    const r = await attemptAutoMerge({
       path: "docs/report.pdf",
       ours: new Uint8Array([0x25, 0x50, 0x44]).buffer as ArrayBuffer,
       theirs: new Uint8Array([0x25, 0x50, 0x44, 0xff]).buffer as ArrayBuffer,
@@ -273,8 +273,8 @@ describe("attemptAutoMerge — binary", () => {
     expect(r).toEqual({ type: "register-conflict" });
   });
 
-  it("mp4 → register-conflict", () => {
-    const r = attemptAutoMerge({
+  it("mp4 → register-conflict", async () => {
+    const r = await attemptAutoMerge({
       path: "video.mp4",
       ours: new Uint8Array([0x00, 0x00, 0x00, 0x18]).buffer as ArrayBuffer,
       theirs: new Uint8Array([0x00, 0x00, 0x00, 0x20]).buffer as ArrayBuffer,
@@ -288,8 +288,8 @@ describe("attemptAutoMerge — binary", () => {
 // ── strategy dispatch sanity ─────────────────────────────────────────
 
 describe("attemptAutoMerge — strategy dispatch", () => {
-  it("text path (.md) takes the text branch even when adjacent to a plugin folder", () => {
-    const r = attemptAutoMerge({
+  it("text path (.md) takes the text branch even when adjacent to a plugin folder", async () => {
+    const r = await attemptAutoMerge({
       path: ".obsidian/plugins/foo/styles.css",
       ours: arr("a { color: red; }\n"),
       theirs: arr("a { color: red; }\n"),
@@ -300,8 +300,8 @@ describe("attemptAutoMerge — strategy dispatch", () => {
     expect(r.type).toBe("clean");
   });
 
-  it("non-text extension outside plugin folder → binary branch", () => {
-    const r = attemptAutoMerge({
+  it("non-text extension outside plugin folder → binary branch", async () => {
+    const r = await attemptAutoMerge({
       path: "Vault/asset.bin",
       ours: new Uint8Array([1, 2, 3]).buffer as ArrayBuffer,
       theirs: new Uint8Array([4, 5, 6]).buffer as ArrayBuffer,
@@ -311,8 +311,8 @@ describe("attemptAutoMerge — strategy dispatch", () => {
     expect(r).toEqual({ type: "register-conflict" });
   });
 
-  it("plugin-js path under a different configDir is recognized", () => {
-    const r = attemptAutoMerge({
+  it("plugin-js path under a different configDir is recognized", async () => {
+    const r = await attemptAutoMerge({
       path: ".obs-custom/plugins/foo/main.js",
       ours: arr("//ours\n"),
       theirs: arr("//theirs\n"),
@@ -327,7 +327,7 @@ describe("attemptAutoMerge — strategy dispatch", () => {
 // ── type-system sanity for AutoMergeResult ───────────────────────────
 
 describe("AutoMergeResult type", () => {
-  it("discriminated union is exhaustively narrowable", () => {
+  it("discriminated union is exhaustively narrowable", async () => {
     const cases: AutoMergeResult[] = [
       { type: "clean", content: arr("") },
       { type: "atomic", side: "ours" },
@@ -349,8 +349,8 @@ describe("AutoMergeResult type", () => {
     }
   });
 
-  it("theirs === null → modify-wins (modify-vs-delete branch)", () => {
-    const r = attemptAutoMerge({
+  it("theirs === null → modify-wins (modify-vs-delete branch)", async () => {
+    const r = await attemptAutoMerge({
       path: "Notes/note.md",
       ours: arr("local edit\n"),
       theirs: null,

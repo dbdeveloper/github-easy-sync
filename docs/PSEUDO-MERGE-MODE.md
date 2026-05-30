@@ -1932,7 +1932,274 @@ the primary failure mode.
 
 ---
 
-## 17. Glossary
+## 17. Worker Orchestra
+
+Added in 2.0.2-beta. Before this rework the engine ran every CPU
+operation (3-way merge, base64 decode, SHA-1) and every GitHub
+HTTP call on the JS main thread. On Obsidian Mobile this could
+freeze the UI for tens of seconds when a multi-megabyte file
+reached the reconcile path — the node-diff3 algorithm hits a
+hard scaling cliff (~16 s at 4 MB on Node desktop, ~85 s on a
+mid-tier Android phone in the May 2026 field investigation).
+
+The orchestra consists of three coordinated thread roles:
+
+| Role | Count | Owns |
+|---|---|---|
+| Main thread | 1 | UI, vault.adapter writes, snapshot store, reconcile decisions, settings I/O |
+| CPU worker pool | 2-4 | base64 decode, git-blob SHA-1, node-diff3 3-way merge |
+| Network worker | 1 | every GitHub REST call (`fetch` against `api.github.com`) |
+
+Pool size auto-tunes to `max(2, min(4, navigator.hardwareConcurrency - 1))`.
+
+### 17.1 Build pipeline
+
+esbuild produces three bundles: `main.js` (the plugin entry) and
+two worker IIFEs (`cpu-worker`, `network-worker`). The worker
+IIFEs never ship as separate files. Instead the build step:
+
+1. Bundles each worker source to an in-memory IIFE string.
+2. Passes the strings to the main-bundle build via esbuild's
+   `define`, substituting `__CPU_WORKER_SOURCE__` and
+   `__NETWORK_WORKER_SOURCE__` as literal JS string constants.
+3. At runtime `WorkerClient` wraps each constant in a `Blob` and
+   creates a `URL.createObjectURL(blob)` — that URL becomes the
+   `new Worker(url)` argument.
+
+This sidesteps `importScripts` (network round-trip and caching
+concerns) and the Capacitor `app://` URL scheme (unproven in
+worker context as of 2026). The Stage 6 CORS feasibility test
+on Pixel 6 Pro validated that worker-scope `fetch` against
+`api.github.com` works with Authorization Bearer headers —
+~800 ms round-trip including worker construction.
+
+### 17.2 Threshold gates
+
+Worker dispatch has a postMessage cost (~5-10 ms round-trip on
+mobile). Small operations stay inline on the main thread:
+
+| Operation | Worker threshold |
+|---|---|
+| SHA computation | ≥ 100 KB |
+| Base64 decode | ≥ 2 MB |
+| 3-way merge | ≥ 100 KB (largest input) |
+
+Below the threshold, `WorkerClient.computeGitBlobSHA` /
+`decodeBase64` / `mergeText` run synchronously through the
+fallback handlers (which use identical algorithms — see Stage 4
+worker-vs-fallback byte-exact identity tests).
+
+### 17.3 What workers CAN and CANNOT do
+
+CAN: `fetch(url)` (including local files via
+`adapter.getResourcePath` URLs the main thread provides),
+`crypto.subtle.digest`, `atob`, run pure-JS libraries (node-diff3
+is bundled into `cpu-worker.ts`), receive transferable
+ArrayBuffers zero-copy via postMessage.
+
+CANNOT: call any Obsidian API (`vault.adapter.write`,
+`app.workspace`, settings), mutate the vault directly, construct
+nested workers (unsupported on Capacitor).
+
+**Implication**: vault mutations must round-trip through main.
+The "main drain worker that does everything" design was
+considered and rejected — it would have to round-trip every
+vault write back to main, eliminating the parallelism win. Main
+thread stays as a thin orchestrator.
+
+### 17.4 Cancellation
+
+`Sync2Manager.cancelDrain()` sets an `abortRequested` flag the
+reconcile loop checks between files. For in-flight Worker jobs,
+`workerClient.terminate()` is synchronous and instant — the
+controller re-creates fresh workers from the source strings for
+the next sync (~5-10 ms via Blob URL + new Worker).
+
+### 17.5 Graceful main-thread fallback
+
+If `new Worker()` throws at startup (very old Capacitor versions,
+strict CSP, etc.), `WorkerClient` flips into fallback mode and
+every op runs synchronously on the main thread using the same
+algorithm. Decided once at construction, cached on `isFallback`.
+The size guard (§17.6) remains the safety net for the
+fallback-mode CPU operations.
+
+### 17.6 Size guard (`maxAutoMergeSizeBytes`)
+
+Defense in depth even with Worker offload. Above the configured
+limit (default 1 MB, exposed in Settings → Performance), the
+engine skips `attemptAutoMerge` entirely and just uploads the
+local bytes. Two reasons for the guard:
+
+1. **node-diff3 wall-clock**: even off the main thread, 5 MB of
+   text takes ~26 s on Node, much more on a phone. The user is
+   not going to wait. Better to mark "ours wins for this file"
+   than to spend 50 s of compute.
+2. **Capacitor base64 stalls**: empirically the JS↔native bridge
+   on Android could stall under load when decoding multi-MB
+   strings, even though the same payload decoded cleanly in
+   isolation. The size guard sidesteps the entire class of bug.
+
+Tune up only after measuring on the slowest target device. See
+`tests/perf/README.md` for Node-desktop baselines.
+
+---
+
+## 18. SHA-First Reconcile
+
+Added in 2.0.2-beta. The reconcile loop used to fetch base + theirs
+**content** for every path in a pending batch, then decoded both,
+then ran the 3-way merge — expensive even when SHAs alone could
+have resolved the path. SHA-first inverts the order:
+
+1. Read ours bytes from `.push-queue`.
+2. Fetch base + theirs **metadata only** (`getContentsMetadataAtRef` —
+   returns `{sha, size}` without downloading the blob).
+3. Branch on SHAs:
+
+```
+                     base.sha === theirs.sha
+                              │
+                              ▼
+                  No remote change → push ours
+
+      base.sha === theirs.sha is false
+                              │
+                              ▼
+                    Compute ours.sha
+                              │
+                              ▼
+                  ours.sha === theirs.sha
+                              │
+                              ▼
+              Drop from batch (already in sync;
+              ours and remote are byte-identical)
+
+       ours.sha === theirs.sha is false
+                              │
+                              ▼
+                   ours.sha === base.sha
+                              │
+                              ▼
+        Atomic theirs wins. Fetch theirs bytes
+        only; write to vault; drop from batch.
+
+         ours.sha === base.sha is false
+                              │
+                              ▼
+            All three SHAs differ → fetch base
+            and theirs bytes; full 3-way merge
+            (the slow path, via Worker if above
+            the merge threshold).
+```
+
+Empirically ~75 % of reconcile paths resolve from SHAs alone (no
+remote change OR ours wins OR theirs wins atomic). Net effect:
+multiple MB of unnecessary downloads avoided per typical
+multi-device sync. The single-MB merge cliff still bites for the
+remaining ~25 %, but the size guard (§17.6) covers the worst
+cases.
+
+`getContentsMetadataAtRef` is a new method on `GithubClient`. It
+hits the same Contents API endpoint but discards the inline
+content (and never falls back to Blobs API for >1 MB files,
+since we're explicitly not asking for content). Same 404
+semantics as `getContentsAtRef`.
+
+---
+
+## 19. Modify-in-Place Crash Safety
+
+Added in 2.0.2-beta. Before this rework, `atomicWriteFile` always
+used the rename strategy:
+
+1. `writeBinary(.sync-tmp, newBytes)`
+2. `rename(live → .sync-bak)`
+3. `rename(.sync-tmp → live)`
+4. `afterCommit()`
+5. `remove(.sync-bak)`
+
+This works on every filesystem and is crash-safe (the bak holds
+the pre-write bytes; the sweep restores from it on next onload).
+But it has a UX cost: Obsidian's MarkdownView holds a reference
+to the live TFile. Step 2 renames it aside; Obsidian sees the
+file disappear and closes the editor. The user's cursor and
+scroll are lost mid-pull.
+
+The fix: when the target already exists as a TFile AND the
+runtime exposes `vault.modifyBinary`, take an editor-friendly
+fast path that writes in place. `vault.modifyBinary` is the
+Obsidian-idiomatic write — it fires the right events so the
+editor updates its buffer without unloading.
+
+### 19.1 Forward-recovery protocol
+
+`vault.modifyBinary` is atomic at the OS level for single
+syscalls but the operation as a whole is a sequence — crashes
+between the modify and the snapshot update need recovery.
+Symmetric design with the existing rename strategy:
+
+| Step | Operation |
+|---|---|
+| 1 | `writeBinary(<basename>.sync-tmp.<ext>, newBytes)` — stage the FUTURE state |
+| 2 | `write(.<basename>.<ext>.sync-tmp., "")` — drop the marker |
+| 3 | `modifyBinary(target, newBytes)` — preserves open editor |
+| 4 | `afterCommit()` — caller records new SHA |
+| 5 | `remove(.sync-tmp)` — staging gone |
+| 6 | `remove(marker)` — recovery signal flipped off LAST |
+
+The marker is a zero-byte file. Its NAME shape is what
+disambiguates it from the rename-strategy staging file:
+
+| File | Shape | Recognised by |
+|---|---|---|
+| Rename-strategy staging | `note.sync-tmp.md` | `parseStagingPath` (sync-tmp in middle, NO trailing dot) |
+| Rename-strategy backup | `note.sync-bak.md` | `parseStagingPath` (sync-bak in middle) |
+| Modify-in-place marker | `.note.md.sync-tmp.` | `parseModifyMarkerPath` (leading dot, trailing dot) |
+
+The trailing dot is the unambiguous signal. Hidden config files
+like `.eslintrc.json.sync-tmp` (legitimate staging for the
+existing hidden file `.eslintrc.json`) end in `.sync-tmp` with
+NO trailing dot, so they don't trip the marker parser. The
+trailing dot also makes the marker invisible to most file
+explorers and inert to Capacitor's iOS/Android filesystems
+(POSIX allows trailing dots; Windows would strip them, but
+Obsidian on Windows uses the rename strategy in any case
+because the WinAPI filesystem doesn't support markers cleanly).
+
+### 19.2 Recovery sweep
+
+`AtomicWriteRecovery.sweep` runs at plugin onload, before
+`workspace.onLayoutReady`. At this point no editor is yet open;
+the rename's editor-close side effect is moot.
+
+For each modify-in-place marker found in the walk:
+
+| State | Action |
+|---|---|
+| marker + `.sync-tmp` present | `remove(target)` if exists, `rename(.sync-tmp, target)`, `remove(marker)`. Forward-completes the operation. |
+| marker without `.sync-tmp` | `remove(marker)`. Step 5 ran (sync-tmp gone) but step 6 crashed; the modify completed successfully and the marker is a stale leftover. |
+| `.sync-tmp` without marker | Existing Path A logic drops it as a transient. Crash before step 2; the staging is bytes-without-context. |
+
+No SHA computation, no snapshot lookup. The marker's mere
+presence is the entire signal.
+
+### 19.3 Why the rename strategy didn't get a marker
+
+Considered for symmetry and rejected. The rename strategy
+already has a unique "in-flight" signal: the `.sync-bak` file
+itself, which only exists during steps 2-5. Adding a marker on
+top would be redundant. The existing SHA-based bak orphan
+recovery (snapshot.remoteSha matches → cleanup, mismatches →
+restore) handles all cases correctly.
+
+The modify-in-place strategy has NO bak (the live file is
+modified in place, no backup is produced), so the marker is the
+ONLY signal. That's why it's essential there.
+
+---
+
+## 20. Glossary
 
 The following terms appear repeatedly in the article. Definitions are
 intentionally concise; consult the relevant section for context.

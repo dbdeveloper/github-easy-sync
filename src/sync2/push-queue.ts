@@ -4,6 +4,7 @@
 
 import { Vault } from "obsidian";
 import { calculateGitBlobSHA, hasTextExtension } from "../utils";
+import WorkerClient from "../worker/worker-client";
 import { normalizeText } from "./text-normalize";
 import { newBatchId, parseTimestampId } from "./timestamp-id";
 import { FileChange, QueueBatch } from "./types";
@@ -63,6 +64,12 @@ export interface PushQueueDeps {
   // overwrites batch files byte-exact — no CRLF/BOM rewrite. Optional;
   // when omitted, canonicalization is on (legacy behaviour).
   autoCanonicalize?: () => boolean;
+  // Shared Worker orchestra controller. When provided, the SHA
+  // computation that backs `findBlobShaForPath` dispatches through
+  // the worker pool — threshold-gated, only big files round-trip.
+  // Optional; when omitted, a fallback-mode WorkerClient is
+  // constructed which runs everything inline on the main thread.
+  workerClient?: WorkerClient;
 }
 
 export default class PushQueue {
@@ -70,6 +77,7 @@ export default class PushQueue {
   private readonly queueRoot: string;
   private readonly now: () => Date;
   private readonly autoCanonicalize: () => boolean;
+  private readonly workerClient: WorkerClient;
   // Serializes meta-file rewrites so concurrent `recordBlobUpload`
   // callers (parallel `createBlob` callbacks in TreeBuilder) don't
   // clobber each other's appends. Each call awaits the previous one
@@ -82,6 +90,7 @@ export default class PushQueue {
     this.queueRoot = `${deps.configDir}/plugins/${deps.selfPluginId}/${QUEUE_DIRNAME}`;
     this.now = deps.now ?? (() => new Date());
     this.autoCanonicalize = deps.autoCanonicalize ?? (() => true);
+    this.workerClient = deps.workerClient ?? new WorkerClient();
   }
 
   // Materialize a new batch on disk from `changes` and return its id.
@@ -278,7 +287,7 @@ export default class PushQueue {
       const snapshotPath = `${batchDir}/${VAULT_SUBDIR}/${path}`;
       if (!(await this.vault.adapter.exists(snapshotPath))) continue;
       const buf = await this.vault.adapter.readBinary(snapshotPath);
-      return await calculateGitBlobSHA(buf);
+      return await this.workerClient.computeGitBlobSHA(buf);
     }
     return null;
   }
@@ -445,9 +454,42 @@ export default class PushQueue {
   // Read a single file's bytes from inside the batch's vault/ snapshot.
   // Used by Sync2Manager during conflict reconciliation to obtain the
   // "ours" side for a 3-way merge.
+  // Read a single file's bytes from inside the batch's vault/
+  // snapshot. Used by Sync2Manager during conflict reconciliation
+  // to obtain the "ours" side bytes for the 3-way merge.
+  //
+  // Primary path: `vault.adapter.getResourcePath(target)` returns
+  // a URL the WebView can fetch directly. On Obsidian Mobile this
+  // is `http://localhost/_capacitor_file_/...` — a
+  // Capacitor-internal scheme designed so WebView's native fetch
+  // resolves local files without a JS↔native bridge round-trip.
+  // On desktop it's an `app://` URL. `getResourcePath` is part of
+  // the documented `DataAdapter` API (Obsidian uses it itself for
+  // `<img src>` rendering of vault images); using it via `fetch` is
+  // not a hack but a deliberate choice to avoid the
+  // `readBinary` bridge bottleneck that empirically blocked the
+  // sync flow on mobile for files >1 MB.
+  //
+  // Fallback: `mock-obsidian` in unit tests doesn't expose
+  // `getResourcePath`, so we drop down to `adapter.readBinary`.
+  // The fallback also covers any future Obsidian build / platform
+  // where `getResourcePath` becomes unavailable.
   async readFile(id: string, vaultPath: string): Promise<ArrayBuffer> {
     const target = `${this.queueRoot}/${id}/${VAULT_SUBDIR}/${vaultPath}`;
-    return await this.vault.adapter.readBinary(target);
+    const getResourcePath = (
+      this.vault.adapter as { getResourcePath?: (p: string) => string }
+    ).getResourcePath;
+    if (typeof getResourcePath !== "function") {
+      return await this.vault.adapter.readBinary(target);
+    }
+    const url = getResourcePath.call(this.vault.adapter, target);
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      throw new Error(
+        `PushQueue.readFile fetch failed for ${vaultPath}: status ${resp.status}`,
+      );
+    }
+    return await resp.arrayBuffer();
   }
 
   // Replace a single file's content inside an existing batch. Used by

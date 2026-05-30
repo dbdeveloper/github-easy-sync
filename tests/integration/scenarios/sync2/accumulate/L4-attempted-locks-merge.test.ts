@@ -24,7 +24,7 @@ import {
 
 // L4 — the attempted-marker rule: once processBatch has touched a
 // batch even once (even just to fail), it's frozen against further
-// mergeIntoLatestPending calls. With accumulateOfflineSyncs=ON, a
+// mergeIntoLatestPending calls. With consolidateCommits=ON, a
 // failed batch does NOT absorb subsequent sync clicks — they get
 // fresh batches. Result: multiple commits in queue, each is its own
 // batch, FIFO drained when the network returns.
@@ -69,7 +69,7 @@ describe.skipIf(!integrationEnabled())(
       async () => {
         client = await createSync2Client({
           branch,
-          accumulateOfflineSyncs: true,
+          consolidateCommits: true,
         });
         // Prime so the failure happens on the FIRST user-content
         // push, not on the invariants push.

@@ -229,6 +229,16 @@ function makeFakeClient(): Sync2Client & {
       const sha = await calculateGitBlobSHA(bytes);
       return { content: b64, sha };
     },
+    async getContentsMetadataAtRef(args) {
+      calls.push({ op: "getContentsMetadataAtRef", args });
+      const inner = state.contentsByRef.get(args.ref);
+      if (!inner) return null;
+      const got = inner.get(args.path);
+      if (got === undefined) return null;
+      const bytes = new TextEncoder().encode(got).buffer as ArrayBuffer;
+      const sha = await calculateGitBlobSHA(bytes);
+      return { sha, size: bytes.byteLength };
+    },
     async getRepoContent(_args) {
       calls.push({ op: "getRepoContent", args: _args });
       // Synthesize a tree from whatever's recorded at the current
@@ -300,7 +310,7 @@ function silentLogger(): Sync2Logger {
 
 function fixture(opts?: {
   conflictStore?: import("../../src/sync2/conflict-store").default;
-  accumulateOfflineSyncs?: boolean;
+  consolidateCommits?: boolean;
   onProgress?: (msg: string) => {
     update: (m: string) => void;
     hide: () => void;
@@ -394,7 +404,7 @@ function fixture(opts?: {
     selfPluginId: SELF_PLUGIN_ID,
     deviceLabel: "test-device",
     conflictStore: defaultConflictStore,
-    accumulateOfflineSyncs: opts?.accumulateOfflineSyncs ?? false,
+    consolidateCommits: opts?.consolidateCommits ?? false,
     onProgress: opts?.onProgress,
     onLocalCommitted: opts?.onLocalCommitted,
     onNoLocalChanges: opts?.onNoLocalChanges,
@@ -1973,7 +1983,7 @@ describe("Sync2Manager.syncAll — basic flow", () => {
     });
   });
 
-  describe("resumeQueue + accumulateOfflineSyncs", () => {
+  describe("resumeQueue + consolidateCommits", () => {
     it("resumeQueue picks up a pending batch left over from a previous run", async () => {
       // Simulate a previous Sync2Manager that enqueued but crashed
       // before pushing.
@@ -2032,11 +2042,11 @@ describe("Sync2Manager.syncAll — basic flow", () => {
     });
   });
 
-  describe("accumulateOfflineSyncs", () => {
+  describe("consolidateCommits", () => {
     function brokenNetworkFixture() {
       // Helper: client whose updateBranchHead always throws so the
       // first push fails and leaves the batch on disk.
-      const f = fixture({ accumulateOfflineSyncs: true });
+      const f = fixture({ consolidateCommits: true });
       const orig = f.client.updateBranchHead.bind(f.client);
       let allowPush = false;
       f.client.updateBranchHead = async (args) => {
@@ -2057,7 +2067,7 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       // (even once, even if it failed) is frozen against further
       // accumulate-merges. The .attempted marker enforces this: it
       // gets written at the start of processBatch and is NEVER
-      // cleared on failure. So even with accumulateOfflineSyncs ON,
+      // cleared on failure. So even with consolidateCommits ON,
       // a second sync click after a failed push creates a separate
       // batch — symmetric to the accumulate=OFF behaviour below.
       const f2 = brokenNetworkFixture();
@@ -2094,7 +2104,7 @@ describe("Sync2Manager.syncAll — basic flow", () => {
 
     it("offline + accumulate OFF: second sync stacks a new batch", async () => {
       const fOff = (() => {
-        const x = fixture({ accumulateOfflineSyncs: false });
+        const x = fixture({ consolidateCommits: false });
         const orig = x.client.updateBranchHead.bind(x.client);
         x.client.updateBranchHead = async () => {
           throw new Error("offline");
@@ -2113,7 +2123,7 @@ describe("Sync2Manager.syncAll — basic flow", () => {
     });
 
     it("accumulate ON but queue empty: enqueue normally", async () => {
-      const f2 = fixture({ accumulateOfflineSyncs: true });
+      const f2 = fixture({ consolidateCommits: true });
       writeVaultFile(f2.root, "a.md", "v");
       await f2.store.load();
       f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");

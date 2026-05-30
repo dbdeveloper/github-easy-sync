@@ -16,7 +16,10 @@ import {
   AtomicWriteRecovery,
   SYNC_TMP_SUFFIX,
   SYNC_BAK_SUFFIX,
+  SYNC_MOD_MARKER_SUFFIX,
   stagingPathFor,
+  modifyMarkerPathFor,
+  parseModifyMarkerPath,
 } from "../../src/sync2/atomic-write";
 import { calculateGitBlobSHA } from "../../src/utils";
 
@@ -504,4 +507,242 @@ describe("AtomicWriteRecovery SHA-verify (ConflictStore-owned siblings)", () => 
     // correct because the bytes are transient, not destined.
     expect(fs.existsSync(path.join(f.root, "Notes/regular.md"))).toBe(false);
   });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// Stage 7 modify-in-place crash recovery — marker + bak protocol.
+// ───────────────────────────────────────────────────────────────────
+
+describe("modifyMarkerPathFor + parseModifyMarkerPath", () => {
+  it("round-trips a regular path: notes/folder/note.md", () => {
+    const target = "notes/folder/note.md";
+    const marker = modifyMarkerPathFor(target);
+    expect(marker).toBe("notes/folder/.note.md.sync-tmp.");
+    expect(parseModifyMarkerPath(marker)).toBe(target);
+  });
+
+  it("round-trips a root-level path: note.md", () => {
+    const marker = modifyMarkerPathFor("note.md");
+    expect(marker).toBe(".note.md.sync-tmp.");
+    expect(parseModifyMarkerPath(marker)).toBe("note.md");
+  });
+
+  it("round-trips a hidden file: .obsidian/.gitignore", () => {
+    const target = ".obsidian/.gitignore";
+    const marker = modifyMarkerPathFor(target);
+    // Two leading dots: one we always add + one from the target name.
+    expect(marker).toBe(".obsidian/..gitignore.sync-tmp.");
+    expect(parseModifyMarkerPath(marker)).toBe(target);
+  });
+
+  it("parseModifyMarkerPath returns null for a regular file", () => {
+    expect(parseModifyMarkerPath("notes/note.md")).toBeNull();
+  });
+
+  it("parseModifyMarkerPath returns null for a staging file shape", () => {
+    // .eslintrc.json.sync-tmp ends in .sync-tmp with NO trailing
+    // dot — it's an existing staging file for the hidden config
+    // file `.eslintrc.json`. parseModifyMarkerPath must reject
+    // it so the existing parseStagingPath stays authoritative for
+    // that shape.
+    expect(parseModifyMarkerPath(".eslintrc.json.sync-tmp")).toBeNull();
+  });
+
+  it("parseModifyMarkerPath returns null when basename lacks the leading dot", () => {
+    // A file that ends in `.sync-tmp.` but doesn't start with `.`
+    // is not a marker (it's some user file that happens to have
+    // the suffix). The leading dot is essential.
+    expect(parseModifyMarkerPath("notes/note.md.sync-tmp.")).toBeNull();
+  });
+
+  it("uses the exported suffix constant", () => {
+    expect(SYNC_MOD_MARKER_SUFFIX).toBe(".sync-tmp.");
+  });
+});
+
+describe("AtomicWriteRecovery — modify-in-place markers (forward-recovery)", () => {
+  let f: ReturnType<typeof fixture>;
+  beforeEach(() => {
+    f = fixture();
+  });
+  afterEach(() => {
+    f.cleanup();
+  });
+
+  it(
+    "marker + sync-tmp present + target present (partial) → " +
+      "rename sync-tmp over target (forward-complete)",
+    async () => {
+      // Simulates: modifyBinary crashed mid-write, leaving the
+      // target with partial bytes. The sync-tmp has the intended
+      // final state — recovery renames it over the target.
+      const targetPath = "Notes/n.md";
+      const newBytes = bytesOf("new content from upstream");
+      const partialBytes = bytesOf("new "); // simulate truncated write
+      fs.mkdirSync(path.join(f.root, "Notes"));
+      fs.writeFileSync(
+        path.join(f.root, targetPath),
+        Buffer.from(partialBytes),
+      );
+      const tmpPath = stagingPathFor(targetPath, "tmp");
+      fs.writeFileSync(path.join(f.root, tmpPath), Buffer.from(newBytes));
+      const markerPath = modifyMarkerPathFor(targetPath);
+      fs.writeFileSync(path.join(f.root, markerPath), "");
+
+      const sweep = new AtomicWriteRecovery(
+        f.vault as unknown as import("obsidian").Vault,
+        f.store,
+      );
+      const { cleaned, restored } = await sweep.sweep();
+
+      expect(restored).toBe(1);
+      expect(cleaned).toBe(0);
+      expect(fs.existsSync(path.join(f.root, markerPath))).toBe(false);
+      expect(fs.existsSync(path.join(f.root, tmpPath))).toBe(false);
+      // Target now has the intended new content.
+      expect(readText(f.root, targetPath)).toBe("new content from upstream");
+    },
+  );
+
+  it(
+    "marker + sync-tmp present + target already has new bytes → " +
+      "rename overwrites (idempotent forward-complete)",
+    async () => {
+      // Simulates: modifyBinary + afterCommit completed but the
+      // marker / sync-tmp cleanup crashed. Recovery still renames;
+      // the result is byte-identical because sync-tmp has the same
+      // bytes as the live file.
+      const targetPath = "Notes/n.md";
+      const newBytes = bytesOf("new content");
+      fs.mkdirSync(path.join(f.root, "Notes"));
+      fs.writeFileSync(path.join(f.root, targetPath), Buffer.from(newBytes));
+      const tmpPath = stagingPathFor(targetPath, "tmp");
+      fs.writeFileSync(path.join(f.root, tmpPath), Buffer.from(newBytes));
+      const markerPath = modifyMarkerPathFor(targetPath);
+      fs.writeFileSync(path.join(f.root, markerPath), "");
+
+      const sweep = new AtomicWriteRecovery(
+        f.vault as unknown as import("obsidian").Vault,
+        f.store,
+      );
+      const { cleaned, restored } = await sweep.sweep();
+
+      expect(restored).toBe(1);
+      expect(cleaned).toBe(0);
+      expect(fs.existsSync(path.join(f.root, markerPath))).toBe(false);
+      expect(fs.existsSync(path.join(f.root, tmpPath))).toBe(false);
+      expect(readText(f.root, targetPath)).toBe("new content");
+    },
+  );
+
+  it(
+    "marker + sync-tmp present + target missing → " +
+      "rename creates target from sync-tmp",
+    async () => {
+      const targetPath = "Notes/n.md";
+      const newBytes = bytesOf("recovered");
+      fs.mkdirSync(path.join(f.root, "Notes"));
+      // No live target file.
+      const tmpPath = stagingPathFor(targetPath, "tmp");
+      fs.writeFileSync(path.join(f.root, tmpPath), Buffer.from(newBytes));
+      const markerPath = modifyMarkerPathFor(targetPath);
+      fs.writeFileSync(path.join(f.root, markerPath), "");
+
+      const sweep = new AtomicWriteRecovery(
+        f.vault as unknown as import("obsidian").Vault,
+        f.store,
+      );
+      const { cleaned, restored } = await sweep.sweep();
+
+      expect(restored).toBe(1);
+      expect(cleaned).toBe(0);
+      expect(fs.existsSync(path.join(f.root, markerPath))).toBe(false);
+      expect(fs.existsSync(path.join(f.root, tmpPath))).toBe(false);
+      expect(readText(f.root, targetPath)).toBe("recovered");
+    },
+  );
+
+  it(
+    "marker present + sync-tmp missing → " +
+      "defensive cleanup of the marker (nothing to land)",
+    async () => {
+      const targetPath = "Notes/n.md";
+      const existingBytes = bytesOf("untouched");
+      fs.mkdirSync(path.join(f.root, "Notes"));
+      fs.writeFileSync(
+        path.join(f.root, targetPath),
+        Buffer.from(existingBytes),
+      );
+      const markerPath = modifyMarkerPathFor(targetPath);
+      fs.writeFileSync(path.join(f.root, markerPath), "");
+      // No sync-tmp.
+
+      const sweep = new AtomicWriteRecovery(
+        f.vault as unknown as import("obsidian").Vault,
+        f.store,
+      );
+      const { cleaned, restored } = await sweep.sweep();
+
+      expect(cleaned).toBe(1);
+      expect(restored).toBe(0);
+      expect(fs.existsSync(path.join(f.root, markerPath))).toBe(false);
+      // Target untouched — we had nothing to land.
+      expect(readText(f.root, targetPath)).toBe("untouched");
+    },
+  );
+
+  it(
+    "sync-tmp present + NO marker → " +
+      "existing Path A logic drops it as transient",
+    async () => {
+      // Mirror of "modify aborted before marker was created". The
+      // existing Path A branch handles it — no double-handling.
+      const targetPath = "Notes/n.md";
+      const someBytes = bytesOf("transient");
+      fs.mkdirSync(path.join(f.root, "Notes"));
+      const tmpPath = stagingPathFor(targetPath, "tmp");
+      fs.writeFileSync(path.join(f.root, tmpPath), Buffer.from(someBytes));
+      // No marker, no target.
+
+      const sweep = new AtomicWriteRecovery(
+        f.vault as unknown as import("obsidian").Vault,
+        f.store,
+      );
+      const { cleaned, restored } = await sweep.sweep();
+
+      expect(cleaned).toBe(1);
+      expect(restored).toBe(0);
+      expect(fs.existsSync(path.join(f.root, tmpPath))).toBe(false);
+      expect(fs.existsSync(path.join(f.root, targetPath))).toBe(false);
+    },
+  );
+
+  it(
+    "marker for a hidden file (.gitignore) round-trips correctly",
+    async () => {
+      // Verifies that hidden-file paths (which carry an extra leading
+      // dot in the basename) still parse correctly through the
+      // sweep walk and produce the right rename target.
+      const targetPath = "Notes/.gitignore";
+      const newBytes = bytesOf("ignored\n");
+      fs.mkdirSync(path.join(f.root, "Notes"));
+      const tmpPath = stagingPathFor(targetPath, "tmp");
+      fs.writeFileSync(path.join(f.root, tmpPath), Buffer.from(newBytes));
+      const markerPath = modifyMarkerPathFor(targetPath);
+      expect(markerPath).toBe("Notes/..gitignore.sync-tmp.");
+      fs.writeFileSync(path.join(f.root, markerPath), "");
+
+      const sweep = new AtomicWriteRecovery(
+        f.vault as unknown as import("obsidian").Vault,
+        f.store,
+      );
+      const { cleaned, restored } = await sweep.sweep();
+
+      expect(restored).toBe(1);
+      expect(cleaned).toBe(0);
+      expect(fs.existsSync(path.join(f.root, markerPath))).toBe(false);
+      expect(fs.existsSync(path.join(f.root, tmpPath))).toBe(false);
+      expect(readText(f.root, targetPath)).toBe("ignored\n");
+    },
+  );
 });

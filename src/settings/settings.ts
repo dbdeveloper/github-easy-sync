@@ -16,28 +16,45 @@ export interface GitHubSyncSettings {
   syncStrategy: "manual" | "interval";
   syncInterval: number; // minutes
   syncOnStartup: boolean;
-  // What an AUTOMATIC sync (interval timer OR sync-on-startup) does
-  // for local changes. The manual [Sync with GitHub] button always
-  // commits regardless — this setting only governs the automatic
-  // surfaces:
-  //   - false (default): pull-only on interval; pull + drain queue
-  //                      on startup. Local edits are NEVER enqueued
-  //                      automatically; the user commits explicitly.
-  //                      Silent — no "Commit"/"Syncing" notices on
-  //                      idle. Conflicts during pull auto-defer via
-  //                      ConflictStore (the 🔀 status-bar widget
-  //                      surfaces them).
-  //   - true:           full sync (commit + pull + push) on both
-  //                      interval and startup, same flow and same
-  //                      Notices as a manual click. Local changes
-  //                      go up automatically; if accumulateOfflineSyncs
-  //                      is also true, sequential automatic syncs
-  //                      collapse into one combined commit.
-  autoCommitOnSync?: boolean;
+  // Stage 7 semantic master toggle. Replaces the old
+  // `syncStartsWithCommit` (which only governed interval/startup);
+  // the new flag unifies behaviour across manual click, interval,
+  // and startup surfaces.
+  //
+  //   - true (default): every Sync surface (manual click, interval,
+  //                     startup) performs commit + drain. Matches
+  //                     today's manual-click semantics; no surprise
+  //                     for new users.
+  //   - false:          Sync surfaces only drain the existing
+  //                     `.push-queue` (or pull when empty). Commit
+  //                     is the user's separate action via the
+  //                     `[Commit]` ribbon button (showCommitRibbonButton
+  //                     should also be on for usability — the
+  //                     settings tab warns when both are off).
+  //
+  // Migration: old `syncStartsWithCommit` field is honored if present
+  // (true → syncStartsWithCommit:true, false → false). On first
+  // load with the old key present, loadSettings emits a log line
+  // describing the rename so the user can update data.json by
+  // hand on each device. See docs/tasks/SYNC2-WORKER-REORG.md §7
+  // "Settings migration — none. Manual data.json update."
+  syncStartsWithCommit?: boolean;
 
   // UI affordances.
   showStatusBarItem: boolean;
   showSyncRibbonButton: boolean;
+  // Stage 7: independent of syncStartsWithCommit. When true, shows a
+  // separate `[Commit]` ribbon icon. Combinations:
+  //   - syncStartsWithCommit:true  + this:false → default UX (one
+  //     Sync button does commit+drain).
+  //   - syncStartsWithCommit:true  + this:true  → Sync still does
+  //     commit+drain; user can also pre-stage extra commits via
+  //     [Commit] before clicking Sync.
+  //   - syncStartsWithCommit:false + this:true  → classic "split
+  //     mode" — Commit enqueues, Sync drains.
+  //   - syncStartsWithCommit:false + this:false → unusable shape;
+  //     Settings tab surfaces a warning.
+  showCommitRibbonButton?: boolean;
 
   enableLogging: boolean;
 
@@ -45,10 +62,22 @@ export interface GitHubSyncSettings {
   // via formatX helpers in src/sync2/commit-message.ts; `deviceLabel`
   // below is the only user-tunable component (the trailing suffix).
 
-  // When sync2 is offline (last push failed) and this is true,
-  // subsequent Sync clicks fold into the latest pending batch
-  // instead of stacking. Eventual replay is one commit.
-  accumulateOfflineSyncs?: boolean;
+  // Stage 7 rename of `consolidateCommits`. The flag now
+  // applies in two places:
+  //   - When sync2 is offline (last push failed) and a new Sync
+  //     click comes in, the new changes fold into the latest
+  //     pending batch instead of stacking. Eventual replay is
+  //     one commit. (Original behaviour.)
+  //   - In `syncStartsWithCommit:false` split mode, when the user
+  //     clicks [Commit] several times in a row without an
+  //     intervening drain, the consecutive commits collapse into
+  //     one batch. (New in Stage 7.)
+  //
+  // Migration: old `consolidateCommits` field is honored if
+  // present; loadSettings emits a rename note on first load. See
+  // docs/tasks/SYNC2-WORKER-REORG.md §7 for the manual data.json
+  // update path.
+  consolidateCommits?: boolean;
 
   // Per-device label baked into commit messages (as the trailing
   // suffix) and conflict-resolver sibling-file names. Same source
@@ -87,6 +116,28 @@ export interface GitHubSyncSettings {
   // whose trailing-newline matters). With this off, plugin treats
   // text the same as binary at the byte level.
   autoCanonicalizeTextFiles?: boolean;
+
+  // ── Performance ─────────────────────────────────────────────────
+  // Stage 7: maximum input size for the reconcile-time 3-way auto
+  // merge, in BYTES. Above this size the engine skips the
+  // attemptAutoMerge dance and pushes the local bytes as-is —
+  // documented loss of automated 3-way merge for big files, in
+  // exchange for sidestepping (a) the node-diff3 scaling cliff
+  // (~85 s at 4.6 MB on mobile) and (b) the multi-MB base64 decode
+  // bridge stalls observed in the May 2026 field investigation.
+  //
+  // Defaults to 1_000_000 (1 MB), matching the Stage 8 perf-test
+  // recommendation. Conservative on purpose — the Stage 4 Worker
+  // offload keeps the UI responsive during merge, but the
+  // wall-clock at 5 MB on a phone is still 30-80 s extrapolated
+  // from Node baselines. Tune up only if the corpus genuinely
+  // needs auto-merge above 1 MB AND you've measured the wall-clock
+  // on the slowest device.
+  //
+  // Stored in bytes (not KB / MB) so the wire format never has a
+  // decimal-point ambiguity (e.g., "1.5" vs "1500000"). Settings UI
+  // surfaces the input in KB for readability and converts.
+  maxAutoMergeSizeBytes?: number;
 }
 
 // NOTE: "Push plugins data.json to GitHub" is NOT a per-device
@@ -109,11 +160,12 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   syncStrategy: "manual",
   syncInterval: 5,
   syncOnStartup: false,
-  autoCommitOnSync: false,
+  syncStartsWithCommit: true,
   showStatusBarItem: true,
   showSyncRibbonButton: true,
+  showCommitRibbonButton: false,
   enableLogging: false,
-  accumulateOfflineSyncs: false,
+  consolidateCommits: false,
   deviceLabel: "Obsidian",
   syncConfigDir: false,
   // Off by default: a "true" default surprised first-time users by
@@ -125,4 +177,5 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   // the safe behavior and lets users who actually want canonical
   // text on disk turn it on knowingly.
   autoCanonicalizeTextFiles: false,
+  maxAutoMergeSizeBytes: 1_000_000,
 };

@@ -7,8 +7,20 @@ import {
   isAtomicPluginFile,
   compareSemver,
 } from "./plugin-js";
-import { mergeText } from "./three-way-merge";
+import { mergeText, MergeOutcome } from "./three-way-merge";
 import { ConflictKind } from "./conflict-store";
+
+// Pluggable three-way merge function. The default is the
+// synchronous main-thread mergeText (suitable for unit tests).
+// Sync2Manager passes a Worker-backed async wrapper that routes
+// large merges through the CPU pool. Either form is awaited by
+// the caller, so the gate is async even when the default is
+// inline.
+export type MergeTextFn = (
+  ours: string,
+  base: string,
+  theirs: string,
+) => MergeOutcome | Promise<MergeOutcome>;
 
 // Auto-merge dispatch helpers. See docs/PSEUDO-MERGE-MODE.md §7 for
 // the dispatch table (text 3-way / plugin-js semver / binary always-
@@ -90,6 +102,11 @@ export interface AttemptAutoMergeArgs {
   // Required when isAtomicPluginFile(path, configDir) — otherwise the
   // plugin-js branch can only register-conflict.
   pluginJs?: PluginJsContext;
+  // Optional three-way merge function. Sync2Manager passes the
+  // WorkerClient-backed async wrapper so large merges run in the
+  // CPU pool; unit tests omit it and the default sync mergeText
+  // runs inline.
+  mergeFn?: MergeTextFn;
 }
 
 // Auto-merge gate. Returns one of four outcomes for the caller to
@@ -103,7 +120,9 @@ export interface AttemptAutoMergeArgs {
 //   - hasTextExtension    → 3-way merge via mergeText
 //   - else (binary)       → register-conflict unconditionally
 //                           (2.0.0-beta's silent atomic-mtime is gone)
-export function attemptAutoMerge(args: AttemptAutoMergeArgs): AutoMergeResult {
+export async function attemptAutoMerge(
+  args: AttemptAutoMergeArgs,
+): Promise<AutoMergeResult> {
   if (args.theirs === null) {
     return { type: "modify-wins" };
   }
@@ -111,7 +130,12 @@ export function attemptAutoMerge(args: AttemptAutoMergeArgs): AutoMergeResult {
     return resolvePluginJs(args.pluginJs);
   }
   if (hasTextExtension(args.path)) {
-    return tryTextMerge(args.ours, args.theirs, args.base);
+    return await tryTextMerge(
+      args.ours,
+      args.theirs,
+      args.base,
+      args.mergeFn ?? mergeText,
+    );
   }
   return { type: "register-conflict" };
 }
@@ -147,11 +171,12 @@ function resolvePluginJs(ctx?: PluginJsContext): AutoMergeResult {
   return { type: "register-conflict" };
 }
 
-function tryTextMerge(
+async function tryTextMerge(
   ours: ArrayBuffer,
   theirs: ArrayBuffer,
   base: ArrayBuffer | null,
-): AutoMergeResult {
+  mergeFn: MergeTextFn,
+): Promise<AutoMergeResult> {
   // 3-way merge needs a shared base. "Added on both sides
   // independently" has no base — register as a conflict and let the
   // user see both versions side-by-side.
@@ -160,7 +185,7 @@ function tryTextMerge(
   const oursText = decoder.decode(ours);
   const theirsText = decoder.decode(theirs);
   const baseText = decoder.decode(base);
-  const result = mergeText(oursText, baseText, theirsText);
+  const result = await mergeFn(oursText, baseText, theirsText);
   if (result.kind === "clean") {
     const encoded = new TextEncoder().encode(result.content);
     return {

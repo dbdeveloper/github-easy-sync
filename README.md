@@ -3,7 +3,7 @@
 > Sync your Obsidian vault with a GitHub repository — no `git` binary,
 > no `isomorphic-git`, identical behaviour on desktop and mobile.
 
-Version `2.0.1-beta` · AGPL-3.0 · Fork of
+Version `2.0.2-beta` · AGPL-3.0 · Fork of
 [`github-gitless-sync`](https://github.com/silvanocerza/github-gitless-sync)
 
 ---
@@ -11,9 +11,11 @@ Version `2.0.1-beta` · AGPL-3.0 · Fork of
 ## What's new
 
 Per-release notes live in [`CHANGELOG.md`](./CHANGELOG.md).
-Latest: **2.0.1-beta5** — hotfix for >1 MB-file sync; see
-[CHANGELOG.md](./CHANGELOG.md#201-beta5--2026-05-29) for the
-recovery checklist if you were affected.
+Latest: **2.0.2-beta** — Worker orchestra, SHA-first reconcile,
+split `[Commit]` / `[Sync]` UX, cancellable in-flight uploads,
+expired-token modal. See
+[CHANGELOG.md](./CHANGELOG.md#202-beta--2026-05-30) for the
+full list.
 
 The full design rationale behind any release is in
 [`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md).
@@ -132,6 +134,8 @@ want your notes public → leave "Initialize with README" unchecked
 (an empty repo is fine; the plugin will seed it on first sync).
 
 <!-- SCREENSHOT: empty repo creation form -->
+
+<a id="github-token-setup"></a>
 
 #### 3. Generate a fine-grained Personal Access Token
 
