@@ -2785,6 +2785,26 @@ export class Sync2Manager {
     };
 
     for (const path of toProcess) {
+      // Yield to the macrotask queue before each path so the JS
+      // event loop gets a chance to process pending work between
+      // files: UI repaint, Capacitor bridge callbacks, queued
+      // vault.adapter.append writes from logger. Without this the
+      // entire reconcile loop runs as a single uninterruptible
+      // task — microtask-only awaits (the standard `await` chain)
+      // don't drain the macrotask queue, so UI is frozen and
+      // bridge work stalls until the whole batch finishes. The
+      // `setTimeout(0)` explicitly hands control to the event
+      // loop, which is the documented mechanism for cooperative
+      // multitasking in single-threaded JS. See §0 P1 — "click
+      // Sync, keep editing".
+      //
+      // Field-confirmed: in the base64 N-iter diagnostic harness
+      // 15 chained ~15 ms decodes total ~225 ms — but with no
+      // yields the UI froze for the entire ~225 ms because the
+      // macrotask queue couldn't drain between iterations. Same
+      // pattern applied to the reconcile loop here.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
       // Per-path reconcile diagnostic probe. Fires ONLY when logging
       // is enabled (lazy lambda — never invoked in production). The
       // probe is here because the reconcile path is the most memory-
