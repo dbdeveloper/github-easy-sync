@@ -26,6 +26,23 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
+  // Stage 7 drain-status subscription. Held across renders so the
+  // [Stop drain] button + timer survive re-display() calls (e.g.,
+  // when the user toggles a setting that re-renders the page).
+  private drainStatusUnsubscribe: (() => void) | null = null;
+  private drainStatusTickTimer: ReturnType<typeof setInterval> | null = null;
+
+  hide(): void {
+    // Inherited from PluginSettingTab; runs when the user leaves
+    // the page. Clean up the subscription so we don't leak.
+    this.drainStatusUnsubscribe?.();
+    this.drainStatusUnsubscribe = null;
+    if (this.drainStatusTickTimer !== null) {
+      clearInterval(this.drainStatusTickTimer);
+      this.drainStatusTickTimer = null;
+    }
+  }
+
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
@@ -34,6 +51,12 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     // does NOT carry a conflict list — users with a conflict click
     // the status bar or ribbon to open the sibling, not the
     // settings tab.
+
+    // ── Drain status (Stage 7) ───────────────────────────────────────
+    // Shown at the top of the page so it's instantly visible. While
+    // a drain is running: live timer + current path + [Stop drain].
+    // When idle: passive "Last sync: …" + last error if any.
+    this.renderDrainStatusSection(containerEl);
 
     // ── Remote repository ────────────────────────────────────────────
     new Setting(containerEl).setName("Remote Repository").setHeading();
@@ -647,6 +670,96 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
             }).open();
           });
       });
+  }
+
+  // Stage 7: live "Drain status" section. Subscribes to the
+  // Sync2Manager's drainStateChanged events and re-paints the
+  // timer + path + last error + [Stop drain] button. Survives
+  // re-display() via the saved unsubscribe handle.
+  private renderDrainStatusSection(parent: HTMLElement): void {
+    // Tear down any previous subscription before we re-render.
+    this.drainStatusUnsubscribe?.();
+    this.drainStatusUnsubscribe = null;
+    if (this.drainStatusTickTimer !== null) {
+      clearInterval(this.drainStatusTickTimer);
+      this.drainStatusTickTimer = null;
+    }
+
+    new Setting(parent).setName("Drain status").setHeading();
+
+    const card = parent.createDiv();
+    card.style.padding = "0.75em 1em";
+    card.style.margin = "0 0 1.5em 0";
+    card.style.borderRadius = "4px";
+    card.style.background = "var(--background-secondary)";
+    card.style.fontFamily = "var(--font-monospace)";
+    card.style.fontSize = "0.85em";
+    card.style.whiteSpace = "pre-wrap";
+
+    const statusLine = card.createDiv();
+    const errorLine = card.createDiv();
+    errorLine.style.marginTop = "0.5em";
+    errorLine.style.color = "var(--text-error)";
+    const stopBtnWrap = card.createDiv();
+    stopBtnWrap.style.marginTop = "0.5em";
+    const stopBtn = stopBtnWrap.createEl("button", { text: "Stop drain" });
+    stopBtn.style.padding = "0.4em 0.9em";
+    stopBtn.style.background = "var(--background-modifier-error)";
+    stopBtn.style.color = "var(--text-on-accent)";
+    stopBtn.style.border = "none";
+    stopBtn.style.borderRadius = "4px";
+    stopBtn.style.cursor = "pointer";
+    stopBtn.addEventListener("click", () => {
+      this.plugin.sync2Manager.cancelDrain();
+      new Notice("Drain cancellation requested.", 4000);
+    });
+
+    const render = (status: ReturnType<
+      typeof this.plugin.sync2Manager.getDrainStatus
+    >): void => {
+      if (status.state === "running") {
+        const elapsed = status.startedAt
+          ? Math.round((Date.now() - status.startedAt) / 1000)
+          : 0;
+        const pathLabel = status.currentPath ?? "(initialising)";
+        const counter =
+          status.totalFiles > 0
+            ? `${status.currentFile} / ${status.totalFiles}`
+            : "—";
+        statusLine.setText(
+          `🌀 Drain running for ${elapsed}s\n` +
+            `Currently: ${pathLabel}\n` +
+            `File: ${counter}`,
+        );
+        stopBtn.style.display = "inline-block";
+        if (this.drainStatusTickTimer === null) {
+          this.drainStatusTickTimer = setInterval(() => render(
+            this.plugin.sync2Manager.getDrainStatus(),
+          ), 1000);
+        }
+      } else {
+        statusLine.setText("⏸ Drain idle");
+        stopBtn.style.display = "none";
+        if (this.drainStatusTickTimer !== null) {
+          clearInterval(this.drainStatusTickTimer);
+          this.drainStatusTickTimer = null;
+        }
+      }
+      if (status.lastError !== null) {
+        const ago = Math.round(
+          (Date.now() - status.lastError.whenMs) / 1000,
+        );
+        errorLine.setText(
+          `⚠ Last error (${ago}s ago): ${status.lastError.message}`,
+        );
+      } else {
+        errorLine.setText("");
+      }
+    };
+
+    this.drainStatusUnsubscribe = this.plugin.sync2Manager.setDrainStatusListener(
+      (s) => render(s),
+    );
   }
 }
 

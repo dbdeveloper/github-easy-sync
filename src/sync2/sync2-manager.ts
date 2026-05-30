@@ -383,6 +383,31 @@ export interface Sync2ManagerDeps {
   workerClient?: WorkerClient;
 }
 
+// Stage 7 drain status — observed surface for the Settings tab's
+// "Drain status" section. Updated as drain progresses; the
+// settings page subscribes via setDrainStatusListener and
+// re-renders the timer, current path, and last error on each
+// event.
+export interface DrainStatus {
+  state: "idle" | "running" | "cancelling";
+  // ms-since-epoch when the current drain started; null when idle.
+  // Settings tab computes elapsed = Date.now() - startedAt on every
+  // render frame, so a single subscription update is enough — the
+  // timer ticks itself.
+  startedAt: number | null;
+  // Current file path within the active batch, or null when no
+  // file is being processed (between batches, or between paths
+  // inside the per-batch initialisation).
+  currentPath: string | null;
+  // Counters for the per-file "N of M" Notice.
+  totalFiles: number;
+  currentFile: number;
+  // Last error surfaced by drain (most recent) — string for
+  // serialisation simplicity, with ISO timestamp prefix for the
+  // UI to render "x minutes ago".
+  lastError: { message: string; whenMs: number } | null;
+}
+
 export class Sync2Manager {
   private readonly vault: Vault;
   private readonly store: SnapshotStore;
@@ -428,6 +453,30 @@ export class Sync2Manager {
   // still pushing, we let it enqueue but skip the second drain
   // invocation — the first one will pick the new batch up.
   private running = false;
+
+  // Stage 7 cancellation. Set by cancelDrain(); cleared at the
+  // start of every fresh drain. Drain checks this flag between
+  // per-file iterations and bails cleanly when set. Worker
+  // termination is handled separately — the WorkerClient is
+  // shared across the plugin so cancelling here doesn't bring
+  // down the orchestra. (A future enhancement could terminate +
+  // recreate the orchestra to interrupt mid-Worker compute.)
+  private abortRequested = false;
+
+  // Stage 7 drain status — observable surface for the Settings
+  // tab's "Drain status" section. Updated at the start/end of
+  // drain and per file inside reconcile. The Settings page
+  // subscribes via setDrainStatusListener and re-renders the
+  // timer + current path + last error on each event.
+  private drainStatus: DrainStatus = {
+    state: "idle",
+    startedAt: null,
+    currentPath: null,
+    totalFiles: 0,
+    currentFile: 0,
+    lastError: null,
+  };
+  private drainStatusListeners: Array<(s: DrainStatus) => void> = [];
 
   constructor(deps: Sync2ManagerDeps) {
     this.vault = deps.vault;
@@ -579,6 +628,41 @@ export class Sync2Manager {
   // entirely — first-time bootstrap is the drain's responsibility;
   // there's no need to fetch the remote tree just to stage local
   // changes.
+  // Stage 7 cancellation surface. Settings tab's [Stop drain]
+  // button and the split-mode confirmation modal both call this.
+  // Sets an abort flag that drain checks between files; the
+  // in-flight per-file work doesn't get interrupted mid-step,
+  // so a stuck Worker compute would still need its own timeout
+  // to surface as a cancellation. The next file boundary is the
+  // earliest cancellation can take effect.
+  cancelDrain(): void {
+    if (!this.running) return;
+    this.abortRequested = true;
+    this.logger.info("Sync2 cancelDrain requested");
+  }
+
+  // Subscribe to drain status changes (Stage 7 Settings "Drain
+  // status" section). Returns an unsubscribe function.
+  setDrainStatusListener(listener: (s: DrainStatus) => void): () => void {
+    this.drainStatusListeners.push(listener);
+    listener(this.drainStatus);
+    return () => {
+      const i = this.drainStatusListeners.indexOf(listener);
+      if (i >= 0) this.drainStatusListeners.splice(i, 1);
+    };
+  }
+
+  // Current snapshot of drain state — used by the Settings page
+  // when it renders without an active subscription update yet.
+  getDrainStatus(): DrainStatus {
+    return { ...this.drainStatus };
+  }
+
+  private emitDrainStatus(patch: Partial<DrainStatus>): void {
+    this.drainStatus = { ...this.drainStatus, ...patch };
+    for (const l of this.drainStatusListeners) l(this.drainStatus);
+  }
+
   async commitOnly(): Promise<void> {
     this.logger.info("Sync2 commitOnly start");
     await this.reconcileRemoteIdentity();
@@ -2278,6 +2362,17 @@ export class Sync2Manager {
   ): Promise<void> {
     if (this.running) return;
     this.running = true;
+    // Stage 7: clear any leftover abort signal and announce that the
+    // drain has begun. Settings tab's "Drain status" section observes
+    // this to flip the timer on + show [Stop drain].
+    this.abortRequested = false;
+    this.emitDrainStatus({
+      state: "running",
+      startedAt: Date.now(),
+      currentPath: null,
+      totalFiles: 0,
+      currentFile: 0,
+    });
     const ownProgress = sharedProgress === null;
     let progress: ProgressHandle | null = sharedProgress;
     let commitNum = 0;
@@ -2417,6 +2512,16 @@ export class Sync2Manager {
       }
     } finally {
       this.running = false;
+      // Stage 7: announce drain end. Settings tab flips the timer
+      // back to "Last sync: …" and removes the [Stop drain] button.
+      this.emitDrainStatus({
+        state: "idle",
+        startedAt: null,
+        currentPath: null,
+        totalFiles: 0,
+        currentFile: 0,
+      });
+      this.abortRequested = false;
       // No listener resume — ConflictWatcher is read-only and was
       // never paused. Drain doesn't own listener lifecycle.
     }
@@ -2840,7 +2945,27 @@ export class Sync2Manager {
       if (idx >= 0) batch.files.splice(idx, 1);
     };
 
+    // Stage 7 progress: announce the path count so the Settings
+    // page can render "N of M" for the current batch.
+    this.emitDrainStatus({
+      totalFiles: toProcess.length,
+      currentFile: 0,
+    });
+    let fileIndex = 0;
     for (const path of toProcess) {
+      fileIndex += 1;
+      // Stage 7 cancel check. The flag flips at batch-file boundaries
+      // (the next `await` past the yield below picks it up). A stuck
+      // mid-file step won't see this — the per-file timeout (60 s,
+      // Stage 2) is the deeper escape valve.
+      if (this.abortRequested) {
+        this.logger.info(
+          "Sync2 reconcile path SKIP — cancellation requested",
+          { path, fileIndex, total: toProcess.length },
+        );
+        break;
+      }
+      this.emitDrainStatus({ currentPath: path, currentFile: fileIndex });
       // Yield to the macrotask queue before each path so the JS
       // event loop gets a chance to process pending work between
       // files: UI repaint, Capacitor bridge callbacks, queued
