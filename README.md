@@ -3,7 +3,7 @@
 > Sync your Obsidian vault with a GitHub repository — no `git` binary,
 > no `isomorphic-git`, identical behaviour on desktop and mobile.
 
-Version `2.0.1-beta` · AGPL-3.0 · Fork of
+Version `2.0.2-beta` · AGPL-3.0 · Fork of
 [`github-gitless-sync`](https://github.com/silvanocerza/github-gitless-sync)
 
 ---
