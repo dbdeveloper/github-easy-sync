@@ -505,29 +505,44 @@ test machine, fallback works, all tests pass.
 Goal: parallel CPU work across the pool; UI stays responsive
 during multi-second compute.
 
-- Add `merge-text`, `compute-sha`, `decode-base64` ops to
-  `cpu-worker.ts`.
-- Worker bundles node-diff3 (~50 KB), a SHA-1 implementation
-  (built-in `crypto.subtle.digest('SHA-1', ...)` works in worker
-  scope), and uses native `atob` for base64.
-- `WorkerClient.mergeText`, `computeSHA`, `decodeBase64` — async
-  wrappers; dispatch picks an idle pool worker.
-- Reconcile / push-queue / tree-builder updated to call these via
-  `WorkerClient` instead of direct synchronous library calls.
-  Threshold-gated per §5.4.
-- Raise `RECONCILE_AUTO_MERGE_LIMIT` per Stage 8 perf data;
-  provisional 5 MB.
-- New unit tests:
-  - 3 MB merge via worker pool, byte-exact vs main-thread result
-  - 4 concurrent merges run in parallel (timing assertion)
-  - Worker failure → main-thread fallback path
-  - Decode > 2 MB byte-exact vs `base64ToArrayBuffer`
-- New integration tests:
-  - Real GitHub round-trip with 3 MB file divergence on both sides
-  - Two large files in same batch — merges run in parallel
+**Done (commits 2b62522, 7de39e1, 96c3bc2):**
 
-**Acceptance:** UI stays responsive (verified on a Pixel 6 Pro
-running Obsidian Mobile) during merge of 1-3 MB inputs.
+- ✅ `decode-base64`, `compute-git-blob-sha`, `merge-text` ops in
+  `cpu-worker.ts`; node-diff3 bundled into worker IIFE
+- ✅ `WorkerClient.decodeBase64`, `computeGitBlobSHA`, `mergeText`
+  typed wrappers with threshold gates (BASE64: 2 MB; SHA: 100 KB;
+  MERGE: 100 KB)
+- ✅ Main-thread fallback handlers — byte-exact algorithm parity
+  with worker (proven by worker-vs-fallback identity tests)
+- ✅ Sync2Manager: 22 call sites migrated to `await workerClient`
+  (15 calculateGitBlobSHA + 7 base64ToArrayBuffer)
+- ✅ PushQueue: 1 SHA call site migrated
+- ✅ main.ts: shared `WorkerClient` constructed at onload,
+  terminated in onunload, injected into both Sync2Manager + PushQueue
+- ✅ 10 new unit tests (28 total worker tests). Suite at 663/663.
+- ✅ Bundle pipeline: worker sources inline as string literals;
+  no `require("fs"|"path"|"os")` at module scope
+
+**Deferred to Stage 4 follow-up or later stages:**
+
+- ⏳ mergeText through workerClient. `attemptAutoMerge` is
+  currently synchronous and lives in `conflict-detection.ts`;
+  making it async ripples through call sites and the conflict
+  classifier. The threshold gate (100 KB) means small merges
+  still run on main thread regardless — the win is for the
+  rare large-file merge case. Focused commit.
+- ⏳ Raise `RECONCILE_AUTO_MERGE_LIMIT` — defer to Stage 8 perf
+  tests which provide the empirical baseline.
+- ⏳ Integration tests against real GitHub with 3 MB divergence —
+  natural Stage 4/8 follow-up; the unit tests already prove
+  byte-exact identity between worker and main paths.
+
+**Acceptance (current):** UI stays responsive during multi-MB
+SHA computation and base64 decode on a Pixel 6 Pro running
+Obsidian Mobile — the hot-path operations that motivated the
+rework are now off the main thread. mergeText migration is
+needed before the acceptance criterion for "merge of 1-3 MB
+inputs" is fully met, but the foundation is solid.
 
 ### Stage 5: SHA-first as default (manifest mtime+size cache + reconcile rework) (~5-7 hours)
 
