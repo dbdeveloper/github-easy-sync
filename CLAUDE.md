@@ -57,10 +57,18 @@ src/
 │                                    #  4 status subclasses, PlatformError, StaleStateError, makeGithubAPIError
 │                                    #  dispatcher. PSEUDO-MERGE-MODE §13.
 ├── github/client.ts                 # Thin requestUrl wrapper, retryUntil; throws via makeGithubAPIError;
-│                                    #  getContentsAtRef does Blobs-API fallback for >1MB files (PSEUDO-MERGE-MODE §16.6)
+│                                    #  getContentsAtRef does Blobs-API fallback for >1MB files (PSEUDO-MERGE-MODE §16.6);
+│                                    #  every HTTP call routes through WorkerClient.httpRequest when one is wired
 ├── settings/
-│   ├── settings.ts                  # GitHubSyncSettings + DEFAULT_SETTINGS
-│   └── tab.ts                       # Settings UI (trim onChange, Reset modal)
+│   ├── settings.ts                  # GitHubSyncSettings + DEFAULT_SETTINGS (syncStartsWithCommit,
+│   │                                #  showCommitRibbonButton, consolidateCommits, maxAutoMergeSizeBytes)
+│   └── tab.ts                       # Settings UI (trim onChange, Reset modal, GitHub sync status section,
+│                                    #  Performance group with max-auto-merge KB input)
+├── worker/                          # Web Worker orchestra (PSEUDO-MERGE-MODE §17). esbuild emits each entry
+│   ├── types.ts                     #  point as an IIFE, inlines as string via `define`, runtime wraps in Blob URL.
+│   ├── cpu-worker.ts                # CPU pool: decode-base64, compute-git-blob-sha, merge-text (bundles node-diff3)
+│   ├── network-worker.ts            # Single dedicated thread; native fetch executor for every GitHub HTTP call
+│   └── worker-client.ts             # Main-thread controller; pool dispatch, request-id multiplex, terminate, fallback
 └── sync2/
     ├── sync2-manager.ts             # Orchestrator: syncAll, syncFile, drain, processBatch,
     │                                #  validateDeletionsAgainstHead (pre-flight, §12.1),
@@ -77,7 +85,9 @@ src/
     │                                #  Unicode), encodePathForGithub, safeRename. PSEUDO-MERGE-MODE §11.
     ├── gitignore-invariants.ts      # Invariant .gitignore blocks; always-write enforce
     ├── commit-message.ts            # Hardcoded format* helpers; commitMessageForBatch
-    ├── atomic-write.ts              # 5-step atomicWriteFile + stagingPathFor + AtomicWriteRecovery.sweep
+    ├── atomic-write.ts              # 5-step atomicWriteFile + stagingPathFor + AtomicWriteRecovery.sweep;
+    │                                #  fast-path uses vault.modifyBinary for open TFiles (preserves editor cursor/scroll)
+    │                                #  via a .sync-tmp + .<basename>.sync-tmp. marker forward-recovery protocol
     ├── conflict-store.ts            # ConflictRecord + 3-step create + renameVaultSiblingsToUnresolved
     ├── conflict-classifier.ts       # Pure classify() + evaluateConflictState (Phase A + Phase B)
     ├── conflict-watcher.ts          # vault.on listener; READ-ONLY counter.markDirty()
@@ -90,7 +100,8 @@ src/
     ├── types.ts                     # QueueBatch, FileChange, EnqueueMeta
     └── views/
         ├── conflict-status-indicator.ts   # Status-bar 🔀 count
-        └── pre-sync-conflict-modal.ts     # Pre-Sync confirmation modal
+        ├── pre-sync-conflict-modal.ts     # Pre-Sync confirmation modal
+        └── token-expired-modal.ts         # 401 / 403 recovery dialog (Stage 7)
 ```
 
 ## Testing
@@ -177,7 +188,11 @@ The bucket form takes a glob — `tests/integration/scenarios/sync2/conflicts*` 
 - **Don't add files to the hardcoded `isSyncable` blocklist** without a real reason. The default for new "should we sync this?" rules is to add patterns to the seeded gitignore (`CONFIG_DIR_SEED` / `ROOT_SEED` in `gitignore-invariants.ts`) — that way users can opt out.
 - **Don't hand-edit the canonical block in `<configDir>/.gitignore`** — `GitignoreInvariants.enforce()` will rewrite it on the next plugin load. To customise the truly-required behaviour, edit the constants in `gitignore-invariants.ts` and ship a new build.
 - **Polling, not events, for the sync engine.** `findChanges` walks the vault on each sync click; no `vault.on` subscription for sync purposes. Implication: edits made while the plugin was disabled get picked up on the next sync click without any "missed events" failure mode. The conflict layer's `ConflictWatcher` IS event-driven (`vault.on('delete'|'modify'|'rename')`), but **read-only** — it only calls `counter.markDirty()`, never mutates store; all conflict mutations happen at drain-start. See [`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md) §5.
-- **No scheduler logic in `main.ts`.** Periodic-tick decisions (interval enabled vs watchdog vs `autoCommitOnSync`) and the onload-startup pulse live in `src/sync2/interval-scheduler.ts` so they can be unit-tested in isolation under a fake timer. If you find yourself adding an `setInterval` or `app.workspace.onLayoutReady` callback for sync purposes inside `main.ts`, move it into `IntervalScheduler` instead.
+- **No scheduler logic in `main.ts`.** Periodic-tick decisions (interval enabled vs watchdog vs `syncStartsWithCommit`) and the onload-startup pulse live in `src/sync2/interval-scheduler.ts` so they can be unit-tested in isolation under a fake timer. If you find yourself adding an `setInterval` or `app.workspace.onLayoutReady` callback for sync purposes inside `main.ts`, move it into `IntervalScheduler` instead.
+- **Worker orchestra: CPU pool + dedicated network worker.** Stage 4-6 of the 2.0.2-beta rework moved every hot-path CPU operation (3-way merge, base64 decode, SHA computation) and every GitHub HTTP call off the main thread. The orchestra lives in `src/worker/`; esbuild emits each worker entry point as a standalone IIFE and inlines the source as a string constant via `define`, so `main.js` ships a single bundle. Runtime wraps each string in a `Blob` URL and constructs `new Worker(url)` from it — no `importScripts`, no separate file fetch, no Capacitor `app://` URL ambiguity. Workers CANNOT touch any Obsidian API (`vault.adapter.*`, `app.workspace`, settings) — those stay on main. **All HTTP calls from the engine MUST go through `WorkerClient.httpRequest`** (CORS-validated against `api.github.com` on Capacitor Android). The Settings-tab connection probe is the one allowed exception — it uses `requestUrl` directly so a click never touches plugin state.
+- **Modify-in-place uses `vault.modifyBinary` + a `.sync-tmp.` marker for crash safety.** When the engine writes to a file that already exists as a TFile, `atomicWriteFile` takes a fast path that preserves any open editor's cursor + scroll position. Protocol: stage new bytes in `<file>.sync-tmp.<ext>` → drop a zero-byte marker at `.<basename>.sync-tmp.` (leading + trailing dot — syntactically distinct from staging files) → `modifyBinary(target, newBytes)` → cleanup. On crash, `AtomicWriteRecovery.sweep` sees the marker, renames sync-tmp over the target (forward-complete), and removes the marker. Recovery runs at plugin onload BEFORE `workspace.onLayoutReady` so the rename's editor-close side effect is moot. The rename strategy still runs for brand-new files (no existing TFile to modify); SHA-based recovery handles its `.sync-bak` orphans, unchanged from 2.0.1.
+- **`syncStartsWithCommit` master toggle controls all sync surfaces (default `true`).** Manual `[Sync]` click, interval tick, and startup sync all branch on this single setting. `true` → commit + drain (today's manual-click semantic; preserves backward compat). `false` → drain only; commit becomes the user's separate action via the `[Commit]` ribbon button or the `commit-local` command. The `showCommitRibbonButton` toggle controls the ribbon icon independently — it's a UI affordance, not a semantic.
+- **`atomicWriteFile` is invoked from many places. Settings-tab UI text should NOT name engine concepts ("drain", "queue", "batch") — use plain English for users.** Engine identifiers (cancelDrain, DrainStatus, setDrainStatusListener) stay as code-level jargon because they're API names, not user copy. Stage 7 specifically swapped UI copy: "Drain status" → "GitHub sync status", "Stop drain" → "Stop sync", "Drain running" → "Syncing with GitHub".
 - **`drain()` is re-entrant-safe via a `running` flag** on `Sync2Manager`. Concurrent `syncAll()` calls (e.g. interval tick fires while user click is mid-flight) collapse into one drain — the second call returns immediately. Don't bypass this with a separate code path; the integration suite's H3 test pins the serialisation.
 - **Commit messages are hardcoded** in `src/sync2/commit-message.ts` (`formatSyncMessage`, `formatResolveConflictMessage`, etc.). Don't reintroduce a per-user template field — the design choice was deliberate (date/time live in commit metadata; provenance lives in the trailing `(deviceLabel)` suffix).
 - **When working on conflict resolution OR the push pipeline OR cross-cutting infrastructure** (cross-platform contracts in `cross-platform.ts`, typed errors in `errors.ts`, pending-deletions in `pending-deletions-store.ts`, skip-class annotations in any loop), [`docs/PSEUDO-MERGE-MODE.md`](./docs/PSEUDO-MERGE-MODE.md) is the canonical spec the code targets. Code comments reference the article's section numbers (e.g. `§9.4`, `§10 Scenario E`, `§11 cross-platform contracts`, `§12.1 pre-flight validation`, `§13 error taxonomy`, `§14 skip-class`); use those to navigate between code and design rationale. The bug catalog in `§16 Field Postmortems` is the triage index for similar future symptoms.

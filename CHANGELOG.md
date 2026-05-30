@@ -11,6 +11,145 @@ For the full design rationale behind any change below, see
 
 ---
 
+## 2.0.2-beta — 2026-05-30
+
+Major architectural rework, no breaking changes for the default
+configuration. The engine now runs CPU- and network-heavy work in
+a small Web Worker orchestra so the UI stays responsive even
+during multi-megabyte syncs on Obsidian Mobile. New optional
+split between **Commit** (stage changes locally) and **Sync**
+(upload to GitHub) for users who want to batch commits offline
+and push only on WiFi. A new **Settings → GitHub sync status**
+section gives a live view of the current upload + the cancel
+button. Expired GitHub tokens now surface as a step-by-step modal
+instead of silent 5-minute retry loops.
+
+If you're a single-device user with `Sync starts with commit:
+true` (the default) and `Show commit ribbon button: false` (also
+the default), nothing about your day-to-day workflow changes —
+the **Sync with GitHub** button still commits + pushes in one
+click. Everything below is additive.
+
+### Added
+
+- **Worker orchestra (Stages 3-6).** A small pool of Web Workers
+  now handles 3-way text merge, SHA computation, base64 decode,
+  and every GitHub API call. The main thread stays free for the
+  editor; "click Sync, keep editing" works as a hard guarantee
+  even at multi-megabyte file sizes. Threshold-gated so small
+  operations stay inline (no postMessage overhead). The CORS
+  feasibility was validated on Capacitor Android (Pixel 6 Pro) —
+  worker `fetch` against `api.github.com` round-trips in
+  ~800 ms.
+- **SHA-first reconcile (Stage 5).** Reconcile now fetches GitHub
+  metadata (sha + size) before pulling blob content. ~75 % of
+  paths resolve from SHAs alone (no remote change / ours wins /
+  already in sync) — no blob fetch, no base64 decode, no merge.
+  Saves multi-MB of redundant downloads on every multi-device
+  sync.
+- **Split Commit / Sync (Settings → "Sync starts with commit",
+  default ON).** Turning the master toggle OFF means the
+  **Sync** button only uploads what's already staged; committing
+  becomes a separate **[Commit]** ribbon button (also a
+  command-palette entry and a hotkey-bindable action). Useful
+  for staging commits offline and pushing only on WiFi.
+- **Show commit ribbon button toggle (Settings, default OFF).**
+  Independent of the master toggle. Lets the user surface a
+  **[Commit]** ribbon icon even when Sync still commits + uploads
+  in one click.
+- **"Upload pending commits to GitHub (no new commit)" command.**
+  Pure-drain hotkey for users who hide all ribbon icons.
+  Independent of the master toggle.
+- **Settings → GitHub sync status section.** Top of the page,
+  always visible. Shows: live timer while a sync is running, the
+  file being processed (N of M counter), last error (with
+  elapsed time prefix), and a `[Stop sync]` button to cancel an
+  in-flight upload.
+- **`Sync2Manager.cancelDrain()` API.** Cancellation propagates
+  via an abort flag the reconcile loop checks between files.
+- **Maximum auto-merge file size (Settings → Performance, default
+  1024 KB).** Exposes the previously-hardcoded
+  `RECONCILE_AUTO_MERGE_LIMIT`; tune up if your corpus needs
+  auto-merge on bigger files (validate on the slowest device
+  first — see `tests/perf/README.md`).
+- **Expired-token modal.** When GitHub returns 401 ("Bad
+  credentials") the plugin now opens a guided recovery modal:
+  intro + the three steps + buttons to open the GitHub token
+  page, the README walkthrough, and the plugin's own settings
+  tab. Throttled to once per hour. Catches the common
+  "fine-grained PAT hit its 366-day cap and the daily 5-minute
+  interval drain silently fails" scenario.
+- **Modify-in-place crash safety (Stage 7).** When the engine
+  writes to a file that's currently open in an editor, it now
+  uses `vault.modifyBinary` to preserve the editor's cursor and
+  scroll position — instead of the rename-aside strategy that
+  closes the view. Backed by a marker-file protocol that
+  forward-completes any interrupted modify on next plugin
+  onload.
+- **CPU micro-benchmarks under `tests/perf/perf-cpu-*`.** Diff3
+  timing matrix, base64 decode, git-blob SHA, WorkerClient
+  dispatch overhead. Baselines documented in
+  `tests/perf/README.md`.
+
+### Changed
+
+- **`Sync2Manager.timed()` HTTP wrapper routes through the
+  network worker** when `WorkerClient` is provided. Existing
+  `requestUrl` path stays as fallback for the Settings-tab
+  connection probe and unit tests.
+- **Reconcile loop reads ours bytes FIRST**, then fetches base +
+  theirs metadata. Together with the SHA-first decision tree
+  this means the cheap local read happens before any network
+  round-trip, and the expensive byte-fetches only happen for
+  paths that truly need them.
+- **`setTimeout(0)` yields between reconcile path iterations.**
+  Prevents the macrotask queue from starving during long drains.
+- **`PushQueue.readFile` uses `fetch(getResourcePath(...))`.**
+  Documented part of Obsidian's `DataAdapter` API; on mobile
+  this resolves to a `http://localhost/_capacitor_file_/...`
+  URL that bypasses the JS↔native bridge. Faster and noticeably
+  more reliable than `adapter.readBinary` for multi-MB files.
+
+### Renamed
+
+The following data.json keys were renamed. Existing values are
+still loaded transparently and a one-time log line + 30-second
+Notice on first run instructs you to copy the new shape
+manually. The OLD keys keep working (loaded but no longer read).
+
+- `autoCommitOnSync` → `syncStartsWithCommit` (also unifies
+  manual / interval / startup behaviour under one toggle —
+  default `true` to preserve today's manual-click semantics)
+- `accumulateOfflineSyncs` → `consolidateCommits`
+- "Push plugins data.json to GitHub" (UI label) → "Sync plugins
+  data.json"
+
+### Removed
+
+- The 9 mobile-diagnostic buttons under Settings → "Mobile
+  diagnostics" (added during the May 2026 field investigation).
+  The empirically-validated learnings landed as proper engine
+  changes; the diagnostic surface is now redundant.
+
+### Fixed
+
+- **Open file no longer closes when a remote change lands.**
+  Was caused by the atomic-rename strategy (renames the live
+  file aside, then renames new bytes over the slot — Obsidian
+  sees the file disappear and unloads the editor). Replaced with
+  `vault.modifyBinary` for existing TFiles; the rename strategy
+  still runs for brand-new files where there's no open editor
+  to preserve.
+
+### Internal
+
+- 49 commits on `sync2-worker-reorg`, 51 if you count the merge
+  commit. Branch cut from `main` at `fead510` (2.0.1-beta5).
+- 679 unit tests + 114 integration tests + 24 perf baselines.
+  All green at merge.
+
+---
+
 ## 2.0.1-beta5 — 2026-05-29
 
 Hotfix release. Fixes a critical sync bug that could overwrite
