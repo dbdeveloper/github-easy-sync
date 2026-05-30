@@ -2805,6 +2805,24 @@ export class Sync2Manager {
             : null,
       }));
 
+      // Read OURS first — the local side that's already on disk
+      // in the queue snapshot. We read it before going to the
+      // network for base+theirs because:
+      //   (a) the read is cheap (~25 ms for 1.9 MB on phone via
+      //       the fetch(getResourcePath) path);
+      //   (b) most reconcile branches need ours bytes anyway, so
+      //       we'd read it eventually;
+      //   (c) reading first means the network fetches start with
+      //       all of ours already in memory — no later wait when
+      //       we hit the size-guard / convergence / merge
+      //       branches.
+      //
+      // Cost: in the "no remote-side change" short-circuit
+      // branch we'll have read ours unnecessarily, ~25 ms wasted.
+      // Acceptable trade for the simpler ordering and consistent
+      // memory profile across branches.
+      const oursBytes = await this.queue.readFile(batchId, path);
+
       const baseFetched = await this.safeFetchContents(path, expectedHead);
       const theirsFetched = await this.safeFetchContents(path, currentHead);
 
@@ -2816,8 +2834,6 @@ export class Sync2Manager {
       ) {
         continue;
       }
-
-      const oursBytes = await this.queue.readFile(batchId, path);
       const theirsBytes =
         theirsFetched === null
           ? null
