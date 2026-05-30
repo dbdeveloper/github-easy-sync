@@ -160,6 +160,15 @@ export interface Sync2Client {
     ref: string;
     retry?: boolean;
   }): Promise<{ content: string; sha: string } | null>;
+  // Stage 5 SHA-first reconcile: metadata-only variant that returns
+  // sha + size without ever downloading the blob content. Lets the
+  // reconcile path decide based on SHAs alone before paying for the
+  // bytes + decoding round-trip.
+  getContentsMetadataAtRef(args: {
+    path: string;
+    ref: string;
+    retry?: boolean;
+  }): Promise<{ sha: string; size: number } | null>;
   // Recursive listing of the branch's HEAD tree — every blob with its
   // path and SHA. Used by bootstrap-from-remote to enumerate what to
   // download into a fresh vault. GET /repos/{o}/{r}/git/trees/{branch}?recursive=1.
@@ -2856,17 +2865,86 @@ export class Sync2Manager {
       // memory profile across branches.
       const oursBytes = await this.queue.readFile(batchId, path);
 
-      const baseFetched = await this.safeFetchContents(path, expectedHead);
-      const theirsFetched = await this.safeFetchContents(path, currentHead);
+      // Stage 5 SHA-first reconcile: fetch metadata (sha + size)
+      // for base and theirs WITHOUT pulling down the blob bytes.
+      // The decision tree below resolves ~75% of paths from SHAs
+      // alone — no decode, no merge, no bytes round-trip — which
+      // is the §0 P2 principle in practice. Only the rare
+      // genuine-3-way-divergence case pays for the full content
+      // fetch + base64 decode.
+      const baseMeta = await this.safeFetchMetadata(path, expectedHead);
+      const theirsMeta = await this.safeFetchMetadata(path, currentHead);
 
-      // No remote-side change → batch pushes through unchanged.
+      // Branch 1 (existing): no remote-side change between base and
+      // theirs → batch pushes through unchanged.
       if (
-        baseFetched !== null &&
-        theirsFetched !== null &&
-        baseFetched.sha === theirsFetched.sha
+        baseMeta !== null &&
+        theirsMeta !== null &&
+        baseMeta.sha === theirsMeta.sha
       ) {
+        this.logger.info(
+          "Sync2 reconcile path SHA-first: no remote change (base.sha === theirs.sha)",
+          () => ({ path, sha: baseMeta.sha }),
+        );
         continue;
       }
+
+      // Compute ours SHA now — needed for the remaining branches.
+      // The CPU worker handles it off main thread for files above
+      // the SHA threshold (~100 KB).
+      const oursSha = await this.workerClient.computeGitBlobSHA(oursBytes);
+
+      // Branch 2 (new): ours already byte-identical to theirs on
+      // remote. Out-of-band sync (adb push, manual download, etc.)
+      // is the most common cause. Drop from batch — no push, no
+      // upload, no merge.
+      if (theirsMeta !== null && oursSha === theirsMeta.sha) {
+        await this.detector.recordSync(path, theirsMeta.sha);
+        await this.queue.removeFile(batchId, path);
+        dropFromBatchInMemory(path);
+        this.logger.info(
+          "Sync2 reconcile path SHA-first: ours already matches theirs (no upload)",
+          () => ({ path, sha: theirsMeta.sha }),
+        );
+        continue;
+      }
+
+      // Branch 3 (new): ours unchanged vs base, but theirs has
+      // moved forward → atomic theirs wins. We need theirs bytes
+      // to write to the vault; base bytes never needed.
+      if (
+        baseMeta !== null &&
+        theirsMeta !== null &&
+        oursSha === baseMeta.sha
+      ) {
+        const theirsFetchedSolo = await this.safeFetchContents(
+          path,
+          currentHead,
+        );
+        if (theirsFetchedSolo !== null) {
+          await this.writeBinaryRemote(path, theirsFetchedSolo.content);
+          await this.detector.recordSync(path, theirsFetchedSolo.sha);
+          await this.queue.removeFile(batchId, path);
+          dropFromBatchInMemory(path);
+          this.logger.info(
+            "Sync2 reconcile path SHA-first: theirs wins (ours unchanged vs base)",
+            () => ({
+              path,
+              oursSha,
+              baseSha: baseMeta.sha,
+              theirsSha: theirsMeta.sha,
+            }),
+          );
+          continue;
+        }
+        // Fall through to full path if theirs fetch failed (rare).
+      }
+
+      // Branch 4: all three SHAs differ → genuine 3-way divergence.
+      // Fall through to the full content-fetch + decode + merge path
+      // below.
+      const baseFetched = await this.safeFetchContents(path, expectedHead);
+      const theirsFetched = await this.safeFetchContents(path, currentHead);
       const theirsBytes =
         theirsFetched === null
           ? null
@@ -2889,39 +2967,11 @@ export class Sync2Manager {
         ? (await this.workerClient.decodeBase64(baseFetched.content))
         : null;
 
-      // Convergence short-circuit: if ours.bytes === theirs.bytes,
-      // any resolution path would degenerate into "no real change"
-      // (semver tied, mtime tied or not — doesn't matter, the disk
-      // state is already identical). Skip the whole attemptAutoMerge
-      // dance + the wasteful writeBinaryRemote-of-identical-bytes.
-      //
-      // Cheap-then-expensive: byte-length first (O(1)), then SHA
-      // (O(n)). theirsFetched.sha already came back from the GitHub
-      // round-trip; we just need to hash ours.
-      //
-      // Concrete trigger: same file landed on both devices via an
-      // out-of-band copy (adb push, manual download, IDE
-      // synchronizer) — mtime metadata differs but content matches.
-      // Previously this routed through "atomic theirs wins", spent
-      // an unnecessary writeBinaryRemote of identical bytes, and
-      // logged a misleading "theirs wins" line.
-      if (
-        theirsBytes !== null &&
-        theirsFetched !== null &&
-        oursBytes.byteLength === theirsBytes.byteLength
-      ) {
-        const oursSha = await this.workerClient.computeGitBlobSHA(oursBytes);
-        if (oursSha === theirsFetched.sha) {
-          await this.detector.recordSync(path, theirsFetched.sha);
-          await this.queue.removeFile(batchId, path);
-          dropFromBatchInMemory(path);
-          this.logger.info(
-            "Sync2 reconcile no-op: ours bytes already match theirs (mtime ignored)",
-            { path },
-          );
-          continue;
-        }
-      }
+      // (Stage 5 note: the byte-level convergence short-circuit
+      // that used to live here is now dead. Branch 2 of the
+      // SHA-first reconcile decision tree above already catches
+      // every "ours === theirs" case directly from the metadata
+      // SHAs — no bytes, no decode, no length check needed.)
 
       // Size guard: skip 3-way merge for files larger than
       // RECONCILE_AUTO_MERGE_LIMIT. Above this size two things
@@ -2952,34 +3002,10 @@ export class Sync2Manager {
         theirsBytes !== null &&
         theirsBytes.byteLength > RECONCILE_AUTO_MERGE_LIMIT;
       if (oursIsLarge || baseIsLarge || theirsIsLarge) {
-        // SHA-skip: before falling through to "push ours as-is",
-        // check if ours is already byte-identical to theirs on
-        // the remote side. If yes, the push step would just send
-        // ~2 MB of network traffic for GitHub to no-op on the
-        // tree — wasteful. Compute ours sha (cheap on a
-        // 1.9 MB ArrayBuffer, ~50 ms on phone) and compare to
-        // theirs sha (already returned by the GitHub fetch).
-        // Identical means drop from batch entirely: no upload,
-        // no commit overhead.
-        //
-        // This is the §0 P2 (SHA-first by default) principle
-        // applied to the size-guard path. Stage 5 generalises
-        // the same idea across the entire reconcile flow.
-        const oursSha = await this.workerClient.computeGitBlobSHA(oursBytes);
-        if (theirsFetched !== null && oursSha === theirsFetched.sha) {
-          await this.detector.recordSync(path, theirsFetched.sha);
-          await this.queue.removeFile(batchId, path);
-          dropFromBatchInMemory(path);
-          this.logger.info(
-            "Sync2 reconcile path SHA-skip — ours already matches theirs on remote, no push",
-            () => ({
-              path,
-              oursSha,
-              theirsSha: theirsFetched.sha,
-            }),
-          );
-          continue;
-        }
+        // (Stage 5 note: the SHA-skip that used to live here is
+        // dead too. Branch 2 of the SHA-first decision tree
+        // already drops paths where ours === theirs, before we
+        // even fetched the blob bytes that drive the size check.)
         this.logger.warn(
           "Sync2 reconcile path SKIP auto-merge — file > size limit, ours pushed as-is",
           () => ({
@@ -3266,6 +3292,29 @@ export class Sync2Manager {
       // Force-push or commit GC made the ref unreachable. Treat as
       // "no base available" → the merge will run against an empty
       // base, which is the documented graceful-degradation path.
+      return null;
+    }
+  }
+
+  // Stage 5 SHA-first reconcile helper. Returns the path's metadata
+  // (sha + size) at a ref WITHOUT downloading the blob content. The
+  // reconcile loop calls this before deciding whether the heavier
+  // safeFetchContents+decode round-trip is actually needed.
+  //
+  // Same graceful-degradation contract as safeFetchContents: errors
+  // (force-push, GC'd commit) → null, the loop treats it as
+  // "no base available".
+  private async safeFetchMetadata(
+    path: string,
+    ref: string,
+  ): Promise<{ sha: string; size: number } | null> {
+    try {
+      return await this.client.getContentsMetadataAtRef({
+        path,
+        ref,
+        retry: true,
+      });
+    } catch {
       return null;
     }
   }

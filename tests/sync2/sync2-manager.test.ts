@@ -229,6 +229,16 @@ function makeFakeClient(): Sync2Client & {
       const sha = await calculateGitBlobSHA(bytes);
       return { content: b64, sha };
     },
+    async getContentsMetadataAtRef(args) {
+      calls.push({ op: "getContentsMetadataAtRef", args });
+      const inner = state.contentsByRef.get(args.ref);
+      if (!inner) return null;
+      const got = inner.get(args.path);
+      if (got === undefined) return null;
+      const bytes = new TextEncoder().encode(got).buffer as ArrayBuffer;
+      const sha = await calculateGitBlobSHA(bytes);
+      return { sha, size: bytes.byteLength };
+    },
     async getRepoContent(_args) {
       calls.push({ op: "getRepoContent", args: _args });
       // Synthesize a tree from whatever's recorded at the current

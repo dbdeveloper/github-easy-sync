@@ -439,6 +439,60 @@ export default class GithubClient {
   }
 
   /**
+   * Fetches just the metadata (sha + size) for a path at a ref, without
+   * ever downloading the file content. Used by the Stage 5 SHA-first
+   * reconcile path so the engine can decide based on SHAs alone before
+   * paying for blob fetches and base64 decoding.
+   *
+   * Returns `null` when the path doesn't exist at the ref (404).
+   * Throws on unexpected statuses (matches `getContentsAtRef` behavior).
+   *
+   * Implementation note: the Contents API response carries both `sha`
+   * and `size`. For files ≤1 MB it also includes inline content, which
+   * this method intentionally discards — we want the small "is anything
+   * actually different" check to be uniform across all file sizes, and
+   * the caller is responsible for fetching content via getBlob when
+   * the SHA comparison shows it's needed.
+   */
+  async getContentsMetadataAtRef({
+    path: filePath,
+    ref,
+    retry = false,
+    maxRetries = 5,
+  }: {
+    path: string;
+    ref: string;
+    retry?: boolean;
+    maxRetries?: number;
+  }): Promise<{ sha: string; size: number } | null> {
+    const response = await retryUntil(
+      async () => {
+        return this.timed(
+          {
+            url: `https://api.github.com/repos/${this.settings.githubOwner}/${this.settings.githubRepo}/contents/${encodePathForGithub(filePath)}?ref=${ref}`,
+            headers: this.headers(),
+            throw: false,
+          },
+          `contents-meta/${filePath}@${ref.slice(0, 7)}`,
+        );
+      },
+      (res) => !isRetriableStatus(res.status),
+      retry ? maxRetries : 0,
+    );
+    if (response.status === 404) return null;
+    if (response.status < 200 || response.status >= 400) {
+      this.logger.error("Failed to get contents metadata at ref", response);
+      throw makeGithubAPIError(
+        response.status,
+        `Failed to get contents metadata at ref, status ${response.status}`,
+      );
+    }
+    const sha = response.json.sha as string;
+    const size = (response.json.size as number) ?? 0;
+    return { sha, size };
+  }
+
+  /**
    * Lists files changed between two refs. Sync2 uses this in the
    * pull pass to discover remote-driven adds/modifies/deletes that
    * landed since the last successful sync. Returns the list as-is
