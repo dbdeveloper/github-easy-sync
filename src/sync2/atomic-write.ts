@@ -218,73 +218,64 @@ export async function atomicWriteFile(
   if (typeof getter === "function" && typeof modBin === "function") {
     const existing = getter.call(vault, path);
     if (existing instanceof TFile) {
-      // Crash-safe modify protocol:
+      // Crash-safe modify protocol — forward-complete recovery:
       //
-      //   1. backup current bytes to `.sync-bak` (copy via writeBinary;
-      //      we can't rename the live file aside without closing the
-      //      editor view — the whole reason we're on this branch).
-      //   2. drop a zero-byte marker at `.<basename>.sync-mod` so
-      //      recovery can distinguish "modify in progress" from a
-      //      stale `.sync-bak` orphan (which the rename-strategy
-      //      recovery interprets differently).
-      //   3. modifyBinary in place (preserves editor cursor + scroll).
-      //   4. afterCommit (records new SHA into snapshot).
-      //   5. remove marker.
-      //   6. remove `.sync-bak`.
+      //   1. writeBinary(`.sync-tmp`, newBytes) — stage the NEW
+      //      bytes (the FUTURE state). Marker is NOT yet present,
+      //      so a crash here looks like a Path A transient sync-tmp
+      //      and the existing orphan sweep drops it on next onload.
+      //   2. write(marker, "") — the marker's presence signals to
+      //      recovery: "the sync-tmp next to me is the authoritative
+      //      target state — forward-complete by renaming it."
+      //   3. modifyBinary(target, newBytes) — in-place write that
+      //      preserves any open editor's cursor + scroll.
+      //   4. afterCommit() — caller updates snapshot.
+      //   5. remove(marker) — flips recovery's signal off.
+      //   6. remove(`.sync-tmp`) — staging file no longer needed.
       //
       // Crash recovery (AtomicWriteRecovery.sweep):
-      //   - marker present, bak present → restore live file from bak
-      //     via modifyBinary (rollback to pre-modify state); cleanup.
-      //   - marker present, bak missing → just drop the marker
-      //     defensively.
-      //   - marker missing, bak present → existing snapshot-SHA
-      //     recovery handles it (the modify completed successfully
-      //     before the marker was removed; bak is just a stale
-      //     orphan that the SHA check will delete).
-      const modifyBakPath = stagingPathFor(path, "bak");
+      //   - marker + sync-tmp present → rename sync-tmp → target.
+      //     Forward-completes the operation. (Recovery runs at
+      //     onload before any editor is open, so the rename's
+      //     side-effect of closing the editor is moot.)
+      //   - marker without sync-tmp → defensive cleanup of marker
+      //     (something unexpected happened; we have nothing to land).
+      //   - sync-tmp without marker → existing Path A logic drops
+      //     it as a transient.
+      const tmpPath = stagingPathFor(path, "tmp");
       const markerPath = modifyMarkerPathFor(path);
-      // Step 1: copy current bytes into .sync-bak. readBinary +
-      // writeBinary instead of rename keeps the live path
-      // untouched so the editor stays attached to it.
-      const originalBytes = await vault.adapter.readBinary(path);
-      await vault.adapter.writeBinary(modifyBakPath, originalBytes);
-      // Step 2: marker. The empty string is intentional; the file's
-      // existence is the entire signal.
+      // Step 1: stage new bytes in .sync-tmp. Existing transient
+      // staging path / file shape, reused — the marker is the
+      // signal that distinguishes this from a rename-strategy
+      // in-flight tmp.
+      await vault.adapter.writeBinary(tmpPath, bytes);
+      // Step 2: drop the marker. From this point on, recovery
+      // treats the tmp as forward-complete material.
       await vault.adapter.write(markerPath, "");
       try {
-        // Step 3: write new bytes in place.
+        // Step 3: write new bytes in place. Editor stays attached.
         await modBin.call(vault, existing, bytes);
-        // Step 4: caller updates snapshot (records new SHA).
+        // Step 4: caller updates snapshot.
         if (afterCommit) {
           await afterCommit();
         }
-        // Step 5: remove marker first — this is what flips the
-        // recovery's "modify in progress" signal off.
+        // Step 5: remove marker FIRST. If we crash between this
+        // and step 6, sync-tmp becomes a transient orphan and the
+        // existing Path A sweep handles it.
         await vault.adapter.remove(markerPath);
-        // Step 6: remove backup. If a crash hits here, the marker
-        // is already gone; the existing rename-strategy recovery
-        // sees an orphan .sync-bak, checks snapshot SHA, and
-        // cleans up (no rollback because SHA matches).
-        await vault.adapter.remove(modifyBakPath);
+        // Step 6: remove staging.
+        await vault.adapter.remove(tmpPath);
       } catch (err) {
-        // Best-effort in-place rollback from the backup, then
-        // throw the original error.
-        try {
-          const bakBytes = await vault.adapter.readBinary(modifyBakPath);
-          await modBin.call(vault, existing, bakBytes);
-        } catch {
-          // Ignore rollback failures; the next plugin onload's
-          // sweep will retry via the marker.
-        }
+        // Best-effort cleanup; sweep handles whatever's left.
         try {
           await vault.adapter.remove(markerPath);
         } catch {
-          // Ignore; sweep cleans it up.
+          // ignore
         }
         try {
-          await vault.adapter.remove(modifyBakPath);
+          await vault.adapter.remove(tmpPath);
         } catch {
-          // Ignore; sweep cleans it up.
+          // ignore
         }
         throw err;
       }
@@ -413,8 +404,21 @@ export class AtomicWriteRecovery {
     // 1. .sync-tmp: forward-direction staging. Dispatch by ownership.
     // Path B (ConflictStore.create) → resume Step 3 by renaming to the
     // final sibling path if SHA matches the record's theirsBlobSha.
-    // Path A (atomicWriteFile transient) → drop (next sync repeats).
+    // Path A (atomicWriteFile transient — rename strategy) → drop
+    // (next sync repeats).
+    // Path C (atomicWriteFile modify-in-place strategy — Stage 7):
+    // marker is also present, recovery branch 3 below owns the rename.
+    // Skip these here to avoid double-handling.
+    const markedTmpPaths = new Set<string>(
+      syncModifyMarkers.map(({ finalPath }) =>
+        stagingPathFor(finalPath, "tmp"),
+      ),
+    );
     for (const { stagingPath: tmpPath, finalPath: originalPath } of syncTmps) {
+      if (markedTmpPaths.has(tmpPath)) {
+        // Modify-in-place owns this tmp — sweep branch 3 handles it.
+        continue;
+      }
       try {
         const conflictRecord = this.conflictStore?.getBySibling(originalPath);
         if (conflictRecord !== undefined) {
@@ -451,22 +455,11 @@ export class AtomicWriteRecovery {
     }
 
     // 2. .sync-bak: rollback backups, snapshot-based recovery.
-    // Produced by atomicWriteFile (Path A — rename strategy) AND
-    // by the modify-in-place fast path (Stage 7) — the latter
-    // pairs a bak with a `.sync-tmp.` marker. Hand bak files
-    // with a sibling marker off to step 3 below; otherwise
-    // process here.
-    const markedBakPaths = new Set<string>(
-      syncModifyMarkers.map(({ finalPath }) =>
-        stagingPathFor(finalPath, "bak"),
-      ),
-    );
+    // Produced only by atomicWriteFile's rename strategy (Path A);
+    // ConflictStore never writes .sync-bak. The modify-in-place
+    // strategy (Stage 7) doesn't touch .sync-bak — it uses
+    // forward-recovery via the paired .sync-tmp.
     for (const { stagingPath: bakPath, finalPath: originalPath } of syncBaks) {
-      if (markedBakPaths.has(bakPath)) {
-        // Marker present for this final path — leave the bak
-        // alone, step 3 will use it for the SHA-based decision.
-        continue;
-      }
       try {
         const fileExists = await this.vault.adapter.exists(originalPath);
         if (!fileExists) {
@@ -507,130 +500,39 @@ export class AtomicWriteRecovery {
       }
     }
 
-    // 3. .sync-tmp. modify-in-place markers. The marker tells us
-    // "a modify-in-place ran for this path AND was either
-    // interrupted OR finished without the cleanup step running."
-    // SHA-based disambiguation tells the two cases apart:
+    // 3. `.sync-tmp.` modify-in-place markers. The marker tells us
+    // "this path's modify-in-place was started but the cleanup
+    // step never ran." Forward-complete: rename the matching
+    // `.sync-tmp` over the target. (Recovery happens at onload
+    // before any editor is open, so the rename's side-effect of
+    // closing an editor on the target is moot.)
     //
-    //   - live file's SHA === snapshot.remoteSha → modify completed
-    //     successfully before the crash (afterCommit updated the
-    //     snapshot; the live bytes match). Safe to just delete
-    //     marker + bak.
-    //   - live file's SHA differs / no snapshot → modify was
-    //     interrupted mid-flight; the live file might be partial.
-    //     Restore from bak.
-    //
-    // The restore uses vault.modifyBinary when available so any
-    // open editor stays attached; adapter.writeBinary is the
-    // mock-obsidian / fallback path.
+    //   - marker + .sync-tmp present → remove target, rename
+    //     sync-tmp → target. Forward-completes the modify.
+    //   - marker without .sync-tmp → defensive cleanup of marker
+    //     (we have no bytes to land; something unexpected
+    //     happened upstream).
     for (const { markerPath, finalPath } of syncModifyMarkers) {
       try {
-        const bakPath = stagingPathFor(finalPath, "bak");
-        const liveExists = await this.vault.adapter.exists(finalPath);
-        const bakExists = await this.vault.adapter.exists(bakPath);
-
-        // Helper: do the in-place restore using modifyBinary when
-        // possible, falling back to adapter.writeBinary.
-        const restoreInPlace = async (bytes: ArrayBuffer): Promise<void> => {
-          const getter = (
-            this.vault as {
-              getAbstractFileByPath?: (p: string) => unknown;
-            }
-          ).getAbstractFileByPath;
-          const modBin = (
-            this.vault as {
-              modifyBinary?: (f: TFile, b: ArrayBuffer) => Promise<void>;
-            }
-          ).modifyBinary;
-          if (
-            typeof getter === "function" &&
-            typeof modBin === "function"
-          ) {
-            const tfile = getter.call(this.vault, finalPath);
-            if (tfile instanceof TFile) {
-              await modBin.call(this.vault, tfile, bytes);
-              return;
-            }
+        const tmpPath = stagingPathFor(finalPath, "tmp");
+        const tmpExists = await this.vault.adapter.exists(tmpPath);
+        if (tmpExists) {
+          // remove target (if present) THEN rename — Capacitor on
+          // iOS/Android does not overwrite via rename, so the
+          // remove is necessary; on POSIX it's a tiny overhead.
+          if (await this.vault.adapter.exists(finalPath)) {
+            await this.vault.adapter.remove(finalPath);
           }
-          await this.vault.adapter.writeBinary(finalPath, bytes);
-        };
-
-        // Case A: live file missing. The modify can't have completed
-        // (otherwise the file would still be there). Restore from
-        // bak if we have it; otherwise just drop the marker.
-        if (!liveExists) {
-          if (bakExists) {
-            const bakBytes = await this.vault.adapter.readBinary(bakPath);
-            await this.vault.adapter.writeBinary(finalPath, bakBytes);
-            restored++;
-          } else {
-            cleaned++;
-          }
-          try {
-            await this.vault.adapter.remove(markerPath);
-          } catch {
-            // ignore
-          }
-          if (bakExists) {
-            try {
-              await this.vault.adapter.remove(bakPath);
-            } catch {
-              // ignore
-            }
-          }
-          continue;
-        }
-
-        // Case B: live file exists. Compare its SHA to snapshot.
-        const liveBytes = await this.vault.adapter.readBinary(finalPath);
-        const liveSha = await calculateGitBlobSHA(liveBytes);
-        const expectedSha = this.store.get(finalPath)?.remoteSha;
-        if (expectedSha !== undefined && liveSha === expectedSha) {
-          // Modify completed successfully; afterCommit ran and
-          // updated the snapshot before the crash interrupted
-          // cleanup. Safe to just delete the artifacts.
-          try {
-            await this.vault.adapter.remove(markerPath);
-          } catch {
-            // ignore
-          }
-          if (bakExists) {
-            try {
-              await this.vault.adapter.remove(bakPath);
-            } catch {
-              // ignore
-            }
-          }
-          cleaned++;
-          continue;
-        }
-        // SHA mismatch (or no snapshot record yet). The live file
-        // may be partial; restore from bak if available.
-        if (bakExists) {
-          const bakBytes = await this.vault.adapter.readBinary(bakPath);
-          await restoreInPlace(bakBytes);
+          await this.vault.adapter.rename(tmpPath, finalPath);
           restored++;
-          try {
-            await this.vault.adapter.remove(markerPath);
-          } catch {
-            // ignore
-          }
-          try {
-            await this.vault.adapter.remove(bakPath);
-          } catch {
-            // ignore
-          }
-          continue;
+        } else {
+          cleaned++;
         }
-        // SHA mismatch but no bak to restore from. The live file
-        // is in some indeterminate state; we have nothing to act
-        // on. Drop the marker defensively.
         try {
           await this.vault.adapter.remove(markerPath);
         } catch {
-          // ignore
+          // ignore — sweep is best-effort
         }
-        cleaned++;
       } catch {
         // Individual failure — keep sweeping.
       }
