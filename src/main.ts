@@ -168,6 +168,17 @@ export default class GitHubSyncPlugin extends Plugin {
         icon: "refresh-cw",
         callback: this.sync.bind(this),
       });
+      // Stage 7: pure drain hotkey. Lets a user who hides all
+      // ribbon icons still trigger an upload-only run from the
+      // keyboard, regardless of the syncStartsWithCommit master
+      // toggle setting. ("Sync with GitHub" above depends on
+      // the master toggle; this command does NOT.)
+      this.addCommand({
+        id: "upload-to-github",
+        name: "Upload pending commits to GitHub (no new commit)",
+        icon: "upload-cloud",
+        callback: this.uploadOnly.bind(this),
+      });
       this.addCommand({
         id: "sync-current-file",
         name: "Sync current file with GitHub",
@@ -920,6 +931,28 @@ export default class GitHubSyncPlugin extends Plugin {
       });
       new Notice(`Commit failed: ${err}`, 10000);
     }
+  }
+
+  // Stage 7: pure drain entry point — uploads pending commits to
+  // GitHub without first running change-detection / enqueue. Mirrors
+  // backgroundDrain() but as a user-facing command so the toast +
+  // log path goes through the same error-handling shape as sync().
+  async uploadOnly(): Promise<void> {
+    if (!this.isConfigured()) {
+      new Notice("Sync plugin not configured");
+      return;
+    }
+    if (!(await this.confirmPendingConflictsBeforeSync())) return;
+    try {
+      await this.sync2Manager.resumeQueue();
+    } catch (err) {
+      this.logger?.error("Upload-only command failed", {
+        err: describeError(err),
+      });
+      this.sync2Manager.recordDrainError(err);
+      new Notice(`Upload failed: ${err}`, 10000);
+    }
+    this.conflictCounter?.markDirty();
   }
 
   // ── auto-sync interval ──────────────────────────────────────────────
