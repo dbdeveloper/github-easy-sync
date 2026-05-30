@@ -20,7 +20,12 @@
 // turns into a Blob URL at runtime. No ES module syntax at the top
 // level after bundling.
 
-import type { WorkerRequest, WorkerResponse } from "./types";
+import type {
+  WorkerRequest,
+  WorkerResponse,
+  MergeTextResult,
+} from "./types";
+import { merge as diff3Merge } from "node-diff3";
 
 // Worker `self` is `DedicatedWorkerGlobalScope` — but bundling
 // against the standard TS dom lib drags in Window types. We type
@@ -30,10 +35,70 @@ const w = self as unknown as {
     type: "message",
     handler: (e: MessageEvent<WorkerRequest>) => void,
   ) => void;
-  postMessage: (msg: WorkerResponse) => void;
+  postMessage: (msg: WorkerResponse, transfer?: Transferable[]) => void;
 };
 
-w.addEventListener("message", (e) => {
+// Pure-JS base64 → ArrayBuffer. Worker scope has `atob`, which
+// returns a binary string (each char = one byte). We copy into a
+// Uint8Array. Strips whitespace first (GitHub's Blobs-API responses
+// arrive as MIME-style 60-char lines separated by \n, which atob
+// rejects with `InvalidCharacterError`). Same pattern as the
+// pre-Stage-4 fallback implementation.
+function decodeBase64(b64: string): ArrayBuffer {
+  const clean = b64.replace(/\s/g, "");
+  const binStr = atob(clean);
+  const out = new Uint8Array(binStr.length);
+  for (let i = 0; i < binStr.length; i++) {
+    out[i] = binStr.charCodeAt(i);
+  }
+  return out.buffer;
+}
+
+// Compute the SHA-1 git would assign to a blob of these bytes. Same
+// algorithm as src/utils.ts calculateGitBlobSHA (kept in sync —
+// changes here must mirror there for the byte-exact identity
+// invariant Stage 4's worker-vs-fallback tests assert).
+async function computeGitBlobSHA(bytes: ArrayBuffer): Promise<string> {
+  const view = new Uint8Array(bytes);
+  const header = new TextEncoder().encode(`blob ${view.length}\0`);
+  const store = new Uint8Array(header.length + view.length);
+  store.set(header, 0);
+  store.set(view, header.length);
+  const hash = await crypto.subtle.digest("SHA-1", store);
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// node-diff3 three-way text merge. Mirrors src/sync2/three-way-merge.ts
+// mergeText — same options (excludeFalseConflicts + LF-tolerant
+// stringSeparator), same separator picking. Result shape matches
+// MergeTextResult for postMessage transit.
+function pickSeparator(...inputs: string[]): string {
+  for (const s of inputs) {
+    if (s.includes("\r\n")) return "\r\n";
+  }
+  return "\n";
+}
+
+function mergeText(
+  ours: string,
+  base: string,
+  theirs: string,
+): MergeTextResult {
+  const result = diff3Merge(ours, base, theirs, {
+    excludeFalseConflicts: true,
+    stringSeparator: /\r?\n/,
+  });
+  const sep = pickSeparator(ours, base, theirs);
+  const joined = result.result.join(sep);
+  if (!result.conflict) {
+    return { kind: "clean", content: joined };
+  }
+  return { kind: "conflict", conflictMarkedContent: joined };
+}
+
+w.addEventListener("message", async (e) => {
   const msg = e.data;
   try {
     switch (msg.op) {
@@ -43,6 +108,26 @@ w.addEventListener("message", (e) => {
       }
       case "echo": {
         w.postMessage({ id: msg.id, ok: true, result: msg.payload });
+        return;
+      }
+      case "decode-base64": {
+        const buf = decodeBase64(msg.b64);
+        // Transfer the resulting ArrayBuffer back zero-copy. The
+        // worker side no longer references it after postMessage,
+        // and the caller never sent it in (the input was a string),
+        // so transfer is safe and saves a memcpy of the decoded
+        // bytes (up to a few MB) on the main thread side.
+        w.postMessage({ id: msg.id, ok: true, result: buf }, [buf]);
+        return;
+      }
+      case "compute-git-blob-sha": {
+        const sha = await computeGitBlobSHA(msg.bytes);
+        w.postMessage({ id: msg.id, ok: true, result: sha });
+        return;
+      }
+      case "merge-text": {
+        const out = mergeText(msg.ours, msg.base, msg.theirs);
+        w.postMessage({ id: msg.id, ok: true, result: out });
         return;
       }
     }

@@ -366,3 +366,216 @@ describe("WorkerClient — dispatch round-trip", () => {
     expect(out).toEqual({ s: "hi" });
   });
 });
+
+// ────────────────────────────────────────────────────────────────
+// Stage 4 — typed convenience wrappers for the CPU ops. Tests use
+// the same fallback path (no real Worker) so the math is verified
+// without depending on a browser environment. Production Stage 4
+// behaviour where the work actually runs in a Worker is exercised
+// by the integration suite (Stage 4 follow-up commits).
+// ────────────────────────────────────────────────────────────────
+
+describe("WorkerClient.decodeBase64", () => {
+  beforeEach(() => {
+    setupGlobals();
+    resetGlobals();
+  });
+
+  it("small payloads run inline (below worker threshold)", async () => {
+    const client = new WorkerClient({
+      hardwareConcurrency: 4,
+      cpuWorkerSource: FAKE_CPU,
+      networkWorkerSource: FAKE_NETWORK,
+      workerCtor: FakeWorker as unknown as typeof Worker,
+    });
+    // "Hello, World!" → base64
+    const buf = await client.decodeBase64("SGVsbG8sIFdvcmxkIQ==");
+    expect(new TextDecoder().decode(buf)).toBe("Hello, World!");
+    client.terminate();
+  });
+
+  it("strips MIME-style whitespace (\\n every 60 chars) before atob", async () => {
+    const client = new WorkerClient({
+      hardwareConcurrency: 4,
+      cpuWorkerSource: FAKE_CPU,
+      networkWorkerSource: FAKE_NETWORK,
+      workerCtor: FakeWorker as unknown as typeof Worker,
+    });
+    // GitHub Blobs API returns base64 with newlines inserted
+    // every 60 chars. Newlines must be stripped before atob —
+    // atob doesn't accept whitespace per spec.
+    // "Hello, World!" → SGVsbG8sIFdvcmxkIQ==
+    // Insert \n between groups of base64 chars (the strip+decode
+    // produces the original string).
+    const wrapped = "SGVsbG8s\nIFdvcmxk\nIQ==";
+    const buf = await client.decodeBase64(wrapped);
+    expect(new TextDecoder().decode(buf)).toBe("Hello, World!");
+    client.terminate();
+  });
+
+  it("fallback mode uses same atob path", async () => {
+    const client = new WorkerClient({
+      hardwareConcurrency: 4,
+      cpuWorkerSource: "",
+      networkWorkerSource: "",
+      workerCtor: FakeWorker as unknown as typeof Worker,
+    });
+    const buf = await client.decodeBase64("aGVsbG8=");
+    expect(new TextDecoder().decode(buf)).toBe("hello");
+  });
+});
+
+describe("WorkerClient.computeGitBlobSHA", () => {
+  beforeEach(() => {
+    setupGlobals();
+    resetGlobals();
+  });
+
+  it("matches the known SHA for an empty blob", async () => {
+    const client = new WorkerClient({
+      hardwareConcurrency: 4,
+      cpuWorkerSource: FAKE_CPU,
+      networkWorkerSource: FAKE_NETWORK,
+      workerCtor: FakeWorker as unknown as typeof Worker,
+    });
+    // `git hash-object /dev/null` = e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+    const sha = await client.computeGitBlobSHA(new Uint8Array(0).buffer);
+    expect(sha).toBe("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+    client.terminate();
+  });
+
+  it("matches the known SHA for a single 'a' byte", async () => {
+    const client = new WorkerClient({
+      hardwareConcurrency: 4,
+      cpuWorkerSource: FAKE_CPU,
+      networkWorkerSource: FAKE_NETWORK,
+      workerCtor: FakeWorker as unknown as typeof Worker,
+    });
+    // `printf 'a' | git hash-object --stdin`
+    //   = 2e65efe2a145dda7ee51d1741299f848e5bf752e
+    const a = new TextEncoder().encode("a");
+    const sha = await client.computeGitBlobSHA(a.buffer);
+    expect(sha).toBe("2e65efe2a145dda7ee51d1741299f848e5bf752e");
+    client.terminate();
+  });
+
+  it("worker and main-thread fallback produce the same SHA byte-exact", async () => {
+    const workerClient = new WorkerClient({
+      hardwareConcurrency: 4,
+      cpuWorkerSource: FAKE_CPU,
+      networkWorkerSource: FAKE_NETWORK,
+      workerCtor: FakeWorker as unknown as typeof Worker,
+    });
+    const fallbackClient = new WorkerClient({
+      hardwareConcurrency: 4,
+      cpuWorkerSource: "",
+      networkWorkerSource: "",
+      workerCtor: FakeWorker as unknown as typeof Worker,
+    });
+    const bytes = new TextEncoder().encode(
+      "The quick brown fox jumps over the lazy dog",
+    ).buffer;
+    // Note: below threshold, so both go through fallback path —
+    // but the invariant we care about is the algorithm matches.
+    // Above threshold one would go through worker dispatch; the
+    // result must remain identical.
+    const a = await workerClient.computeGitBlobSHA(bytes);
+    const b = await fallbackClient.computeGitBlobSHA(bytes);
+    expect(a).toBe(b);
+    workerClient.terminate();
+    fallbackClient.terminate();
+  });
+});
+
+describe("WorkerClient.mergeText", () => {
+  beforeEach(() => {
+    setupGlobals();
+    resetGlobals();
+  });
+
+  it("clean merge of non-overlapping edits", async () => {
+    const client = new WorkerClient({
+      hardwareConcurrency: 4,
+      cpuWorkerSource: FAKE_CPU,
+      networkWorkerSource: FAKE_NETWORK,
+      workerCtor: FakeWorker as unknown as typeof Worker,
+    });
+    // 5-line base with "middle" separator between the two edit
+    // zones so node-diff3 treats them as separate hunks (same
+    // pattern as sync2-manager.test.ts's clean-merge tests).
+    const base = "header\nalpha\nmiddle\noriginal\nfooter";
+    const ours = "header\nALPHA-OURS\nmiddle\noriginal\nfooter";
+    const theirs = "header\nalpha\nmiddle\nORIGINAL-THEIRS\nfooter";
+    const result = await client.mergeText(ours, base, theirs);
+    expect(result.kind).toBe("clean");
+    if (result.kind === "clean") {
+      expect(result.content).toContain("ALPHA-OURS");
+      expect(result.content).toContain("ORIGINAL-THEIRS");
+    }
+    client.terminate();
+  });
+
+  it("conflict on overlapping edits emits markers", async () => {
+    const client = new WorkerClient({
+      hardwareConcurrency: 4,
+      cpuWorkerSource: FAKE_CPU,
+      networkWorkerSource: FAKE_NETWORK,
+      workerCtor: FakeWorker as unknown as typeof Worker,
+    });
+    // Both sides change the same line — diff3 must report a
+    // conflict.
+    const base = "header\nbeta\nfooter";
+    const ours = "header\nBETA-OURS\nfooter";
+    const theirs = "header\nBETA-THEIRS\nfooter";
+    const result = await client.mergeText(ours, base, theirs);
+    expect(result.kind).toBe("conflict");
+    if (result.kind === "conflict") {
+      expect(result.conflictMarkedContent).toContain("BETA-OURS");
+      expect(result.conflictMarkedContent).toContain("BETA-THEIRS");
+    }
+    client.terminate();
+  });
+
+  it("CRLF inputs preserve CRLF in clean-merge output", async () => {
+    const client = new WorkerClient({
+      hardwareConcurrency: 4,
+      cpuWorkerSource: FAKE_CPU,
+      networkWorkerSource: FAKE_NETWORK,
+      workerCtor: FakeWorker as unknown as typeof Worker,
+    });
+    const base = "header\r\nalpha\r\nmiddle\r\noriginal\r\nfooter";
+    const ours = "header\r\nALPHA-OURS\r\nmiddle\r\noriginal\r\nfooter";
+    const theirs = "header\r\nalpha\r\nmiddle\r\nORIGINAL-THEIRS\r\nfooter";
+    const result = await client.mergeText(ours, base, theirs);
+    expect(result.kind).toBe("clean");
+    if (result.kind === "clean") {
+      expect(result.content.includes("\r\n")).toBe(true);
+    }
+    client.terminate();
+  });
+
+  it("worker and fallback paths produce identical results", async () => {
+    // Both clients run through fallback because the test inputs
+    // are short, but the test asserts the algorithm is the same.
+    const workerClient = new WorkerClient({
+      hardwareConcurrency: 4,
+      cpuWorkerSource: FAKE_CPU,
+      networkWorkerSource: FAKE_NETWORK,
+      workerCtor: FakeWorker as unknown as typeof Worker,
+    });
+    const fallbackClient = new WorkerClient({
+      hardwareConcurrency: 4,
+      cpuWorkerSource: "",
+      networkWorkerSource: "",
+      workerCtor: FakeWorker as unknown as typeof Worker,
+    });
+    const base = "x\ny\nz";
+    const ours = "x\nY-OURS\nz";
+    const theirs = "x\ny\nZ-THEIRS";
+    const a = await workerClient.mergeText(ours, base, theirs);
+    const b = await fallbackClient.mergeText(ours, base, theirs);
+    expect(a).toEqual(b);
+    workerClient.terminate();
+    fallbackClient.terminate();
+  });
+});

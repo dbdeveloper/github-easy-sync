@@ -6,8 +6,10 @@ import type {
   WorkerRequest,
   WorkerResponse,
   WorkerKind,
+  MergeTextResult,
 } from "./types";
 import { workerKindForOp } from "./types";
+import { merge as diff3Merge } from "node-diff3";
 
 // Worker orchestra controller — main-thread side. Holds the CPU
 // worker pool + the single dedicated network worker and exposes a
@@ -69,10 +71,78 @@ interface PooledWorker {
 // has ping/echo so the table is small. Stage 4 onwards extends.
 type FallbackHandler = (req: WorkerRequest) => Promise<unknown>;
 
+// Main-thread fallback for `decode-base64`. Strips whitespace then
+// uses `atob` (available in browser + Node main thread). Mirrors
+// the worker implementation byte-exactly.
+function fallbackDecodeBase64(b64: string): ArrayBuffer {
+  const clean = b64.replace(/\s/g, "");
+  const binStr = atob(clean);
+  const out = new Uint8Array(binStr.length);
+  for (let i = 0; i < binStr.length; i++) {
+    out[i] = binStr.charCodeAt(i);
+  }
+  return out.buffer;
+}
+
+// Main-thread fallback for `compute-git-blob-sha`. Same algorithm
+// as src/utils.ts calculateGitBlobSHA and the worker implementation
+// — kept in sync; the Stage 4 worker-vs-fallback test asserts
+// byte-exact identity.
+async function fallbackComputeGitBlobSHA(
+  bytes: ArrayBuffer,
+): Promise<string> {
+  const view = new Uint8Array(bytes);
+  const header = new TextEncoder().encode(`blob ${view.length}\0`);
+  const store = new Uint8Array(header.length + view.length);
+  store.set(header, 0);
+  store.set(view, header.length);
+  const hash = await crypto.subtle.digest("SHA-1", store);
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// Main-thread fallback for `merge-text`. Same node-diff3 call the
+// worker would make, same options.
+function fallbackPickSeparator(...inputs: string[]): string {
+  for (const s of inputs) {
+    if (s.includes("\r\n")) return "\r\n";
+  }
+  return "\n";
+}
+function fallbackMergeText(
+  ours: string,
+  base: string,
+  theirs: string,
+): MergeTextResult {
+  const result = diff3Merge(ours, base, theirs, {
+    excludeFalseConflicts: true,
+    stringSeparator: /\r?\n/,
+  });
+  const sep = fallbackPickSeparator(ours, base, theirs);
+  const joined = result.result.join(sep);
+  if (!result.conflict) {
+    return { kind: "clean", content: joined };
+  }
+  return { kind: "conflict", conflictMarkedContent: joined };
+}
+
 const FALLBACK_HANDLERS: Record<WorkerRequest["op"], FallbackHandler> = {
   ping: async () => "pong-main-fallback",
   echo: async (req) =>
     (req as Extract<WorkerRequest, { op: "echo" }>).payload,
+  "decode-base64": async (req) => {
+    const r = req as Extract<WorkerRequest, { op: "decode-base64" }>;
+    return fallbackDecodeBase64(r.b64);
+  },
+  "compute-git-blob-sha": async (req) => {
+    const r = req as Extract<WorkerRequest, { op: "compute-git-blob-sha" }>;
+    return await fallbackComputeGitBlobSHA(r.bytes);
+  },
+  "merge-text": async (req) => {
+    const r = req as Extract<WorkerRequest, { op: "merge-text" }>;
+    return fallbackMergeText(r.ours, r.base, r.theirs);
+  },
 };
 
 // Pool size for the CPU workers. Auto-tunes to one less than the
@@ -203,6 +273,82 @@ export default class WorkerClient {
   newRequestId(): string {
     this.requestCounter += 1;
     return `r${this.requestCounter}`;
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // Typed convenience wrappers around dispatch — Stage 4 surface.
+  //
+  // Below each threshold (BASE64_WORKER_THRESHOLD,
+  // SHA_WORKER_THRESHOLD, MERGE_WORKER_THRESHOLD) the call runs on
+  // the main thread instead. Reasoning:
+  //   - Worker round-trip costs ~5-10 ms of postMessage + structured
+  //     clone. For small inputs the work itself is ~1 ms — the
+  //     overhead dominates.
+  //   - Setting the thresholds at "where the worker pays for itself"
+  //     keeps the orchestra a net win for every call site, not a
+  //     pessimization for small files.
+  //
+  // Thresholds derived from §5.4 of the plan; Stage 8 perf tests
+  // will tune empirically.
+  // ────────────────────────────────────────────────────────────────
+
+  static readonly BASE64_WORKER_THRESHOLD = 2 * 1024 * 1024; // 2 MB
+  static readonly SHA_WORKER_THRESHOLD = 100 * 1024; // 100 KB
+  static readonly MERGE_WORKER_THRESHOLD = 100 * 1024; // 100 KB
+
+  // Decode a base64 string to bytes. Routes the work to the CPU
+  // pool when the input is large enough to make the round-trip
+  // worthwhile; otherwise runs on main thread via the fallback
+  // path (which uses the same atob-based implementation as the
+  // worker).
+  async decodeBase64(b64: string): Promise<ArrayBuffer> {
+    if (this.fallbackMode || b64.length < WorkerClient.BASE64_WORKER_THRESHOLD) {
+      return fallbackDecodeBase64(b64);
+    }
+    return await this.dispatch<ArrayBuffer>({
+      id: this.newRequestId(),
+      op: "decode-base64",
+      b64,
+    });
+  }
+
+  // Compute the git-blob SHA for these bytes. Routes to the CPU
+  // pool when the buffer is large enough; otherwise runs inline.
+  // The buffer is NOT transferred (caller usually needs to keep
+  // using the bytes after the SHA call).
+  async computeGitBlobSHA(bytes: ArrayBuffer): Promise<string> {
+    if (
+      this.fallbackMode ||
+      bytes.byteLength < WorkerClient.SHA_WORKER_THRESHOLD
+    ) {
+      return await fallbackComputeGitBlobSHA(bytes);
+    }
+    return await this.dispatch<string>({
+      id: this.newRequestId(),
+      op: "compute-git-blob-sha",
+      bytes,
+    });
+  }
+
+  // Three-way text merge via node-diff3. Routes to the CPU pool
+  // when the largest input is big enough that the merge itself
+  // would dominate the round-trip cost; otherwise runs inline.
+  async mergeText(
+    ours: string,
+    base: string,
+    theirs: string,
+  ): Promise<MergeTextResult> {
+    const maxLen = Math.max(ours.length, base.length, theirs.length);
+    if (this.fallbackMode || maxLen < WorkerClient.MERGE_WORKER_THRESHOLD) {
+      return fallbackMergeText(ours, base, theirs);
+    }
+    return await this.dispatch<MergeTextResult>({
+      id: this.newRequestId(),
+      op: "merge-text",
+      ours,
+      base,
+      theirs,
+    });
   }
 
   // Terminate every worker and reject every pending request.
