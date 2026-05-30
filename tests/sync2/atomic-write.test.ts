@@ -16,7 +16,10 @@ import {
   AtomicWriteRecovery,
   SYNC_TMP_SUFFIX,
   SYNC_BAK_SUFFIX,
+  SYNC_MOD_MARKER_SUFFIX,
   stagingPathFor,
+  modifyMarkerPathFor,
+  parseModifyMarkerPath,
 } from "../../src/sync2/atomic-write";
 import { calculateGitBlobSHA } from "../../src/utils";
 
@@ -503,5 +506,269 @@ describe("AtomicWriteRecovery SHA-verify (ConflictStore-owned siblings)", () => 
     // The "final" path (Notes/regular.md) was never created — drop is
     // correct because the bytes are transient, not destined.
     expect(fs.existsSync(path.join(f.root, "Notes/regular.md"))).toBe(false);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// Stage 7 modify-in-place crash recovery — marker + bak protocol.
+// ───────────────────────────────────────────────────────────────────
+
+describe("modifyMarkerPathFor + parseModifyMarkerPath", () => {
+  it("round-trips a regular path: notes/folder/note.md", () => {
+    const target = "notes/folder/note.md";
+    const marker = modifyMarkerPathFor(target);
+    expect(marker).toBe("notes/folder/.note.md.sync-tmp.");
+    expect(parseModifyMarkerPath(marker)).toBe(target);
+  });
+
+  it("round-trips a root-level path: note.md", () => {
+    const marker = modifyMarkerPathFor("note.md");
+    expect(marker).toBe(".note.md.sync-tmp.");
+    expect(parseModifyMarkerPath(marker)).toBe("note.md");
+  });
+
+  it("round-trips a hidden file: .obsidian/.gitignore", () => {
+    const target = ".obsidian/.gitignore";
+    const marker = modifyMarkerPathFor(target);
+    // Two leading dots: one we always add + one from the target name.
+    expect(marker).toBe(".obsidian/..gitignore.sync-tmp.");
+    expect(parseModifyMarkerPath(marker)).toBe(target);
+  });
+
+  it("parseModifyMarkerPath returns null for a regular file", () => {
+    expect(parseModifyMarkerPath("notes/note.md")).toBeNull();
+  });
+
+  it("parseModifyMarkerPath returns null for a staging file shape", () => {
+    // .eslintrc.json.sync-tmp ends in .sync-tmp with NO trailing
+    // dot — it's an existing staging file for the hidden config
+    // file `.eslintrc.json`. parseModifyMarkerPath must reject
+    // it so the existing parseStagingPath stays authoritative for
+    // that shape.
+    expect(parseModifyMarkerPath(".eslintrc.json.sync-tmp")).toBeNull();
+  });
+
+  it("parseModifyMarkerPath returns null when basename lacks the leading dot", () => {
+    // A file that ends in `.sync-tmp.` but doesn't start with `.`
+    // is not a marker (it's some user file that happens to have
+    // the suffix). The leading dot is essential.
+    expect(parseModifyMarkerPath("notes/note.md.sync-tmp.")).toBeNull();
+  });
+
+  it("uses the exported suffix constant", () => {
+    expect(SYNC_MOD_MARKER_SUFFIX).toBe(".sync-tmp.");
+  });
+});
+
+describe("AtomicWriteRecovery — modify-in-place markers", () => {
+  let f: ReturnType<typeof fixture>;
+  beforeEach(() => {
+    f = fixture();
+  });
+  afterEach(() => {
+    f.cleanup();
+  });
+
+  it(
+    "marker present + bak present + live SHA matches snapshot " +
+      "→ cleanup (modify completed before crash)",
+    async () => {
+      // Setup: simulate the state right after a successful
+      // modifyBinary + afterCommit but before marker removal.
+      const targetPath = "Notes/n.md";
+      const newBytes = bytesOf("new content");
+      const oldBytes = bytesOf("old content");
+      const newSha = await calculateGitBlobSHA(newBytes);
+      fs.mkdirSync(path.join(f.root, "Notes"));
+      fs.writeFileSync(path.join(f.root, targetPath), Buffer.from(newBytes));
+      const bakPath = stagingPathFor(targetPath, "bak");
+      fs.writeFileSync(path.join(f.root, bakPath), Buffer.from(oldBytes));
+      const markerPath = modifyMarkerPathFor(targetPath);
+      fs.writeFileSync(path.join(f.root, markerPath), "");
+      // Snapshot says newSha is the expected SHA (afterCommit ran).
+      f.store.set(targetPath, {
+        path: targetPath,
+        remoteSha: newSha,
+        mtime: 0,
+        size: newBytes.byteLength,
+      });
+
+      const sweep = new AtomicWriteRecovery(
+        f.vault as unknown as import("obsidian").Vault,
+        f.store,
+      );
+      const { cleaned, restored } = await sweep.sweep();
+
+      expect(cleaned).toBe(1);
+      expect(restored).toBe(0);
+      expect(fs.existsSync(path.join(f.root, markerPath))).toBe(false);
+      expect(fs.existsSync(path.join(f.root, bakPath))).toBe(false);
+      // Live file untouched (still has new content).
+      expect(readText(f.root, targetPath)).toBe("new content");
+    },
+  );
+
+  it(
+    "marker present + bak present + live SHA differs from snapshot " +
+      "→ restore from bak (modify was interrupted)",
+    async () => {
+      const targetPath = "Notes/n.md";
+      const oldBytes = bytesOf("old content");
+      const partialBytes = bytesOf("partia"); // simulate truncated write
+      const oldSha = await calculateGitBlobSHA(oldBytes);
+      fs.mkdirSync(path.join(f.root, "Notes"));
+      fs.writeFileSync(
+        path.join(f.root, targetPath),
+        Buffer.from(partialBytes),
+      );
+      const bakPath = stagingPathFor(targetPath, "bak");
+      fs.writeFileSync(path.join(f.root, bakPath), Buffer.from(oldBytes));
+      const markerPath = modifyMarkerPathFor(targetPath);
+      fs.writeFileSync(path.join(f.root, markerPath), "");
+      // Snapshot still has the OLD SHA — afterCommit hadn't run yet.
+      f.store.set(targetPath, {
+        path: targetPath,
+        remoteSha: oldSha,
+        mtime: 0,
+        size: oldBytes.byteLength,
+      });
+
+      const sweep = new AtomicWriteRecovery(
+        f.vault as unknown as import("obsidian").Vault,
+        f.store,
+      );
+      const { cleaned, restored } = await sweep.sweep();
+
+      expect(restored).toBe(1);
+      expect(cleaned).toBe(0);
+      expect(fs.existsSync(path.join(f.root, markerPath))).toBe(false);
+      expect(fs.existsSync(path.join(f.root, bakPath))).toBe(false);
+      // Live file rolled back to old content.
+      expect(readText(f.root, targetPath)).toBe("old content");
+    },
+  );
+
+  it(
+    "marker present + bak missing + live SHA mismatch " +
+      "→ defensive cleanup (nothing to restore from)",
+    async () => {
+      const targetPath = "Notes/n.md";
+      const partialBytes = bytesOf("partia");
+      const expectedSha = await shaOf("expected content");
+      fs.mkdirSync(path.join(f.root, "Notes"));
+      fs.writeFileSync(
+        path.join(f.root, targetPath),
+        Buffer.from(partialBytes),
+      );
+      const markerPath = modifyMarkerPathFor(targetPath);
+      fs.writeFileSync(path.join(f.root, markerPath), "");
+      // No bak file.
+      f.store.set(targetPath, {
+        path: targetPath,
+        remoteSha: expectedSha,
+        mtime: 0,
+        size: 100,
+      });
+
+      const sweep = new AtomicWriteRecovery(
+        f.vault as unknown as import("obsidian").Vault,
+        f.store,
+      );
+      const { cleaned, restored } = await sweep.sweep();
+
+      expect(cleaned).toBe(1);
+      expect(restored).toBe(0);
+      // Marker is gone. Live file untouched (partial bytes remain
+      // — we had nothing to restore to).
+      expect(fs.existsSync(path.join(f.root, markerPath))).toBe(false);
+      expect(readText(f.root, targetPath)).toBe("partia");
+    },
+  );
+
+  it(
+    "marker present + live file missing + bak present " +
+      "→ recreate live file from bak",
+    async () => {
+      const targetPath = "Notes/n.md";
+      const oldBytes = bytesOf("recovered");
+      fs.mkdirSync(path.join(f.root, "Notes"));
+      // No live file.
+      const bakPath = stagingPathFor(targetPath, "bak");
+      fs.writeFileSync(path.join(f.root, bakPath), Buffer.from(oldBytes));
+      const markerPath = modifyMarkerPathFor(targetPath);
+      fs.writeFileSync(path.join(f.root, markerPath), "");
+
+      const sweep = new AtomicWriteRecovery(
+        f.vault as unknown as import("obsidian").Vault,
+        f.store,
+      );
+      const { cleaned, restored } = await sweep.sweep();
+
+      expect(restored).toBe(1);
+      expect(cleaned).toBe(0);
+      expect(fs.existsSync(path.join(f.root, markerPath))).toBe(false);
+      expect(fs.existsSync(path.join(f.root, bakPath))).toBe(false);
+      expect(readText(f.root, targetPath)).toBe("recovered");
+    },
+  );
+
+  it(
+    "marker present + live file missing + bak missing " +
+      "→ defensive cleanup of the marker",
+    async () => {
+      const targetPath = "Notes/n.md";
+      fs.mkdirSync(path.join(f.root, "Notes"));
+      const markerPath = modifyMarkerPathFor(targetPath);
+      fs.writeFileSync(path.join(f.root, markerPath), "");
+
+      const sweep = new AtomicWriteRecovery(
+        f.vault as unknown as import("obsidian").Vault,
+        f.store,
+      );
+      const { cleaned, restored } = await sweep.sweep();
+
+      expect(cleaned).toBe(1);
+      expect(restored).toBe(0);
+      expect(fs.existsSync(path.join(f.root, markerPath))).toBe(false);
+      expect(fs.existsSync(path.join(f.root, targetPath))).toBe(false);
+    },
+  );
+
+  it("marker for a hidden file (.gitignore) round-trips correctly", async () => {
+    // Verifies that hidden-file paths (which carry an extra leading
+    // dot in the basename) still get parsed back to the right target
+    // by parseModifyMarkerPath during the sweep walk.
+    const targetPath = "Notes/.gitignore";
+    const oldBytes = bytesOf("ignored\n");
+    const partialBytes = bytesOf("part");
+    const oldSha = await calculateGitBlobSHA(oldBytes);
+    fs.mkdirSync(path.join(f.root, "Notes"));
+    fs.writeFileSync(
+      path.join(f.root, targetPath),
+      Buffer.from(partialBytes),
+    );
+    const bakPath = stagingPathFor(targetPath, "bak");
+    fs.writeFileSync(path.join(f.root, bakPath), Buffer.from(oldBytes));
+    const markerPath = modifyMarkerPathFor(targetPath);
+    expect(markerPath).toBe("Notes/..gitignore.sync-tmp.");
+    fs.writeFileSync(path.join(f.root, markerPath), "");
+    f.store.set(targetPath, {
+      path: targetPath,
+      remoteSha: oldSha,
+      mtime: 0,
+      size: oldBytes.byteLength,
+    });
+
+    const sweep = new AtomicWriteRecovery(
+      f.vault as unknown as import("obsidian").Vault,
+      f.store,
+    );
+    const { cleaned, restored } = await sweep.sweep();
+
+    expect(restored).toBe(1);
+    expect(cleaned).toBe(0);
+    expect(fs.existsSync(path.join(f.root, markerPath))).toBe(false);
+    expect(fs.existsSync(path.join(f.root, bakPath))).toBe(false);
+    expect(readText(f.root, targetPath)).toBe("ignored\n");
   });
 });

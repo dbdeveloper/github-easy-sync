@@ -451,9 +451,22 @@ export class AtomicWriteRecovery {
     }
 
     // 2. .sync-bak: rollback backups, snapshot-based recovery.
-    // Produced only by atomicWriteFile (Path A); ConflictStore never
-    // writes .sync-bak. No ownership dispatch needed.
+    // Produced by atomicWriteFile (Path A — rename strategy) AND
+    // by the modify-in-place fast path (Stage 7) — the latter
+    // pairs a bak with a `.sync-tmp.` marker. Hand bak files
+    // with a sibling marker off to step 3 below; otherwise
+    // process here.
+    const markedBakPaths = new Set<string>(
+      syncModifyMarkers.map(({ finalPath }) =>
+        stagingPathFor(finalPath, "bak"),
+      ),
+    );
     for (const { stagingPath: bakPath, finalPath: originalPath } of syncBaks) {
+      if (markedBakPaths.has(bakPath)) {
+        // Marker present for this final path — leave the bak
+        // alone, step 3 will use it for the SHA-based decision.
+        continue;
+      }
       try {
         const fileExists = await this.vault.adapter.exists(originalPath);
         if (!fileExists) {
@@ -494,71 +507,130 @@ export class AtomicWriteRecovery {
       }
     }
 
-    // 3. .sync-tmp. modify-in-place markers. Marker presence
-    // signals an interrupted modify; the matching .sync-bak holds
-    // the pre-modify bytes for rollback. We process these AFTER the
-    // .sync-bak orphan sweep above intentionally — the orphan sweep
-    // bails out for a bak path that's still claimed by a live marker
-    // (it sees `markerStillThere=true` and skips).
+    // 3. .sync-tmp. modify-in-place markers. The marker tells us
+    // "a modify-in-place ran for this path AND was either
+    // interrupted OR finished without the cleanup step running."
+    // SHA-based disambiguation tells the two cases apart:
     //
-    // For each marker found:
-    //   - if bak exists: restore live file from bak (via
-    //     modifyBinary when the runtime supports it, else
-    //     adapter.writeBinary fallback).
-    //   - cleanup marker + bak either way.
+    //   - live file's SHA === snapshot.remoteSha → modify completed
+    //     successfully before the crash (afterCommit updated the
+    //     snapshot; the live bytes match). Safe to just delete
+    //     marker + bak.
+    //   - live file's SHA differs / no snapshot → modify was
+    //     interrupted mid-flight; the live file might be partial.
+    //     Restore from bak.
+    //
+    // The restore uses vault.modifyBinary when available so any
+    // open editor stays attached; adapter.writeBinary is the
+    // mock-obsidian / fallback path.
     for (const { markerPath, finalPath } of syncModifyMarkers) {
       try {
         const bakPath = stagingPathFor(finalPath, "bak");
+        const liveExists = await this.vault.adapter.exists(finalPath);
         const bakExists = await this.vault.adapter.exists(bakPath);
+
+        // Helper: do the in-place restore using modifyBinary when
+        // possible, falling back to adapter.writeBinary.
+        const restoreInPlace = async (bytes: ArrayBuffer): Promise<void> => {
+          const getter = (
+            this.vault as {
+              getAbstractFileByPath?: (p: string) => unknown;
+            }
+          ).getAbstractFileByPath;
+          const modBin = (
+            this.vault as {
+              modifyBinary?: (f: TFile, b: ArrayBuffer) => Promise<void>;
+            }
+          ).modifyBinary;
+          if (
+            typeof getter === "function" &&
+            typeof modBin === "function"
+          ) {
+            const tfile = getter.call(this.vault, finalPath);
+            if (tfile instanceof TFile) {
+              await modBin.call(this.vault, tfile, bytes);
+              return;
+            }
+          }
+          await this.vault.adapter.writeBinary(finalPath, bytes);
+        };
+
+        // Case A: live file missing. The modify can't have completed
+        // (otherwise the file would still be there). Restore from
+        // bak if we have it; otherwise just drop the marker.
+        if (!liveExists) {
+          if (bakExists) {
+            const bakBytes = await this.vault.adapter.readBinary(bakPath);
+            await this.vault.adapter.writeBinary(finalPath, bakBytes);
+            restored++;
+          } else {
+            cleaned++;
+          }
+          try {
+            await this.vault.adapter.remove(markerPath);
+          } catch {
+            // ignore
+          }
+          if (bakExists) {
+            try {
+              await this.vault.adapter.remove(bakPath);
+            } catch {
+              // ignore
+            }
+          }
+          continue;
+        }
+
+        // Case B: live file exists. Compare its SHA to snapshot.
+        const liveBytes = await this.vault.adapter.readBinary(finalPath);
+        const liveSha = await calculateGitBlobSHA(liveBytes);
+        const expectedSha = this.store.get(finalPath)?.remoteSha;
+        if (expectedSha !== undefined && liveSha === expectedSha) {
+          // Modify completed successfully; afterCommit ran and
+          // updated the snapshot before the crash interrupted
+          // cleanup. Safe to just delete the artifacts.
+          try {
+            await this.vault.adapter.remove(markerPath);
+          } catch {
+            // ignore
+          }
+          if (bakExists) {
+            try {
+              await this.vault.adapter.remove(bakPath);
+            } catch {
+              // ignore
+            }
+          }
+          cleaned++;
+          continue;
+        }
+        // SHA mismatch (or no snapshot record yet). The live file
+        // may be partial; restore from bak if available.
         if (bakExists) {
           const bakBytes = await this.vault.adapter.readBinary(bakPath);
-          const liveExists = await this.vault.adapter.exists(finalPath);
-          if (liveExists) {
-            const getter = (
-              this.vault as {
-                getAbstractFileByPath?: (p: string) => unknown;
-              }
-            ).getAbstractFileByPath;
-            const modBin = (
-              this.vault as {
-                modifyBinary?: (f: TFile, b: ArrayBuffer) => Promise<void>;
-              }
-            ).modifyBinary;
-            if (
-              typeof getter === "function" &&
-              typeof modBin === "function"
-            ) {
-              const tfile = getter.call(this.vault, finalPath);
-              if (tfile instanceof TFile) {
-                await modBin.call(this.vault, tfile, bakBytes);
-              } else {
-                await this.vault.adapter.writeBinary(finalPath, bakBytes);
-              }
-            } else {
-              await this.vault.adapter.writeBinary(finalPath, bakBytes);
-            }
-          } else {
-            // Live file disappeared — recreate from backup.
-            await this.vault.adapter.writeBinary(finalPath, bakBytes);
-          }
+          await restoreInPlace(bakBytes);
           restored++;
-        }
-        // Cleanup marker + bak.
-        try {
-          await this.vault.adapter.remove(markerPath);
-        } catch {
-          // ignore
-        }
-        if (bakExists) {
+          try {
+            await this.vault.adapter.remove(markerPath);
+          } catch {
+            // ignore
+          }
           try {
             await this.vault.adapter.remove(bakPath);
           } catch {
             // ignore
           }
+          continue;
         }
-        if (!bakExists) {
-          cleaned++;
+        // SHA mismatch but no bak to restore from. The live file
+        // is in some indeterminate state; we have nothing to act
+        // on. Drop the marker defensively.
+        try {
+          await this.vault.adapter.remove(markerPath);
+        } catch {
+          // ignore
         }
+        cleaned++;
       } catch {
         // Individual failure — keep sweeping.
       }
