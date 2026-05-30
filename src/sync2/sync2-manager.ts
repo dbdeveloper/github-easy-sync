@@ -3,6 +3,7 @@
 // AGPL-3.0 — see LICENSE.
 
 import { Vault, arrayBufferToBase64, base64ToArrayBuffer } from "obsidian";
+import WorkerClient from "../worker/worker-client";
 import {
   GetTreeResponseItem,
   NewTreeRequestItem,
@@ -159,6 +160,15 @@ export interface Sync2Client {
     ref: string;
     retry?: boolean;
   }): Promise<{ content: string; sha: string } | null>;
+  // Stage 5 SHA-first reconcile: metadata-only variant that returns
+  // sha + size without ever downloading the blob content. Lets the
+  // reconcile path decide based on SHAs alone before paying for the
+  // bytes + decoding round-trip.
+  getContentsMetadataAtRef(args: {
+    path: string;
+    ref: string;
+    retry?: boolean;
+  }): Promise<{ sha: string; size: number } | null>;
   // Recursive listing of the branch's HEAD tree — every blob with its
   // path and SHA. Used by bootstrap-from-remote to enumerate what to
   // download into a fresh vault. GET /repos/{o}/{r}/git/trees/{branch}?recursive=1.
@@ -330,7 +340,7 @@ export interface Sync2ManagerDeps {
   // earlier push attempt failed — typically offline) folds the new
   // changes into the latest pending batch instead of stacking. The
   // eventual replay produces one commit instead of N.
-  accumulateOfflineSyncs?: boolean;
+  consolidateCommits?: boolean;
   // (owner, repo, branch) currently configured in settings. Read live
   // at the start of every syncAll: if it differs from the triplet the
   // snapshot was last reconciled against, the manager treats the
@@ -350,6 +360,10 @@ export interface Sync2ManagerDeps {
   // -NL rewrites — the engine treats text the same as binary at the
   // byte level. Optional; default is true (canonicalization on).
   autoCanonicalize?: () => boolean;
+  // Stage 7: live getter for the `maxAutoMergeSizeBytes` setting.
+  // Read on every reconcile path so the user can tune the
+  // threshold without restarting. Defaults to 1 MB when undefined.
+  maxAutoMergeSizeBytes?: () => number;
   // Cross-platform filename sanitization callback. Invoked by syncAll
   // before findChanges to rename any vault file whose path contains a
   // Windows-forbidden ASCII char (`< > : " | ? * \`) to its canonical
@@ -362,6 +376,40 @@ export interface Sync2ManagerDeps {
   renameFile?: (oldPath: string, newPath: string) => Promise<void>;
   // Override the clock for deterministic tests.
   now?: () => number;
+  // Optional Worker orchestra controller. When provided, hot-path
+  // CPU operations (SHA computation, base64 decode, 3-way merge)
+  // dispatch through the worker pool — threshold-gated, large
+  // inputs only. When omitted (most unit tests, fallback
+  // environments), a default WorkerClient is constructed which
+  // falls back to main-thread execution since Web Worker isn't
+  // available in Node test environment. Either way the algorithms
+  // are byte-exact (worker and fallback share the same code).
+  workerClient?: WorkerClient;
+}
+
+// Stage 7 drain status — observed surface for the Settings tab's
+// "Drain status" section. Updated as drain progresses; the
+// settings page subscribes via setDrainStatusListener and
+// re-renders the timer, current path, and last error on each
+// event.
+export interface DrainStatus {
+  state: "idle" | "running" | "cancelling";
+  // ms-since-epoch when the current drain started; null when idle.
+  // Settings tab computes elapsed = Date.now() - startedAt on every
+  // render frame, so a single subscription update is enough — the
+  // timer ticks itself.
+  startedAt: number | null;
+  // Current file path within the active batch, or null when no
+  // file is being processed (between batches, or between paths
+  // inside the per-batch initialisation).
+  currentPath: string | null;
+  // Counters for the per-file "N of M" Notice.
+  totalFiles: number;
+  currentFile: number;
+  // Last error surfaced by drain (most recent) — string for
+  // serialisation simplicity, with ISO timestamp prefix for the
+  // UI to render "x minutes ago".
+  lastError: { message: string; whenMs: number } | null;
 }
 
 export class Sync2Manager {
@@ -380,7 +428,8 @@ export class Sync2Manager {
   private readonly pendingDeletions: PendingDeletionsStore | undefined;
   private readonly conflictWatcher: ConflictWatcher | undefined;
   private readonly conflictCounter: ConflictCounter | undefined;
-  private readonly accumulateOfflineSyncs: boolean;
+  private readonly consolidateCommits: boolean;
+  private readonly workerClient: WorkerClient;
   private readonly onProgress: ProgressFactory | undefined;
   private readonly onLocalCommitted:
     | ((filesCount: number) => void)
@@ -399,6 +448,7 @@ export class Sync2Manager {
   private readonly remoteIdentity: (() => RemoteIdentity) | undefined;
   private readonly progressBytesThreshold: number;
   private readonly autoCanonicalize: () => boolean;
+  private readonly maxAutoMergeSizeBytes: () => number;
   private readonly renameFile:
     | ((oldPath: string, newPath: string) => Promise<void>)
     | undefined;
@@ -408,6 +458,30 @@ export class Sync2Manager {
   // still pushing, we let it enqueue but skip the second drain
   // invocation — the first one will pick the new batch up.
   private running = false;
+
+  // Stage 7 cancellation. Set by cancelDrain(); cleared at the
+  // start of every fresh drain. Drain checks this flag between
+  // per-file iterations and bails cleanly when set. Worker
+  // termination is handled separately — the WorkerClient is
+  // shared across the plugin so cancelling here doesn't bring
+  // down the orchestra. (A future enhancement could terminate +
+  // recreate the orchestra to interrupt mid-Worker compute.)
+  private abortRequested = false;
+
+  // Stage 7 drain status — observable surface for the Settings
+  // tab's "Drain status" section. Updated at the start/end of
+  // drain and per file inside reconcile. The Settings page
+  // subscribes via setDrainStatusListener and re-renders the
+  // timer + current path + last error on each event.
+  private drainStatus: DrainStatus = {
+    state: "idle",
+    startedAt: null,
+    currentPath: null,
+    totalFiles: 0,
+    currentFile: 0,
+    lastError: null,
+  };
+  private drainStatusListeners: Array<(s: DrainStatus) => void> = [];
 
   constructor(deps: Sync2ManagerDeps) {
     this.vault = deps.vault;
@@ -428,7 +502,8 @@ export class Sync2Manager {
     this.pendingDeletions = deps.pendingDeletions;
     this.conflictWatcher = deps.conflictWatcher;
     this.conflictCounter = deps.conflictCounter;
-    this.accumulateOfflineSyncs = deps.accumulateOfflineSyncs ?? false;
+    this.consolidateCommits = deps.consolidateCommits ?? false;
+    this.workerClient = deps.workerClient ?? new WorkerClient();
     this.onProgress = deps.onProgress;
     this.onLocalCommitted = deps.onLocalCommitted;
     this.onNoLocalChanges = deps.onNoLocalChanges;
@@ -438,6 +513,8 @@ export class Sync2Manager {
     this.progressBytesThreshold =
       deps.progressBytesThreshold ?? PROGRESS_BYTES_THRESHOLD;
     this.autoCanonicalize = deps.autoCanonicalize ?? (() => true);
+    this.maxAutoMergeSizeBytes =
+      deps.maxAutoMergeSizeBytes ?? (() => 1_000_000);
     this.renameFile = deps.renameFile;
     this.now = deps.now ?? (() => Date.now());
   }
@@ -543,6 +620,88 @@ export class Sync2Manager {
       this.onSyncCompleted?.({
         pushedFiles: syncedFiles,
         pulledFiles: this.pulledFilesThisSync,
+      });
+    }
+  }
+
+  // Stage 7 — commit-only entry point. Runs change-detection +
+  // enqueue + persists the snapshot, but does NOT drain. Used by
+  // the [Commit] ribbon button when the user wants to stage edits
+  // without touching the network.
+  //
+  // Reuses syncAll's pre-enqueue invariants (filename sanitization,
+  // gitignore invariants) so the bytes that land in .push-queue
+  // match what a full sync would have enqueued. Skips bootstrap
+  // entirely — first-time bootstrap is the drain's responsibility;
+  // there's no need to fetch the remote tree just to stage local
+  // changes.
+  // Stage 7 cancellation surface. Settings tab's [Stop drain]
+  // button and the split-mode confirmation modal both call this.
+  // Sets an abort flag that drain checks between files; the
+  // in-flight per-file work doesn't get interrupted mid-step,
+  // so a stuck Worker compute would still need its own timeout
+  // to surface as a cancellation. The next file boundary is the
+  // earliest cancellation can take effect.
+  cancelDrain(): void {
+    if (!this.running) return;
+    this.abortRequested = true;
+    this.logger.info("Sync2 cancelDrain requested");
+  }
+
+  // Stage 7 error capture. Called by main.ts's sync() catch block
+  // (and backgroundDrain) right before re-throwing or swallowing
+  // an error. Surfaces in the Settings drain-status section as
+  // "⚠ Last error (Ns ago): {message}". Survives drain completion
+  // — only overwritten on the next error or cleared by a successful
+  // next drain.
+  recordDrainError(err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err);
+    this.emitDrainStatus({
+      lastError: { message, whenMs: Date.now() },
+    });
+  }
+
+  // Subscribe to drain status changes (Stage 7 Settings "Drain
+  // status" section). Returns an unsubscribe function.
+  setDrainStatusListener(listener: (s: DrainStatus) => void): () => void {
+    this.drainStatusListeners.push(listener);
+    listener(this.drainStatus);
+    return () => {
+      const i = this.drainStatusListeners.indexOf(listener);
+      if (i >= 0) this.drainStatusListeners.splice(i, 1);
+    };
+  }
+
+  // Current snapshot of drain state — used by the Settings page
+  // when it renders without an active subscription update yet.
+  getDrainStatus(): DrainStatus {
+    return { ...this.drainStatus };
+  }
+
+  private emitDrainStatus(patch: Partial<DrainStatus>): void {
+    this.drainStatus = { ...this.drainStatus, ...patch };
+    for (const l of this.drainStatusListeners) l(this.drainStatus);
+  }
+
+  async commitOnly(): Promise<void> {
+    this.logger.info("Sync2 commitOnly start");
+    await this.reconcileRemoteIdentity();
+    if (this.invariants) await this.invariants.enforce();
+    await this.sanitizeForbiddenFilenames();
+    const changes = await this.detector.findChanges();
+    if (changes.length === 0) {
+      await this.store.save();
+      this.onNoLocalChanges?.();
+      this.logger.info("Sync2 commitOnly: nothing to commit");
+      return;
+    }
+    const enqueued = await this.enqueueOrMerge(changes, this.fullSyncMeta());
+    await this.fireQueueDepth();
+    if (enqueued > 0) {
+      this.onLocalCommitted?.(enqueued);
+      this.logger.info("Sync2 commitOnly committed", {
+        count: enqueued,
+        changes: changes.map((c) => `${c.kind} ${c.path}`),
       });
     }
   }
@@ -875,7 +1034,7 @@ export class Sync2Manager {
             (await this.vault.adapter.exists(f.filename))
           ) {
             const localBuf = await this.vault.adapter.readBinary(f.filename);
-            const localSha = await calculateGitBlobSHA(localBuf);
+            const localSha = await this.workerClient.computeGitBlobSHA(localBuf);
             if (localSha === f.sha) {
               const stat = await this.vault.adapter.stat(f.filename);
               if (stat) {
@@ -1283,7 +1442,7 @@ export class Sync2Manager {
               sha: item.sha,
               retry: true,
             });
-            const bytes = base64ToArrayBuffer(blob.content);
+            const bytes = await this.workerClient.decodeBase64(blob.content);
             if (hasTextExtension(canonical)) {
               const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
                 bytes,
@@ -1331,7 +1490,7 @@ export class Sync2Manager {
         }
 
         const localBuf = await this.vault.adapter.readBinary(filePath);
-        const localSha = await calculateGitBlobSHA(localBuf);
+        const localSha = await this.workerClient.computeGitBlobSHA(localBuf);
 
         if (localSha === item.sha) {
           // Identical content. Stat-cache the snapshot so subsequent
@@ -1421,7 +1580,7 @@ export class Sync2Manager {
     item: GetTreeResponseItem,
   ): Promise<void> {
     const blob = await this.client.getBlob({ sha: item.sha, retry: true });
-    const bytes = base64ToArrayBuffer(blob.content);
+    const bytes = await this.workerClient.decodeBase64(blob.content);
     if (hasTextExtension(filePath)) {
       const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
       const { canonicalSha, changed } = await this.writeRemoteText(
@@ -1516,7 +1675,7 @@ export class Sync2Manager {
       return;
     }
 
-    const theirsBytes = base64ToArrayBuffer(blob.content) as ArrayBuffer;
+    const theirsBytes = await this.workerClient.decodeBase64(blob.content) as ArrayBuffer;
 
     // Case 2: ours deleted, theirs modified → delete-vs-modify.
     if (localChange.kind === "deleted") {
@@ -1540,7 +1699,7 @@ export class Sync2Manager {
       : new ArrayBuffer(0);
     const baseFetched = await this.safeFetchContents(path, baseRef);
     const baseBytes = baseFetched
-      ? (base64ToArrayBuffer(baseFetched.content) as ArrayBuffer)
+      ? (await this.workerClient.decodeBase64(baseFetched.content))
       : null;
 
     let pluginJs: PluginJsContext | undefined;
@@ -1548,12 +1707,13 @@ export class Sync2Manager {
       pluginJs = await this.readPluginJsContext(path, headRef);
     }
 
-    const auto = attemptAutoMerge({
+    const auto = await attemptAutoMerge({
       path,
       ours: oursBytes,
       theirs: theirsBytes,
       base: baseBytes,
       configDir: this.configDir,
+      mergeFn: (o, b, t) => this.workerClient.mergeText(o, b, t),
       pluginJs,
     });
 
@@ -1595,7 +1755,7 @@ export class Sync2Manager {
       kind: "modify-vs-modify",
       theirsContent: theirsBytes,
       theirsBlobSha: blob.sha,
-      oursBlobSha: await calculateGitBlobSHA(oursBytes),
+      oursBlobSha: await this.workerClient.computeGitBlobSHA(oursBytes),
       remoteDevice: await this.fetchRemoteDevice(headRef),
       fromBatchId: null,
     });
@@ -1606,7 +1766,7 @@ export class Sync2Manager {
     base64Content: string,
     afterCommit?: () => Promise<void>,
   ): Promise<void> {
-    const bytes = base64ToArrayBuffer(base64Content);
+    const bytes = await this.workerClient.decodeBase64(base64Content);
     await this.ensureParentDir(path);
     // Atomic-with-backup: a crash mid-write (especially of a plugin's
     // manifest.json or main.js bundle) would otherwise leave the file
@@ -1677,7 +1837,7 @@ export class Sync2Manager {
     return {
       baseMtime: stat.mtime,
       baseSize: stat.size,
-      baseSha: await calculateGitBlobSHA(bytes),
+      baseSha: await this.workerClient.computeGitBlobSHA(bytes),
     };
   }
 
@@ -1990,7 +2150,7 @@ export class Sync2Manager {
       if (exists) {
         const buf = await this.vault.adapter.readBinary(closedPath);
         content = new Uint8Array(buf);
-        contentSha = await calculateGitBlobSHA(buf);
+        contentSha = await this.workerClient.computeGitBlobSHA(buf);
       }
       await this.queue.enqueueSynthetic({
         path: closedPath,
@@ -2103,7 +2263,7 @@ export class Sync2Manager {
     const bytes = new TextEncoder().encode(canonical).buffer as ArrayBuffer;
     // Atomic-with-backup. See writeBinaryRemote rationale.
     await atomicWriteFile(this.vault, path, bytes, afterCommit);
-    const canonicalSha = await calculateGitBlobSHA(bytes);
+    const canonicalSha = await this.workerClient.computeGitBlobSHA(bytes);
     return { canonicalSha, changed };
   }
 
@@ -2125,7 +2285,7 @@ export class Sync2Manager {
       const { content: canonical } = normalizeText(remoteText);
       const canonicalBytes = new TextEncoder().encode(canonical)
         .buffer as ArrayBuffer;
-      const canonicalSha = await calculateGitBlobSHA(canonicalBytes);
+      const canonicalSha = await this.workerClient.computeGitBlobSHA(canonicalBytes);
       return localSha === canonicalSha;
     } catch {
       // Fail closed: if we can't fetch / decode the blob, fall through
@@ -2173,7 +2333,7 @@ export class Sync2Manager {
     // they're routed to the per-device conflict branch on GitHub
     // (not main). The conflict's local "ours" history accumulates
     // server-side, invisible to other devices until resolution.
-    if (this.accumulateOfflineSyncs) {
+    if (this.consolidateCommits) {
       const target = await this.queue.mergeIntoLatestPending(changes);
       if (target !== null) {
         // Commit messages are hardcoded, so accumulate-merge does
@@ -2222,6 +2382,17 @@ export class Sync2Manager {
   ): Promise<void> {
     if (this.running) return;
     this.running = true;
+    // Stage 7: clear any leftover abort signal and announce that the
+    // drain has begun. Settings tab's "Drain status" section observes
+    // this to flip the timer on + show [Stop drain].
+    this.abortRequested = false;
+    this.emitDrainStatus({
+      state: "running",
+      startedAt: Date.now(),
+      currentPath: null,
+      totalFiles: 0,
+      currentFile: 0,
+    });
     const ownProgress = sharedProgress === null;
     let progress: ProgressHandle | null = sharedProgress;
     let commitNum = 0;
@@ -2361,6 +2532,16 @@ export class Sync2Manager {
       }
     } finally {
       this.running = false;
+      // Stage 7: announce drain end. Settings tab flips the timer
+      // back to "Last sync: …" and removes the [Stop drain] button.
+      this.emitDrainStatus({
+        state: "idle",
+        startedAt: null,
+        currentPath: null,
+        totalFiles: 0,
+        currentFile: 0,
+      });
+      this.abortRequested = false;
       // No listener resume — ConflictWatcher is read-only and was
       // never paused. Drain doesn't own listener lifecycle.
     }
@@ -2784,7 +2965,47 @@ export class Sync2Manager {
       if (idx >= 0) batch.files.splice(idx, 1);
     };
 
+    // Stage 7 progress: announce the path count so the Settings
+    // page can render "N of M" for the current batch.
+    this.emitDrainStatus({
+      totalFiles: toProcess.length,
+      currentFile: 0,
+    });
+    let fileIndex = 0;
     for (const path of toProcess) {
+      fileIndex += 1;
+      // Stage 7 cancel check. The flag flips at batch-file boundaries
+      // (the next `await` past the yield below picks it up). A stuck
+      // mid-file step won't see this — the per-file timeout (60 s,
+      // Stage 2) is the deeper escape valve.
+      if (this.abortRequested) {
+        this.logger.info(
+          "Sync2 reconcile path SKIP — cancellation requested",
+          { path, fileIndex, total: toProcess.length },
+        );
+        break;
+      }
+      this.emitDrainStatus({ currentPath: path, currentFile: fileIndex });
+      // Yield to the macrotask queue before each path so the JS
+      // event loop gets a chance to process pending work between
+      // files: UI repaint, Capacitor bridge callbacks, queued
+      // vault.adapter.append writes from logger. Without this the
+      // entire reconcile loop runs as a single uninterruptible
+      // task — microtask-only awaits (the standard `await` chain)
+      // don't drain the macrotask queue, so UI is frozen and
+      // bridge work stalls until the whole batch finishes. The
+      // `setTimeout(0)` explicitly hands control to the event
+      // loop, which is the documented mechanism for cooperative
+      // multitasking in single-threaded JS. See §0 P1 — "click
+      // Sync, keep editing".
+      //
+      // Field-confirmed: in the base64 N-iter diagnostic harness
+      // 15 chained ~15 ms decodes total ~225 ms — but with no
+      // yields the UI froze for the entire ~225 ms because the
+      // macrotask queue couldn't drain between iterations. Same
+      // pattern applied to the reconcile loop here.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
       // Per-path reconcile diagnostic probe. Fires ONLY when logging
       // is enabled (lazy lambda — never invoked in production). The
       // probe is here because the reconcile path is the most memory-
@@ -2805,23 +3026,108 @@ export class Sync2Manager {
             : null,
       }));
 
-      const baseFetched = await this.safeFetchContents(path, expectedHead);
-      const theirsFetched = await this.safeFetchContents(path, currentHead);
+      // Read OURS first — the local side that's already on disk
+      // in the queue snapshot. We read it before going to the
+      // network for base+theirs because:
+      //   (a) the read is cheap (~25 ms for 1.9 MB on phone via
+      //       the fetch(getResourcePath) path);
+      //   (b) most reconcile branches need ours bytes anyway, so
+      //       we'd read it eventually;
+      //   (c) reading first means the network fetches start with
+      //       all of ours already in memory — no later wait when
+      //       we hit the size-guard / convergence / merge
+      //       branches.
+      //
+      // Cost: in the "no remote-side change" short-circuit
+      // branch we'll have read ours unnecessarily, ~25 ms wasted.
+      // Acceptable trade for the simpler ordering and consistent
+      // memory profile across branches.
+      const oursBytes = await this.queue.readFile(batchId, path);
 
-      // No remote-side change → batch pushes through unchanged.
+      // Stage 5 SHA-first reconcile: fetch metadata (sha + size)
+      // for base and theirs WITHOUT pulling down the blob bytes.
+      // The decision tree below resolves ~75% of paths from SHAs
+      // alone — no decode, no merge, no bytes round-trip — which
+      // is the §0 P2 principle in practice. Only the rare
+      // genuine-3-way-divergence case pays for the full content
+      // fetch + base64 decode.
+      const baseMeta = await this.safeFetchMetadata(path, expectedHead);
+      const theirsMeta = await this.safeFetchMetadata(path, currentHead);
+
+      // Branch 1 (existing): no remote-side change between base and
+      // theirs → batch pushes through unchanged.
       if (
-        baseFetched !== null &&
-        theirsFetched !== null &&
-        baseFetched.sha === theirsFetched.sha
+        baseMeta !== null &&
+        theirsMeta !== null &&
+        baseMeta.sha === theirsMeta.sha
       ) {
+        this.logger.info(
+          "Sync2 reconcile path SHA-first: no remote change (base.sha === theirs.sha)",
+          () => ({ path, sha: baseMeta.sha }),
+        );
         continue;
       }
 
-      const oursBytes = await this.queue.readFile(batchId, path);
+      // Compute ours SHA now — needed for the remaining branches.
+      // The CPU worker handles it off main thread for files above
+      // the SHA threshold (~100 KB).
+      const oursSha = await this.workerClient.computeGitBlobSHA(oursBytes);
+
+      // Branch 2 (new): ours already byte-identical to theirs on
+      // remote. Out-of-band sync (adb push, manual download, etc.)
+      // is the most common cause. Drop from batch — no push, no
+      // upload, no merge.
+      if (theirsMeta !== null && oursSha === theirsMeta.sha) {
+        await this.detector.recordSync(path, theirsMeta.sha);
+        await this.queue.removeFile(batchId, path);
+        dropFromBatchInMemory(path);
+        this.logger.info(
+          "Sync2 reconcile path SHA-first: ours already matches theirs (no upload)",
+          () => ({ path, sha: theirsMeta.sha }),
+        );
+        continue;
+      }
+
+      // Branch 3 (new): ours unchanged vs base, but theirs has
+      // moved forward → atomic theirs wins. We need theirs bytes
+      // to write to the vault; base bytes never needed.
+      if (
+        baseMeta !== null &&
+        theirsMeta !== null &&
+        oursSha === baseMeta.sha
+      ) {
+        const theirsFetchedSolo = await this.safeFetchContents(
+          path,
+          currentHead,
+        );
+        if (theirsFetchedSolo !== null) {
+          await this.writeBinaryRemote(path, theirsFetchedSolo.content);
+          await this.detector.recordSync(path, theirsFetchedSolo.sha);
+          await this.queue.removeFile(batchId, path);
+          dropFromBatchInMemory(path);
+          this.logger.info(
+            "Sync2 reconcile path SHA-first: theirs wins (ours unchanged vs base)",
+            () => ({
+              path,
+              oursSha,
+              baseSha: baseMeta.sha,
+              theirsSha: theirsMeta.sha,
+            }),
+          );
+          continue;
+        }
+        // Fall through to full path if theirs fetch failed (rare).
+      }
+
+      // Branch 4: all three SHAs differ → genuine 3-way divergence.
+      // Fall through to the full content-fetch + decode + merge path
+      // below.
+      const baseFetched = await this.safeFetchContents(path, expectedHead);
+      const theirsFetched = await this.safeFetchContents(path, currentHead);
       const theirsBytes =
         theirsFetched === null
           ? null
-          : (base64ToArrayBuffer(theirsFetched.content) as ArrayBuffer);
+          : (await this.workerClient.decodeBase64(theirsFetched.content));
       // Diagnostic probe after both blobs are in memory — this is
       // the peak-byte point of the iteration. Lazy lambda; runs only
       // when logging is enabled.
@@ -2837,41 +3143,60 @@ export class Sync2Manager {
             : null,
       }));
       const baseBytes = baseFetched
-        ? (base64ToArrayBuffer(baseFetched.content) as ArrayBuffer)
+        ? (await this.workerClient.decodeBase64(baseFetched.content))
         : null;
 
-      // Convergence short-circuit: if ours.bytes === theirs.bytes,
-      // any resolution path would degenerate into "no real change"
-      // (semver tied, mtime tied or not — doesn't matter, the disk
-      // state is already identical). Skip the whole attemptAutoMerge
-      // dance + the wasteful writeBinaryRemote-of-identical-bytes.
+      // (Stage 5 note: the byte-level convergence short-circuit
+      // that used to live here is now dead. Branch 2 of the
+      // SHA-first reconcile decision tree above already catches
+      // every "ours === theirs" case directly from the metadata
+      // SHAs — no bytes, no decode, no length check needed.)
+
+      // Size guard: skip 3-way merge for files larger than
+      // RECONCILE_AUTO_MERGE_LIMIT. Above this size two things
+      // bite: (a) node-diff3 hits a hard scaling cliff around
+      // 4 MB on mobile (~85 s at 4.6 MB observed on Pixel 6 Pro);
+      // (b) field-observed Capacitor bridge stalls during the
+      // base64 decode of multi-MB GitHub blob responses, even
+      // though the same payload decodes cleanly in isolation.
+      // The size guard sidesteps both by skipping the
+      // attemptAutoMerge dance — the path stays in batch.files
+      // so the subsequent push step uploads OURS bytes, making
+      // the local side win for this file. Documented loss of
+      // automated 3-way merge for big files; the trade is
+      // accepted vs. the user-facing "infinite hang" we'd
+      // otherwise reach.
       //
-      // Cheap-then-expensive: byte-length first (O(1)), then SHA
-      // (O(n)). theirsFetched.sha already came back from the GitHub
-      // round-trip; we just need to hash ours.
-      //
-      // Concrete trigger: same file landed on both devices via an
-      // out-of-band copy (adb push, manual download, IDE
-      // synchronizer) — mtime metadata differs but content matches.
-      // Previously this routed through "atomic theirs wins", spent
-      // an unnecessary writeBinaryRemote of identical bytes, and
-      // logged a misleading "theirs wins" line.
-      if (
+      // Stage 7: read from settings live so the user can tune
+      // without restarting the plugin. Default 1 MB per the Stage 8
+      // perf-test recommendation (tests/perf/README.md).
+      const RECONCILE_AUTO_MERGE_LIMIT = this.maxAutoMergeSizeBytes();
+      const oursIsLarge =
+        oursBytes.byteLength > RECONCILE_AUTO_MERGE_LIMIT;
+      const baseIsLarge =
+        baseBytes !== null &&
+        baseBytes.byteLength > RECONCILE_AUTO_MERGE_LIMIT;
+      const theirsIsLarge =
         theirsBytes !== null &&
-        theirsFetched !== null &&
-        oursBytes.byteLength === theirsBytes.byteLength
-      ) {
-        const oursSha = await calculateGitBlobSHA(oursBytes);
-        if (oursSha === theirsFetched.sha) {
-          await this.detector.recordSync(path, theirsFetched.sha);
-          await this.queue.removeFile(batchId, path);
-          dropFromBatchInMemory(path);
-          this.logger.info(
-            "Sync2 reconcile no-op: ours bytes already match theirs (mtime ignored)",
-            { path },
-          );
-          continue;
-        }
+        theirsBytes.byteLength > RECONCILE_AUTO_MERGE_LIMIT;
+      if (oursIsLarge || baseIsLarge || theirsIsLarge) {
+        // (Stage 5 note: the SHA-skip that used to live here is
+        // dead too. Branch 2 of the SHA-first decision tree
+        // already drops paths where ours === theirs, before we
+        // even fetched the blob bytes that drive the size check.)
+        this.logger.warn(
+          "Sync2 reconcile path SKIP auto-merge — file > size limit, ours pushed as-is",
+          () => ({
+            path,
+            limit: RECONCILE_AUTO_MERGE_LIMIT,
+            oursBytes: oursBytes.byteLength,
+            theirsBytes: theirsBytes?.byteLength ?? 0,
+            baseBytes: baseBytes?.byteLength ?? 0,
+            oursSha,
+            theirsSha: theirsFetched?.sha ?? null,
+          }),
+        );
+        continue;
       }
 
       let pluginJs: PluginJsContext | undefined;
@@ -2889,12 +3214,13 @@ export class Sync2Manager {
         );
       }
 
-      const auto = attemptAutoMerge({
+      const auto = await attemptAutoMerge({
         path,
         ours: oursBytes,
         theirs: theirsBytes,
         base: baseBytes,
         configDir: this.configDir,
+        mergeFn: (o, b, t) => this.workerClient.mergeText(o, b, t),
         pluginJs,
       });
 
@@ -2948,7 +3274,7 @@ export class Sync2Manager {
         kind: "modify-vs-modify",
         theirsContent: theirsBytes!,
         theirsBlobSha: theirsFetched!.sha,
-        oursBlobSha: await calculateGitBlobSHA(oursBytes),
+        oursBlobSha: await this.workerClient.computeGitBlobSHA(oursBytes),
         remoteDevice: await this.fetchRemoteDevice(currentHead),
         fromBatchId: batchId,
       });
@@ -2979,7 +3305,7 @@ export class Sync2Manager {
       }
       // Remote modified since base → register delete-vs-modify.
       // ours = "deleted", theirs = remote bytes.
-      const theirsBytes = base64ToArrayBuffer(theirs.content) as ArrayBuffer;
+      const theirsBytes = await this.workerClient.decodeBase64(theirs.content) as ArrayBuffer;
       await this.queue.removeDeletion(batchId, path);
       await this.registerConflictAndDropPath({
         vaultPath: path,
@@ -3102,12 +3428,13 @@ export class Sync2Manager {
       for (const path of intersection) {
         const { oldOurs, newOurs } = resolvedPerPath.get(path)!;
         const oursBytes = await this.queue.readFile(id, path);
-        const auto = attemptAutoMerge({
+        const auto = await attemptAutoMerge({
           path,
           ours: oursBytes,
           theirs: newOurs,
           base: oldOurs,
           configDir: this.configDir,
+          mergeFn: (o, b, t) => this.workerClient.mergeText(o, b, t),
         });
         if (auto.type === "clean") {
           await this.queue.overwriteFile(id, path, auto.content);
@@ -3120,8 +3447,8 @@ export class Sync2Manager {
           vaultPath: path,
           kind: "modify-vs-modify",
           theirsContent: newOurs,
-          theirsBlobSha: await calculateGitBlobSHA(newOurs),
-          oursBlobSha: await calculateGitBlobSHA(oursBytes),
+          theirsBlobSha: await this.workerClient.computeGitBlobSHA(newOurs),
+          oursBlobSha: await this.workerClient.computeGitBlobSHA(oursBytes),
           remoteDevice: await this.fetchRemoteDevice(currentHead),
           fromBatchId: id,
         });
@@ -3143,6 +3470,29 @@ export class Sync2Manager {
       // Force-push or commit GC made the ref unreachable. Treat as
       // "no base available" → the merge will run against an empty
       // base, which is the documented graceful-degradation path.
+      return null;
+    }
+  }
+
+  // Stage 5 SHA-first reconcile helper. Returns the path's metadata
+  // (sha + size) at a ref WITHOUT downloading the blob content. The
+  // reconcile loop calls this before deciding whether the heavier
+  // safeFetchContents+decode round-trip is actually needed.
+  //
+  // Same graceful-degradation contract as safeFetchContents: errors
+  // (force-push, GC'd commit) → null, the loop treats it as
+  // "no base available".
+  private async safeFetchMetadata(
+    path: string,
+    ref: string,
+  ): Promise<{ sha: string; size: number } | null> {
+    try {
+      return await this.client.getContentsMetadataAtRef({
+        path,
+        ref,
+        retry: true,
+      });
+    } catch {
       return null;
     }
   }
@@ -3175,7 +3525,7 @@ export class Sync2Manager {
         // assigned (it's deterministic).
         const buf = new TextEncoder().encode(entry.content)
           .buffer as ArrayBuffer;
-        out.set(entry.path, await calculateGitBlobSHA(buf));
+        out.set(entry.path, await this.workerClient.computeGitBlobSHA(buf));
       }
     }
     return out;

@@ -28,7 +28,10 @@ import PendingDeletionsStore from "./sync2/pending-deletions-store";
 import { ConflictCounter } from "./sync2/conflict-counter";
 import { ConflictWatcher } from "./sync2/conflict-watcher";
 import { ConflictStatusIndicator } from "./sync2/views/conflict-status-indicator";
+import WorkerClient from "./worker/worker-client";
 import { PreSyncConflictModal } from "./sync2/views/pre-sync-conflict-modal";
+import { TokenExpiredModal } from "./sync2/views/token-expired-modal";
+import { AuthError } from "./errors";
 import manifest from "../manifest.json";
 
 // How long the brief local-phase notices stay visible. 700ms is the
@@ -50,6 +53,13 @@ export default class GitHubSyncPlugin extends Plugin {
   conflictWatcher!: ConflictWatcher;
   conflictCounter!: ConflictCounter;
   logger!: Logger;
+  // Shared Worker orchestra controller — lazy-init at onload, kept
+  // alive for the plugin lifetime, terminated on onunload. Stage 4
+  // routes hot-path CPU operations (SHA computation, base64 decode,
+  // 3-way merge) through this orchestra. Threshold-gated: small
+  // inputs run inline on the main thread; only large ones round-trip
+  // to the worker pool.
+  workerClient!: WorkerClient;
   // Exposed for the settings tab's "Push plugins data.json" toggle,
   // which reads/writes the allow line directly via this owner.
   invariants!: GitignoreInvariants;
@@ -61,6 +71,13 @@ export default class GitHubSyncPlugin extends Plugin {
   // re-entry inside Obsidian's settings pipeline and freezes the
   // renderer. Synchronous read of this cache sidesteps the issue.
   pushPluginsDataJsonCached: boolean = false;
+
+  // Stage 7 / token-expiry UX. We throttle the
+  // "GitHub token expired" modal to at most once per hour so a
+  // background-drain failure every 5 minutes doesn't spam the
+  // user. Set to 0 (never shown) on plugin onload; updated to
+  // Date.now() each time the modal opens.
+  private lastAuthModalShownMs = 0;
 
   // UI elements that come and go with toggle settings.
   statusBarItem: HTMLElement | null = null;
@@ -109,6 +126,18 @@ export default class GitHubSyncPlugin extends Plugin {
         syncStrategy: this.settings.syncStrategy,
         configured: this.isConfigured(),
       });
+      // Stage 7: surface the manual-migration notice once Logger
+      // is initialised. Visible via the plugin log file AND as a
+      // long-duration Notice so the user can act without trawling
+      // the log.
+      if (this.settingsMigrationNotice !== null) {
+        this.logger.info(this.settingsMigrationNotice);
+        try {
+          new Notice(this.settingsMigrationNotice, 30000);
+        } catch {
+          // Notice may not be available in some environments
+        }
+      }
 
       this.addSettingTab(new GitHubSyncSettingsTab(this.app, this));
       this.logger.info("Plugin onload: settings tab registered");
@@ -126,9 +155,20 @@ export default class GitHubSyncPlugin extends Plugin {
       this.app.workspace.onLayoutReady(() => {
         if (this.settings.showStatusBarItem) this.showStatusBarItem();
         if (this.settings.showSyncRibbonButton) this.showSyncRibbonIcon();
+        if (this.settings.showCommitRibbonButton)
+          this.showCommitRibbonIcon();
         if (this.settings.syncOnStartup && this.isConfigured()) {
           void this.runStartupSync();
         }
+      });
+
+      // Stage 7: a separate command for the [Commit] action so users
+      // can map a keyboard shortcut even without the ribbon icon.
+      this.addCommand({
+        id: "commit-local",
+        name: "Commit local changes (no upload)",
+        icon: "git-commit",
+        callback: this.commit.bind(this),
       });
 
       this.addCommand({
@@ -136,6 +176,17 @@ export default class GitHubSyncPlugin extends Plugin {
         name: "Sync with GitHub",
         icon: "refresh-cw",
         callback: this.sync.bind(this),
+      });
+      // Stage 7: pure drain hotkey. Lets a user who hides all
+      // ribbon icons still trigger an upload-only run from the
+      // keyboard, regardless of the syncStartsWithCommit master
+      // toggle setting. ("Sync with GitHub" above depends on
+      // the master toggle; this command does NOT.)
+      this.addCommand({
+        id: "upload-to-github",
+        name: "Upload pending commits to GitHub (no new commit)",
+        icon: "upload-cloud",
+        callback: this.uploadOnly.bind(this),
       });
       this.addCommand({
         id: "sync-current-file",
@@ -185,12 +236,52 @@ export default class GitHubSyncPlugin extends Plugin {
       this.vaultRenameListener = null;
     }
     this.conflictWatcher?.stop();
+    // Terminate Worker pool — each Worker holds Blob URLs + a thread
+    // that the OS would otherwise keep alive until process exit.
+    this.workerClient?.terminate();
   }
 
   // ── settings ────────────────────────────────────────────────────────
 
+  // Stage 7 migration notice — populated by loadSettings when an
+  // old key name is detected in data.json. The text is buffered
+  // here because loadSettings runs BEFORE Logger init in onload;
+  // onload prints this once Logger is up.
+  private settingsMigrationNotice: string | null = null;
+
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const raw = await this.loadData();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, raw);
+
+    // Stage 7 manual data.json migration detection. The user base
+    // is currently one person with two devices; the maintainer
+    // updates data.json by hand on each device. loadSettings
+    // detects the OLD key names if present and stages a log line
+    // for onload to surface — no runtime migration code path,
+    // just a one-time observation.
+    if (raw && typeof raw === "object") {
+      const rec = raw as Record<string, unknown>;
+      const renames: Array<[string, string]> = [
+        ["autoCommitOnSync", "syncStartsWithCommit"],
+        ["accumulateOfflineSyncs", "consolidateCommits"],
+      ];
+      const found: Array<[string, string, unknown]> = [];
+      for (const [oldName, newName] of renames) {
+        if (oldName in rec) {
+          found.push([oldName, newName, rec[oldName]]);
+        }
+      }
+      if (found.length > 0) {
+        const lines = found.map(
+          ([o, n, v]) => `  • ${o} (currently ${JSON.stringify(v)}) → ${n}`,
+        );
+        this.settingsMigrationNotice =
+          "Stage 7 settings rename detected — update each device's data.json:\n" +
+          lines.join("\n") +
+          "\nThe OLD keys are still loaded for now but no longer read by the engine. " +
+          "Removing them is safe; see docs/tasks/SYNC2-WORKER-REORG.md §7.";
+      }
+    }
     // One-pass sanitize for GitHub identity fields: Android's
     // paste-with-suggestion-bar appends trailing whitespace silently,
     // and a single trailing space in any of these makes the entire
@@ -322,7 +413,15 @@ export default class GitHubSyncPlugin extends Plugin {
     const vaultRoot =
       (this.app.vault.adapter as unknown as { basePath?: string }).basePath ??
       "";
-    const client = new GithubClient(this.settings, this.logger);
+    // Stage 6: construct WorkerClient BEFORE GithubClient so the
+    // network worker handles every GitHub HTTP call. Same shared
+    // workerClient is passed into Sync2Manager + PushQueue below.
+    this.workerClient = new WorkerClient();
+    const client = new GithubClient(
+      this.settings,
+      this.logger,
+      this.workerClient,
+    );
     const store = new SnapshotStore(this.app.vault);
     await store.load();
     this.logger.info("initSync2: SnapshotStore loaded", {
@@ -339,6 +438,7 @@ export default class GitHubSyncPlugin extends Plugin {
       configDir: this.app.vault.configDir,
       selfPluginId: manifest.id,
       autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? false,
+      workerClient: this.workerClient,
     });
     const detector = new ChangeDetector({
       vault: this.app.vault,
@@ -447,6 +547,7 @@ export default class GitHubSyncPlugin extends Plugin {
       invariants: this.invariants,
       configDir: this.app.vault.configDir,
       selfPluginId: manifest.id,
+      workerClient: this.workerClient,
       // Label read live from settings so the user can change it in
       // the settings tab and the next sync picks up the new value —
       // no plugin reload needed. Commit messages themselves are
@@ -464,8 +565,10 @@ export default class GitHubSyncPlugin extends Plugin {
       conflictWatcher,
       conflictCounter,
       pendingDeletions,
-      accumulateOfflineSyncs: this.settings.accumulateOfflineSyncs ?? false,
+      consolidateCommits: this.settings.consolidateCommits ?? false,
       autoCanonicalize: () => this.settings.autoCanonicalizeTextFiles ?? false,
+      maxAutoMergeSizeBytes: () =>
+        this.settings.maxAutoMergeSizeBytes ?? 1_000_000,
       // Hooked to Obsidian's link-aware rename so the pre-sync
       // filename-sanitizer rewrites containing wiki-links automatically.
       // `getAbstractFileByPath` returns null when the path vanished
@@ -561,7 +664,16 @@ export default class GitHubSyncPlugin extends Plugin {
     }
     if (!(await this.confirmPendingConflictsBeforeSync())) return;
     try {
-      await this.sync2Manager.syncAll();
+      // Stage 7: master toggle controls semantic
+      //   true  (default) → commit + drain (syncAll)
+      //   false           → drain only (resumeQueue)
+      // The [Commit] ribbon button is the user's separate path
+      // for enqueueing when the master toggle is false.
+      if (this.settings.syncStartsWithCommit ?? true) {
+        await this.sync2Manager.syncAll();
+      } else {
+        await this.sync2Manager.resumeQueue();
+      }
     } catch (err) {
       // Log BEFORE the Notice so the user-visible toast and the
       // logged record always agree. Without this, the only artifact
@@ -569,6 +681,10 @@ export default class GitHubSyncPlugin extends Plugin {
       // log showed nothing, making bug reports actionable only when
       // the user happened to screenshot the toast in time.
       this.logger.error("syncAll click failed", { err: describeError(err) });
+      // Stage 7: surface in the Settings drain-status section so
+      // the user sees "Last error: …" without opening the log.
+      this.sync2Manager.recordDrainError(err);
+      this.maybeShowTokenExpiredModal(err);
       new Notice(`Error syncing. ${err}`);
     }
     // Drain may have mutated ConflictStore (Phase A SHA-match
@@ -580,7 +696,7 @@ export default class GitHubSyncPlugin extends Plugin {
   }
 
   // Background drain — entry point for the interval timer when
-  // autoCommitOnSync is off. Errors are swallowed + logged because
+  // syncStartsWithCommit is off. Errors are swallowed + logged because
   // network blips during a background tick are common and shouldn't
   // surface a toast.
   async backgroundDrain(): Promise<void> {
@@ -589,6 +705,8 @@ export default class GitHubSyncPlugin extends Plugin {
       await this.sync2Manager.resumeQueue();
     } catch (err) {
       void this.logger.error("Interval drain failed", `${err}`);
+      this.sync2Manager.recordDrainError(err);
+      this.maybeShowTokenExpiredModal(err);
     }
   }
 
@@ -791,6 +909,105 @@ export default class GitHubSyncPlugin extends Plugin {
     this.syncRibbonIcon = null;
   }
 
+  // ── commit ribbon (Stage 7) ─────────────────────────────────────────
+
+  // Independent of the Sync ribbon icon. When the user enables
+  // `showCommitRibbonButton`, a separate [Commit] icon appears.
+  // Clicking it triggers change-detection + enqueue ONLY — never
+  // touches the network. In split mode (master toggle false) this
+  // is the only way to add commits to .push-queue.
+  commitRibbonIcon: HTMLElement | null = null;
+
+  showCommitRibbonIcon(): void {
+    if (this.commitRibbonIcon) return;
+    this.commitRibbonIcon = this.addRibbonIcon(
+      "git-commit",
+      "Commit local changes (no upload)",
+      this.commit.bind(this),
+    );
+  }
+
+  hideCommitRibbonIcon(): void {
+    this.commitRibbonIcon?.remove();
+    this.commitRibbonIcon = null;
+  }
+
+  // Click handler for [Commit]: enqueue local changes to .push-queue
+  // without triggering drain. Uses Sync2Manager.commitOnly() which
+  // runs the change-detection + enqueue path and stops there.
+  async commit(): Promise<void> {
+    try {
+      await this.sync2Manager.commitOnly();
+    } catch (err) {
+      this.logger?.error("Commit ribbon click failed", {
+        error: String(err),
+      });
+      new Notice(`Commit failed: ${err}`, 10000);
+    }
+  }
+
+  // Stage 7: pure drain entry point — uploads pending commits to
+  // GitHub without first running change-detection / enqueue. Mirrors
+  // backgroundDrain() but as a user-facing command so the toast +
+  // log path goes through the same error-handling shape as sync().
+  async uploadOnly(): Promise<void> {
+    if (!this.isConfigured()) {
+      new Notice("Sync plugin not configured");
+      return;
+    }
+    if (!(await this.confirmPendingConflictsBeforeSync())) return;
+    try {
+      await this.sync2Manager.resumeQueue();
+    } catch (err) {
+      this.logger?.error("Upload-only command failed", {
+        err: describeError(err),
+      });
+      this.sync2Manager.recordDrainError(err);
+      this.maybeShowTokenExpiredModal(err);
+      new Notice(`Upload failed: ${err}`, 10000);
+    }
+    this.conflictCounter?.markDirty();
+  }
+
+  // Detects AuthError (401 / 403) — typically an expired
+  // fine-grained PAT — and opens the TokenExpiredModal with
+  // step-by-step recovery guidance. Throttled to at most once per
+  // hour so a 5-minute background drain doesn't spam the user.
+  private maybeShowTokenExpiredModal(err: unknown): void {
+    if (!(err instanceof AuthError)) return;
+    const now = Date.now();
+    const ONE_HOUR = 60 * 60 * 1000;
+    if (now - this.lastAuthModalShownMs < ONE_HOUR) return;
+    this.lastAuthModalShownMs = now;
+    try {
+      const modal = new TokenExpiredModal(this.app, () => {
+        // Reveal the plugin's settings tab. Obsidian's
+        // setting.open + openTabById API gives us the deep link.
+        const setting = (
+          this.app as unknown as {
+            setting: {
+              open(): void;
+              openTabById(id: string): void;
+            };
+          }
+        ).setting;
+        try {
+          setting.open();
+          setting.openTabById(manifest.id);
+        } catch {
+          // Best effort — older Obsidian versions may not expose
+          // openTabById. The modal still ran, the user can open
+          // settings manually.
+        }
+      });
+      modal.open();
+    } catch (modalErr) {
+      this.logger?.warn("TokenExpiredModal open failed", {
+        err: String(modalErr),
+      });
+    }
+  }
+
   // ── auto-sync interval ──────────────────────────────────────────────
 
   startSyncInterval(): void {
@@ -804,7 +1021,7 @@ export default class GitHubSyncPlugin extends Plugin {
       isConfigured: () => this.isConfigured(),
       intervalEnabled: () => this.settings.syncStrategy === "interval",
       intervalMinutes: () => this.settings.syncInterval,
-      autoCommitOnSync: () => this.settings.autoCommitOnSync ?? false,
+      syncStartsWithCommit: () => this.settings.syncStartsWithCommit ?? true,
       hasPendingBatches: () => this.sync2Manager.hasPendingBatches(),
       // Background drain skips the pre-sync confirmation modal —
       // interval timers and the startup pulse are not user-driven,

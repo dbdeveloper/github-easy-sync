@@ -2,7 +2,7 @@
 // Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
 // AGPL-3.0 — see LICENSE.
 
-import { Vault } from "obsidian";
+import { TFile, Vault } from "obsidian";
 import { calculateGitBlobSHA } from "../utils";
 import type SnapshotStore from "./snapshot-store";
 import { safeRename } from "./cross-platform";
@@ -28,6 +28,74 @@ import { safeRename } from "./cross-platform";
 
 export const SYNC_TMP_SUFFIX = ".sync-tmp";
 export const SYNC_BAK_SUFFIX = ".sync-bak";
+
+// Stage 7 modify-in-place marker. Zero-byte file in the same
+// folder as the target. Format:
+//
+//   `.<filename-with-ext>.sync-tmp.`
+//
+// Examples:
+//   `notes/folder/note.md`   → `notes/folder/.note.md.sync-tmp.`
+//   `.obsidian/.gitignore`    → `.obsidian/..gitignore.sync-tmp.`
+//
+// Two distinguishing signals:
+//   - LEADING dot — file is invisible in Obsidian's file
+//     explorer (which hides dotfiles by default).
+//   - TRAILING dot — makes the marker syntactically distinct
+//     from the existing staging-file shape `.eslintrc.json.sync-tmp`
+//     (no trailing dot). The existing `parseStagingPath` /
+//     `findCandidates` recognisers won't claim a marker as a
+//     staging file because both forms it checks (`<stem>.sync-tmp.<ext>`
+//     and `<file>.sync-tmp`) require NO trailing dot after
+//     `.sync-tmp`.
+//
+// Semantics: the marker's PRESENCE is the signal. Empty bytes
+// intentionally; the actual rollback bytes live in the matching
+// `.sync-bak` sibling (existing convention). Recovery:
+//   - marker present, bak present → restore in-place via
+//     modifyBinary (rollback to pre-modify state).
+//   - marker present, bak missing → defensive cleanup of marker.
+//   - marker missing, bak present → existing
+//     snapshot-SHA-based recovery handles the orphan bak.
+//
+// Cross-platform note: trailing dot in filenames is supported by
+// POSIX (Linux, macOS, iOS APFS, Android ext4). Windows strips
+// trailing dots in the WinAPI layer; Obsidian on Windows desktop
+// would silently drop the trailing dot and we'd lose the
+// disambiguation. Acceptable tradeoff for the rework — the
+// target user is Capacitor mobile + macOS/Linux desktop where
+// trailing dots work cleanly.
+export const SYNC_MOD_MARKER_SUFFIX = ".sync-tmp.";
+
+// modifyMarkerPathFor: returns the modify-in-place marker path
+// for a given target. Same folder, dot-prefixed basename,
+// `.sync-tmp.` suffix.
+export function modifyMarkerPathFor(targetPath: string): string {
+  const slashIdx = targetPath.lastIndexOf("/");
+  const dir = slashIdx >= 0 ? targetPath.slice(0, slashIdx + 1) : "";
+  const basename = slashIdx >= 0 ? targetPath.slice(slashIdx + 1) : targetPath;
+  return `${dir}.${basename}${SYNC_MOD_MARKER_SUFFIX}`;
+}
+
+// Inverse of modifyMarkerPathFor. Recognises a marker by its
+// shape — basename starts with `.`, ends with `.sync-tmp.` (literal
+// trailing dot), middle slice non-empty.
+//
+// Note: the atomic-rename strategy does NOT use a marker — the
+// presence of `.sync-bak` itself signals "rename in progress",
+// and the existing SHA-based recovery handles it correctly.
+// Adding a parallel `.sync-bak.` marker would be redundant.
+export function parseModifyMarkerPath(markerPath: string): string | null {
+  if (!markerPath.endsWith(SYNC_MOD_MARKER_SUFFIX)) return null;
+  const slashIdx = markerPath.lastIndexOf("/");
+  const dir = slashIdx >= 0 ? markerPath.slice(0, slashIdx + 1) : "";
+  const basename = slashIdx >= 0 ? markerPath.slice(slashIdx + 1) : markerPath;
+  if (!basename.startsWith(".")) return null;
+  // strip leading dot and trailing .sync-tmp.
+  const inner = basename.slice(1, -SYNC_MOD_MARKER_SUFFIX.length);
+  if (inner.length === 0) return null;
+  return `${dir}${inner}`;
+}
 
 // Computes the staging path for a target file by inserting `.sync-bak`
 // (or `.sync-tmp` if `which="tmp"`) BEFORE the file extension instead
@@ -133,6 +201,101 @@ export async function atomicWriteFile(
   bytes: ArrayBuffer,
   afterCommit?: () => Promise<void>,
 ): Promise<void> {
+  // Editor-friendly fast path: when the target file already exists
+  // in the vault (TFile present) and the runtime exposes the
+  // Obsidian-idiomatic vault.modifyBinary API, write in place. This
+  // crucially preserves any open MarkdownView's cursor + scroll
+  // position — the rename strategy below would otherwise close the
+  // view because Obsidian sees the rename as "the file at this path
+  // disappeared". The atomic-rename safety only matters for creating
+  // brand-new files; for modify-in-place, `modifyBinary` is what
+  // Obsidian's own pull/sync flows use.
+  //
+  // Defensive: mock-obsidian (unit tests) doesn't expose
+  // getAbstractFileByPath / modifyBinary, so the typeof checks
+  // gate the fast path. Production Obsidian on desktop + mobile
+  // ships both APIs.
+  const getter = (
+    vault as { getAbstractFileByPath?: (p: string) => unknown }
+  ).getAbstractFileByPath;
+  const modBin = (
+    vault as { modifyBinary?: (f: TFile, b: ArrayBuffer) => Promise<void> }
+  ).modifyBinary;
+  if (typeof getter === "function" && typeof modBin === "function") {
+    const existing = getter.call(vault, path);
+    if (existing instanceof TFile) {
+      // Crash-safe modify protocol — forward-complete recovery:
+      //
+      //   1. writeBinary(`.sync-tmp`, newBytes) — stage the NEW
+      //      bytes (the FUTURE state). Marker is NOT yet present,
+      //      so a crash here looks like a Path A transient sync-tmp
+      //      and the existing orphan sweep drops it on next onload.
+      //   2. write(marker, "") — the marker's presence signals to
+      //      recovery: "the sync-tmp next to me is the authoritative
+      //      target state — forward-complete by renaming it."
+      //   3. modifyBinary(target, newBytes) — in-place write that
+      //      preserves any open editor's cursor + scroll.
+      //   4. afterCommit() — caller updates snapshot.
+      //   5. remove(`.sync-tmp`) — staging file no longer needed.
+      //   6. remove(marker) — flips recovery's signal off LAST,
+      //      so the marker is a true "this was in progress" signal
+      //      throughout its lifetime (never present without
+      //      forward-recovery context).
+      //
+      // Crash recovery (AtomicWriteRecovery.sweep):
+      //   - marker + sync-tmp present → remove(target), rename
+      //     sync-tmp → target, remove(marker). Forward-completes
+      //     the operation. (Recovery runs at onload before any
+      //     editor is open, so the rename's side-effect of closing
+      //     the editor is moot.)
+      //   - marker without sync-tmp → just remove(marker). Step 5
+      //     ran (sync-tmp gone) but step 6 crashed; the modify
+      //     completed successfully and the marker is a stale
+      //     leftover.
+      //   - sync-tmp without marker → existing Path A logic drops
+      //     it as a transient (crash before step 2).
+      const tmpPath = stagingPathFor(path, "tmp");
+      const markerPath = modifyMarkerPathFor(path);
+      // Step 1: stage new bytes in .sync-tmp. Existing transient
+      // staging path / file shape, reused — the marker is the
+      // signal that distinguishes this from a rename-strategy
+      // in-flight tmp.
+      await vault.adapter.writeBinary(tmpPath, bytes);
+      // Step 2: drop the marker. From this point on, recovery
+      // treats the tmp as forward-complete material.
+      await vault.adapter.write(markerPath, "");
+      try {
+        // Step 3: write new bytes in place. Editor stays attached.
+        await modBin.call(vault, existing, bytes);
+        // Step 4: caller updates snapshot.
+        if (afterCommit) {
+          await afterCommit();
+        }
+        // Step 5: remove staging FIRST. If we crash between this
+        // and step 6, the marker alone remains and recovery's
+        // "marker without sync-tmp → cleanup" branch drops it.
+        await vault.adapter.remove(tmpPath);
+        // Step 6: remove marker last. The marker's presence has
+        // always been a true "in progress" signal up to this point.
+        await vault.adapter.remove(markerPath);
+      } catch (err) {
+        // Best-effort cleanup; sweep handles whatever's left.
+        try {
+          await vault.adapter.remove(markerPath);
+        } catch {
+          // ignore
+        }
+        try {
+          await vault.adapter.remove(tmpPath);
+        } catch {
+          // ignore
+        }
+        throw err;
+      }
+      return;
+    }
+  }
+
   // Pre-suffix staging paths so Obsidian's file explorer still
   // recognizes the staging file by extension (a `.md.sync-tmp`
   // file is hidden under "Show all file types: false" but a
@@ -249,13 +412,26 @@ export class AtomicWriteRecovery {
     let cleaned = 0;
     let restored = 0;
 
-    const { syncTmps, syncBaks } = await this.findCandidates();
+    const { syncTmps, syncBaks, syncModifyMarkers } = await this.findCandidates();
 
     // 1. .sync-tmp: forward-direction staging. Dispatch by ownership.
     // Path B (ConflictStore.create) → resume Step 3 by renaming to the
     // final sibling path if SHA matches the record's theirsBlobSha.
-    // Path A (atomicWriteFile transient) → drop (next sync repeats).
+    // Path A (atomicWriteFile transient — rename strategy) → drop
+    // (next sync repeats).
+    // Path C (atomicWriteFile modify-in-place strategy — Stage 7):
+    // marker is also present, recovery branch 3 below owns the rename.
+    // Skip these here to avoid double-handling.
+    const markedTmpPaths = new Set<string>(
+      syncModifyMarkers.map(({ finalPath }) =>
+        stagingPathFor(finalPath, "tmp"),
+      ),
+    );
     for (const { stagingPath: tmpPath, finalPath: originalPath } of syncTmps) {
+      if (markedTmpPaths.has(tmpPath)) {
+        // Modify-in-place owns this tmp — sweep branch 3 handles it.
+        continue;
+      }
       try {
         const conflictRecord = this.conflictStore?.getBySibling(originalPath);
         if (conflictRecord !== undefined) {
@@ -292,8 +468,10 @@ export class AtomicWriteRecovery {
     }
 
     // 2. .sync-bak: rollback backups, snapshot-based recovery.
-    // Produced only by atomicWriteFile (Path A); ConflictStore never
-    // writes .sync-bak. No ownership dispatch needed.
+    // Produced only by atomicWriteFile's rename strategy (Path A);
+    // ConflictStore never writes .sync-bak. The modify-in-place
+    // strategy (Stage 7) doesn't touch .sync-bak — it uses
+    // forward-recovery via the paired .sync-tmp.
     for (const { stagingPath: bakPath, finalPath: originalPath } of syncBaks) {
       try {
         const fileExists = await this.vault.adapter.exists(originalPath);
@@ -335,20 +513,69 @@ export class AtomicWriteRecovery {
       }
     }
 
+    // 3. `.sync-tmp.` modify-in-place markers. The marker tells us
+    // "this path's modify-in-place was started but the cleanup
+    // step never ran." Forward-complete: rename the matching
+    // `.sync-tmp` over the target. (Recovery happens at onload
+    // before any editor is open, so the rename's side-effect of
+    // closing an editor on the target is moot.)
+    //
+    //   - marker + .sync-tmp present → remove target, rename
+    //     sync-tmp → target. Forward-completes the modify.
+    //   - marker without .sync-tmp → defensive cleanup of marker
+    //     (we have no bytes to land; something unexpected
+    //     happened upstream).
+    for (const { markerPath, finalPath } of syncModifyMarkers) {
+      try {
+        const tmpPath = stagingPathFor(finalPath, "tmp");
+        const tmpExists = await this.vault.adapter.exists(tmpPath);
+        if (tmpExists) {
+          // remove target (if present) THEN rename — Capacitor on
+          // iOS/Android does not overwrite via rename, so the
+          // remove is necessary; on POSIX it's a tiny overhead.
+          if (await this.vault.adapter.exists(finalPath)) {
+            await this.vault.adapter.remove(finalPath);
+          }
+          await this.vault.adapter.rename(tmpPath, finalPath);
+          restored++;
+        } else {
+          cleaned++;
+        }
+        try {
+          await this.vault.adapter.remove(markerPath);
+        } catch {
+          // ignore — sweep is best-effort
+        }
+      } catch {
+        // Individual failure — keep sweeping.
+      }
+    }
+
     return { cleaned, restored };
   }
 
   // Recursively walk the vault for `.sync-tmp` / `.sync-bak` staging
-  // files. Both pre-suffix form (`note.sync-bak.md`) and suffix form
-  // (`.gitignore.sync-bak`) are recognized via `parseStagingPath`,
-  // which encapsulates the inverse of `stagingPathFor`. Files that
-  // don't match either form are normal user files and skipped.
+  // files AND `.<basename>.sync-tmp.` modify-in-place markers.
+  //
+  // Staging files: both pre-suffix form (`note.sync-bak.md`) and
+  // suffix form (`.gitignore.sync-bak`) are recognized via
+  // `parseStagingPath`.
+  //
+  // Modify-in-place markers: recognized by the dot-prefix +
+  // `.sync-tmp.` trailing-dot pattern via parseModifyMarkerPath.
+  // Files that don't match any pattern are normal user files and
+  // skipped.
   private async findCandidates(): Promise<{
     syncTmps: Array<{ stagingPath: string; finalPath: string }>;
     syncBaks: Array<{ stagingPath: string; finalPath: string }>;
+    syncModifyMarkers: Array<{ markerPath: string; finalPath: string }>;
   }> {
     const syncTmps: Array<{ stagingPath: string; finalPath: string }> = [];
     const syncBaks: Array<{ stagingPath: string; finalPath: string }> = [];
+    const syncModifyMarkers: Array<{
+      markerPath: string;
+      finalPath: string;
+    }> = [];
     const stack: string[] = [""];
     while (stack.length > 0) {
       const dir = stack.pop() as string;
@@ -359,6 +586,14 @@ export class AtomicWriteRecovery {
         continue;
       }
       for (const file of listing.files) {
+        // Check marker first — staging-shape parseStagingPath
+        // doesn't recognise the trailing-dot suffix, but to keep
+        // the dispatch unambiguous we order marker → staging.
+        const markerTarget = parseModifyMarkerPath(file);
+        if (markerTarget !== null) {
+          syncModifyMarkers.push({ markerPath: file, finalPath: markerTarget });
+          continue;
+        }
         const parsed = parseStagingPath(file);
         if (parsed === null) continue;
         const entry = { stagingPath: file, finalPath: parsed.finalPath };
@@ -367,6 +602,6 @@ export class AtomicWriteRecovery {
       }
       stack.push(...listing.folders);
     }
-    return { syncTmps, syncBaks };
+    return { syncTmps, syncBaks, syncModifyMarkers };
   }
 }

@@ -761,4 +761,374 @@ describe("PushQueue", () => {
       expect(stored.equals(bytes)).toBe(true);
     });
   });
+
+  // ────────────────────────────────────────────────────────────────
+  // PushQueue.readFile — coverage for the upload-path read step.
+  //
+  // Sync2 reconcile calls readFile to obtain the "ours" side bytes
+  // from the batch snapshot. The implementation routes through
+  // `fetch(getResourcePath(...))` on Obsidian (desktop + mobile)
+  // to bypass a known Capacitor `readBinary` deadlock; in unit
+  // tests the mock adapter doesn't expose getResourcePath so
+  // readFile transparently falls through to `readBinary`. Both
+  // branches need byte-exact round-trips across the file-shape
+  // matrix (size, type, path).
+  // ────────────────────────────────────────────────────────────────
+  describe("readFile — round-trip integrity (readBinary fallback path)", () => {
+    it("small markdown file: bytes match what was enqueued", async () => {
+      const content = "# Title\n\nbody line one\nbody line two\n";
+      writeVaultFile(f.root, "Notes/small.md", content);
+      const id = await f.queue.enqueue([ADD("Notes/small.md")], {
+        parentCommitSha: null,
+        parentTreeSha: null,
+      });
+
+      const buf = await f.queue.readFile(id, "Notes/small.md");
+      expect(new TextDecoder().decode(buf)).toBe(content);
+      expect(buf.byteLength).toBe(content.length);
+    });
+
+    it("large markdown file (~2 MB): byte-exact round-trip", async () => {
+      // The exact regression scenario from the field incident:
+      // reconcile of a >1 MB markdown blocked on Capacitor
+      // bridge. Even in the readBinary fallback (used by node
+      // tests) we want to lock in the byte-for-byte invariant.
+      const lines: string[] = ["# Big File\n"];
+      let bytes = "# Big File\n".length;
+      let i = 0;
+      while (bytes < 2_000_000) {
+        const line = `Line ${i.toString().padStart(7, "0")}: lorem ipsum dolor sit amet consectetur adipiscing elit\n`;
+        lines.push(line);
+        bytes += line.length;
+        i += 1;
+      }
+      const content = lines.join("");
+      expect(content.length).toBeGreaterThan(2_000_000);
+
+      writeVaultFile(f.root, "Notes/big.md", content);
+      const id = await f.queue.enqueue([ADD("Notes/big.md")], {
+        parentCommitSha: null,
+        parentTreeSha: null,
+      });
+
+      const buf = await f.queue.readFile(id, "Notes/big.md");
+      expect(buf.byteLength).toBe(content.length);
+      expect(new TextDecoder().decode(buf)).toBe(content);
+    });
+
+    it("small binary file: bytes byte-exact (includes 0x00, 0xFF, BOM-like bytes)", async () => {
+      const bytes = Buffer.from([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // PNG signature
+        0x00, 0x00, 0x00, 0xff, 0xfe, 0xbb, 0xef, 0x7f,
+      ]);
+      writeVaultFile(
+        f.root,
+        "Assets/icon.png",
+        // writeVaultFile only accepts string; binary write directly
+        "" /* placeholder; we overwrite below */,
+      );
+      const abs = path.join(f.root, "Assets/icon.png");
+      fs.writeFileSync(abs, bytes);
+
+      const id = await f.queue.enqueue([ADD("Assets/icon.png")], {
+        parentCommitSha: null,
+        parentTreeSha: null,
+      });
+
+      const buf = await f.queue.readFile(id, "Assets/icon.png");
+      expect(Buffer.from(new Uint8Array(buf)).equals(bytes)).toBe(true);
+    });
+
+    it("large binary file (~2 MB): byte-exact round-trip", async () => {
+      const bytes = Buffer.alloc(2_000_000);
+      for (let i = 0; i < bytes.length; i += 1) {
+        bytes[i] = (i * 7919) & 0xff; // deterministic non-trivial pattern
+      }
+      writeVaultFile(f.root, "Assets/big.bin", "");
+      const abs = path.join(f.root, "Assets/big.bin");
+      fs.writeFileSync(abs, bytes);
+
+      const id = await f.queue.enqueue([ADD("Assets/big.bin")], {
+        parentCommitSha: null,
+        parentTreeSha: null,
+      });
+
+      const buf = await f.queue.readFile(id, "Assets/big.bin");
+      expect(buf.byteLength).toBe(bytes.length);
+      expect(Buffer.from(new Uint8Array(buf)).equals(bytes)).toBe(true);
+    });
+
+    it("empty file (0 bytes) round-trips as empty ArrayBuffer", async () => {
+      writeVaultFile(f.root, "Notes/empty.md", "");
+      const id = await f.queue.enqueue([ADD("Notes/empty.md")], {
+        parentCommitSha: null,
+        parentTreeSha: null,
+      });
+
+      const buf = await f.queue.readFile(id, "Notes/empty.md");
+      expect(buf.byteLength).toBe(0);
+    });
+
+    it("path with Cyrillic characters", async () => {
+      const content = "Українська мова\nрядок два\n";
+      const p = "Замітки/нотатка.md";
+      writeVaultFile(f.root, p, content);
+      const id = await f.queue.enqueue([ADD(p)], {
+        parentCommitSha: null,
+        parentTreeSha: null,
+      });
+
+      const buf = await f.queue.readFile(id, p);
+      expect(new TextDecoder().decode(buf)).toBe(content);
+    });
+
+    it("path with spaces and parentheses", async () => {
+      const content = "title with spaces and punctuation\n";
+      const p = "Notes/My Note (draft).md";
+      writeVaultFile(f.root, p, content);
+      const id = await f.queue.enqueue([ADD(p)], {
+        parentCommitSha: null,
+        parentTreeSha: null,
+      });
+
+      const buf = await f.queue.readFile(id, p);
+      expect(new TextDecoder().decode(buf)).toBe(content);
+    });
+
+    it("deeply nested directory path", async () => {
+      const content = "nested\n";
+      const p = "Level1/Level2/Level3/Level4/note.md";
+      writeVaultFile(f.root, p, content);
+      const id = await f.queue.enqueue([ADD(p)], {
+        parentCommitSha: null,
+        parentTreeSha: null,
+      });
+
+      const buf = await f.queue.readFile(id, p);
+      expect(new TextDecoder().decode(buf)).toBe(content);
+    });
+
+    it("file with CRLF + BOM normalised at enqueue → readFile returns canonical LF", async () => {
+      // PushQueue canonicalises text files on enqueue (autoCanonicalize
+      // default ON). readFile returns the canonicalised bytes from
+      // the snapshot, NOT the original on-disk bytes.
+      const dirty = Buffer.concat([
+        Buffer.from([0xef, 0xbb, 0xbf]), // BOM
+        Buffer.from("line1\r\nline2\r\n", "utf-8"),
+      ]);
+      const abs = path.join(f.root, "Notes/crlf.md");
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, dirty);
+
+      const id = await f.queue.enqueue([ADD("Notes/crlf.md")], {
+        parentCommitSha: null,
+        parentTreeSha: null,
+      });
+
+      const buf = await f.queue.readFile(id, "Notes/crlf.md");
+      expect(new TextDecoder().decode(buf)).toBe("line1\nline2\n");
+    });
+
+    it("multiple files in a batch — readFile each one independently", async () => {
+      writeVaultFile(f.root, "a.md", "alpha\n");
+      writeVaultFile(f.root, "Folder/b.md", "beta\n");
+      writeVaultFile(f.root, "Folder/Sub/c.md", "gamma\n");
+      const id = await f.queue.enqueue(
+        [ADD("a.md"), ADD("Folder/b.md"), ADD("Folder/Sub/c.md")],
+        { parentCommitSha: null, parentTreeSha: null },
+      );
+
+      const a = await f.queue.readFile(id, "a.md");
+      const b = await f.queue.readFile(id, "Folder/b.md");
+      const c = await f.queue.readFile(id, "Folder/Sub/c.md");
+      expect(new TextDecoder().decode(a)).toBe("alpha\n");
+      expect(new TextDecoder().decode(b)).toBe("beta\n");
+      expect(new TextDecoder().decode(c)).toBe("gamma\n");
+    });
+
+    it("readFile after overwriteFile reflects the overwritten content, not the original", async () => {
+      writeVaultFile(f.root, "a.md", "v1\n");
+      const id = await f.queue.enqueue([ADD("a.md")], {
+        parentCommitSha: null,
+        parentTreeSha: null,
+      });
+
+      const newContent = new TextEncoder().encode("v2-merged\n");
+      await f.queue.overwriteFile(id, "a.md", newContent.buffer as ArrayBuffer);
+
+      const buf = await f.queue.readFile(id, "a.md");
+      expect(new TextDecoder().decode(buf)).toBe("v2-merged\n");
+    });
+  });
+
+  describe("readFile — primary path: fetch(getResourcePath)", () => {
+    // Mock-obsidian's `Vault.adapter` is a getter that returns a
+    // fresh object every access (mock-obsidian.ts:188), so a naive
+    // property assignment doesn't stick. We override the `adapter`
+    // getter on the instance to wrap the original return with an
+    // added `getResourcePath`, then restore it in afterEach. fetch
+    // is patched on globalThis since both Node and the production
+    // WebView use the same global.
+    let originalFetch: typeof fetch;
+
+    afterEach(() => {
+      if (originalFetch) {
+        globalThis.fetch = originalFetch;
+      }
+      // Remove the instance-level adapter override so the
+      // prototype getter is visible again.
+      delete (f.vault as unknown as { adapter?: unknown }).adapter;
+    });
+
+    function patchAdapterAndFetch(opts: { fetchResponse: (url: string) => Response | Promise<Response> }): void {
+      originalFetch = globalThis.fetch;
+      // Capture the prototype-level adapter getter so we can
+      // delegate to it for everything except getResourcePath.
+      const protoDescriptor = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(f.vault),
+        "adapter",
+      );
+      const originalGetter = protoDescriptor?.get;
+      if (!originalGetter) {
+        throw new Error("expected adapter getter on Vault prototype");
+      }
+      Object.defineProperty(f.vault, "adapter", {
+        configurable: true,
+        get() {
+          const original = originalGetter.call(f.vault);
+          return {
+            ...original,
+            getResourcePath: (p: string) => `mock-resource://${p}`,
+          };
+        },
+      });
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        return await opts.fetchResponse(url);
+      }) as typeof fetch;
+    }
+
+    it("uses getResourcePath + fetch when adapter exposes it", async () => {
+      const content = "fetched via webview\n";
+      writeVaultFile(f.root, "x.md", content);
+      const id = await f.queue.enqueue([ADD("x.md")], {
+        parentCommitSha: null,
+        parentTreeSha: null,
+      });
+
+      let fetchCalls = 0;
+      let observedUrl = "";
+      patchAdapterAndFetch({
+        fetchResponse: (url) => {
+          fetchCalls += 1;
+          observedUrl = url;
+          // Pretend WebView served the bytes from the queue snapshot.
+          const stored = fs.readFileSync(
+            path.join(f.queueRoot, id, "vault", "x.md"),
+          );
+          return new Response(stored, { status: 200 });
+        },
+      });
+
+      const buf = await f.queue.readFile(id, "x.md");
+      expect(new TextDecoder().decode(buf)).toBe(content);
+      expect(fetchCalls).toBe(1);
+      expect(observedUrl).toMatch(/^mock-resource:\/\//);
+      expect(observedUrl).toContain("/.push-queue/");
+      expect(observedUrl).toContain("/x.md");
+    });
+
+    it("primary fetch and fallback readBinary return identical bytes for same content", async () => {
+      const bytes = Buffer.from([0x00, 0xff, 0x7f, 0x80, 0xef, 0xbb, 0xbf]);
+      const abs = path.join(f.root, "img.bin");
+      fs.writeFileSync(abs, bytes);
+      const id = await f.queue.enqueue([ADD("img.bin")], {
+        parentCommitSha: null,
+        parentTreeSha: null,
+      });
+
+      // Pass 1: readBinary fallback (no getResourcePath).
+      const fallback = await f.queue.readFile(id, "img.bin");
+
+      // Pass 2: fetch primary.
+      patchAdapterAndFetch({
+        fetchResponse: () => {
+          const stored = fs.readFileSync(
+            path.join(f.queueRoot, id, "vault", "img.bin"),
+          );
+          return new Response(stored, { status: 200 });
+        },
+      });
+      const primary = await f.queue.readFile(id, "img.bin");
+
+      expect(primary.byteLength).toBe(fallback.byteLength);
+      expect(Buffer.from(new Uint8Array(primary))
+        .equals(Buffer.from(new Uint8Array(fallback)))).toBe(true);
+    });
+
+    it("throws when fetch returns non-2xx status", async () => {
+      writeVaultFile(f.root, "x.md", "irrelevant\n");
+      const id = await f.queue.enqueue([ADD("x.md")], {
+        parentCommitSha: null,
+        parentTreeSha: null,
+      });
+
+      patchAdapterAndFetch({
+        fetchResponse: () =>
+          new Response("not found", { status: 404 }),
+      });
+
+      await expect(f.queue.readFile(id, "x.md")).rejects.toThrow(/status 404/);
+    });
+
+    it("large file (~2 MB) via fetch path returns identical bytes", async () => {
+      // Re-runs the large-file regression scenario against the
+      // primary fetch path so we know it can handle the size that
+      // broke Capacitor's readBinary on mobile.
+      const bytes = Buffer.alloc(2_000_000);
+      for (let i = 0; i < bytes.length; i += 1) {
+        bytes[i] = (i * 13) & 0xff;
+      }
+      const abs = path.join(f.root, "Assets/big.bin");
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, bytes);
+      const id = await f.queue.enqueue([ADD("Assets/big.bin")], {
+        parentCommitSha: null,
+        parentTreeSha: null,
+      });
+
+      patchAdapterAndFetch({
+        fetchResponse: () => {
+          const stored = fs.readFileSync(
+            path.join(f.queueRoot, id, "vault", "Assets/big.bin"),
+          );
+          return new Response(stored, { status: 200 });
+        },
+      });
+
+      const buf = await f.queue.readFile(id, "Assets/big.bin");
+      expect(buf.byteLength).toBe(bytes.length);
+      expect(Buffer.from(new Uint8Array(buf)).equals(bytes)).toBe(true);
+    });
+  });
+
+  describe("readFile — error paths", () => {
+    it("throws when the path doesn't exist in the batch", async () => {
+      writeVaultFile(f.root, "a.md", "exists\n");
+      const id = await f.queue.enqueue([ADD("a.md")], {
+        parentCommitSha: null,
+        parentTreeSha: null,
+      });
+
+      // Nothing was enqueued at this path → readBinary on a
+      // non-existent file errors. Surface that to the caller.
+      await expect(f.queue.readFile(id, "b.md")).rejects.toThrow();
+    });
+
+    it("throws when the batch id doesn't exist", async () => {
+      await expect(
+        f.queue.readFile("nonexistent-batch-id", "a.md"),
+      ).rejects.toThrow();
+    });
+  });
 });

@@ -50,7 +50,7 @@ export interface Sync2ClientOpts {
   // from one client instance to its successor without losing the
   // rm-rf on cleanup. Defaults to `vaultPath === undefined`.
   ownsVaultPath?: boolean;
-  accumulateOfflineSyncs?: boolean;
+  consolidateCommits?: boolean;
   enableLogging?: boolean;
   // Per-device configDir gate. Defaults to true (matches the
   // production default in settings.ts) so existing tests keep
@@ -109,7 +109,7 @@ export async function createSync2Client(
     syncStrategy: "manual",
     showStatusBarItem: false,
     showSyncRibbonButton: false,
-    accumulateOfflineSyncs: opts.accumulateOfflineSyncs ?? false,
+    consolidateCommits: opts.consolidateCommits ?? false,
     syncConfigDir: opts.syncConfigDir ?? true,
   };
 
@@ -199,7 +199,7 @@ export async function createSync2Client(
     conflictWatcher,
     conflictCounter,
     pendingDeletions,
-    accumulateOfflineSyncs: opts.accumulateOfflineSyncs ?? false,
+    consolidateCommits: opts.consolidateCommits ?? false,
     autoCanonicalize: () => opts.autoCanonicalize ?? true,
     // POSIX-flavoured rename via mock-obsidian's adapter — no wiki-link
     // updates (no real `app.fileManager`), but adequate for integration

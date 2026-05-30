@@ -26,6 +26,23 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
+  // Stage 7 drain-status subscription. Held across renders so the
+  // [Stop drain] button + timer survive re-display() calls (e.g.,
+  // when the user toggles a setting that re-renders the page).
+  private drainStatusUnsubscribe: (() => void) | null = null;
+  private drainStatusTickTimer: ReturnType<typeof setInterval> | null = null;
+
+  hide(): void {
+    // Inherited from PluginSettingTab; runs when the user leaves
+    // the page. Clean up the subscription so we don't leak.
+    this.drainStatusUnsubscribe?.();
+    this.drainStatusUnsubscribe = null;
+    if (this.drainStatusTickTimer !== null) {
+      clearInterval(this.drainStatusTickTimer);
+      this.drainStatusTickTimer = null;
+    }
+  }
+
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
@@ -34,6 +51,12 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     // does NOT carry a conflict list — users with a conflict click
     // the status bar or ribbon to open the sibling, not the
     // settings tab.
+
+    // ── Drain status (Stage 7) ───────────────────────────────────────
+    // Shown at the top of the page so it's instantly visible. While
+    // a drain is running: live timer + current path + [Stop drain].
+    // When idle: passive "Last sync: …" + last error if any.
+    this.renderDrainStatusSection(containerEl);
 
     // ── Remote repository ────────────────────────────────────────────
     new Setting(containerEl).setName("Remote Repository").setHeading();
@@ -375,20 +398,23 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Auto-commit on interval sync")
+      .setName("Sync starts with commit")
       .setDesc(
-        "Governs interval-driven syncs AND sync-on-startup. " +
-          "When ENABLED, every automatic tick does a full commit + pull + " +
-          "push of your local edits (same as clicking the Sync button) — " +
-          "no confirmation, every interval. When DISABLED (default), " +
-          "automatic ticks only pull remote changes silently; your local " +
-          "edits stay uncommitted until you click Sync yourself.",
+        "Master toggle (default ON). When ON, every Sync action " +
+          "(manual click, interval, startup) first commits your " +
+          "local changes, then uploads them to GitHub — today's " +
+          "default behaviour. When OFF, Sync only uploads the " +
+          "commits you've already staged (or pulls when there's " +
+          "nothing to upload); committing becomes a separate action " +
+          "via the [Commit] ribbon button. Turn the [Commit] ribbon " +
+          "button ON below if you choose this — otherwise nothing " +
+          "ever gets staged.",
       )
       .addToggle((toggle) => {
         toggle
-          .setValue(this.plugin.settings.autoCommitOnSync ?? false)
+          .setValue(this.plugin.settings.syncStartsWithCommit ?? true)
           .onChange(async (value) => {
-            this.plugin.settings.autoCommitOnSync = value;
+            this.plugin.settings.syncStartsWithCommit = value;
             await this.plugin.saveSettings();
           });
       });
@@ -414,17 +440,21 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Accumulate offline syncs into one commit")
+      .setName("Consolidate commits into one (if possible)")
       .setDesc(
-        "When the network is unavailable and a previous push is still " +
-          "pending, fold subsequent Sync clicks into the same batch. " +
-          "Eventual replay produces a single commit instead of one per click.",
+        "Fold consecutive commits into a single batch when no " +
+          "upload has happened in between. Covers two cases: " +
+          "(1) Offline accumulate — when an upload is pending and " +
+          "new Sync clicks arrive, they merge into the stuck batch " +
+          "so eventual replay is one commit; (2) Split-mode " +
+          "[Commit] taps — clicking [Commit] several times in a " +
+          "row without an intervening [Sync] collapses into one batch.",
       )
       .addToggle((toggle) =>
         toggle
-          .setValue(this.plugin.settings.accumulateOfflineSyncs ?? false)
+          .setValue(this.plugin.settings.consolidateCommits ?? false)
           .onChange(async (value) => {
-            this.plugin.settings.accumulateOfflineSyncs = value;
+            this.plugin.settings.consolidateCommits = value;
             await this.plugin.saveSettings();
           }),
       );
@@ -450,7 +480,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Push plugins data.json to GitHub")
+      .setName("Sync plugins data.json")
       .setDesc(
         "ENABLE WITH CAUTION! Plugin data.json files may contain " +
         "sensitive data (API tokens, credentials, license keys) that you " +
@@ -506,7 +536,11 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Show sync ribbon button")
-      .setDesc("Display a refresh-cw ribbon button to trigger a full sync.")
+      .setDesc(
+        "Display the Sync ribbon button (action depends on the " +
+          "`Sync starts with commit` master toggle above). The icon's " +
+          "badge shows the count of unsent commits in .push-queue.",
+      )
       .addToggle((toggle) => {
         toggle
           .setValue(this.plugin.settings.showSyncRibbonButton)
@@ -517,6 +551,29 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
             else this.plugin.hideSyncRibbonIcon();
           });
       });
+
+    new Setting(containerEl)
+      .setName("Show commit ribbon button")
+      .setDesc(
+        "Independent of the master toggle. When ON, shows a " +
+          "separate [Commit] ribbon button that enqueues local " +
+          "changes to .push-queue without touching the network. " +
+          "Most useful in split mode (`Sync starts with commit` " +
+          "OFF) where it's the only way to add commits.",
+      )
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.showCommitRibbonButton ?? false)
+          .onChange(async (value) => {
+            this.plugin.settings.showCommitRibbonButton = value;
+            await this.plugin.saveSettings();
+            if (value) this.plugin.showCommitRibbonIcon();
+            else this.plugin.hideCommitRibbonIcon();
+          });
+      });
+
+    // (No "misconfigured shape" warning here — the user is
+    // responsible for their own toggle combinations.)
 
     // ── Logging ─────────────────────────────────────────────────────
     new Setting(containerEl).setName("Logging").setHeading();
@@ -558,6 +615,42 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
         });
     }
 
+    // ── Performance ─────────────────────────────────────────────────
+    new Setting(containerEl).setName("Performance").setHeading();
+
+    new Setting(containerEl)
+      .setName("Maximum auto-merge file size (KB)")
+      .setDesc(
+        "Skip the 3-way text auto-merge for files larger than this. " +
+          "Above the threshold the engine just uploads your local " +
+          "bytes (no automated merge) — useful to sidestep multi-MB " +
+          "merge slowdowns. Default 1024 KB (1 MB). Increasing past " +
+          "~2 MB may cause noticeable hangs even with worker offload; " +
+          "see docs/tasks/SYNC2-WORKER-REORG.md and tests/perf/README.md.",
+      )
+      .addText((text) => {
+        const current = Math.round(
+          (this.plugin.settings.maxAutoMergeSizeBytes ?? 1_000_000) / 1024,
+        );
+        text
+          .setPlaceholder("1024")
+          .setValue(String(current))
+          .onChange(async (value) => {
+            const kb = Number((value ?? "").trim());
+            if (!Number.isFinite(kb) || kb <= 0) {
+              // Invalid input — fall back to default. Don't surface
+              // a modal; the placeholder + description tell the user
+              // what's expected.
+              this.plugin.settings.maxAutoMergeSizeBytes = 1_000_000;
+            } else {
+              this.plugin.settings.maxAutoMergeSizeBytes = Math.round(
+                kb * 1024,
+              );
+            }
+            await this.plugin.saveSettings();
+          });
+      });
+
     // ── Danger zone ─────────────────────────────────────────────────
     new Setting(containerEl).setName("Danger zone").setHeading();
 
@@ -590,6 +683,96 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
             }).open();
           });
       });
+  }
+
+  // Stage 7: live "Drain status" section. Subscribes to the
+  // Sync2Manager's drainStateChanged events and re-paints the
+  // timer + path + last error + [Stop drain] button. Survives
+  // re-display() via the saved unsubscribe handle.
+  private renderDrainStatusSection(parent: HTMLElement): void {
+    // Tear down any previous subscription before we re-render.
+    this.drainStatusUnsubscribe?.();
+    this.drainStatusUnsubscribe = null;
+    if (this.drainStatusTickTimer !== null) {
+      clearInterval(this.drainStatusTickTimer);
+      this.drainStatusTickTimer = null;
+    }
+
+    new Setting(parent).setName("GitHub sync status").setHeading();
+
+    const card = parent.createDiv();
+    card.style.padding = "0.75em 1em";
+    card.style.margin = "0 0 1.5em 0";
+    card.style.borderRadius = "4px";
+    card.style.background = "var(--background-secondary)";
+    card.style.fontFamily = "var(--font-monospace)";
+    card.style.fontSize = "0.85em";
+    card.style.whiteSpace = "pre-wrap";
+
+    const statusLine = card.createDiv();
+    const errorLine = card.createDiv();
+    errorLine.style.marginTop = "0.5em";
+    errorLine.style.color = "var(--text-error)";
+    const stopBtnWrap = card.createDiv();
+    stopBtnWrap.style.marginTop = "0.5em";
+    const stopBtn = stopBtnWrap.createEl("button", { text: "Stop sync" });
+    stopBtn.style.padding = "0.4em 0.9em";
+    stopBtn.style.background = "var(--background-modifier-error)";
+    stopBtn.style.color = "var(--text-on-accent)";
+    stopBtn.style.border = "none";
+    stopBtn.style.borderRadius = "4px";
+    stopBtn.style.cursor = "pointer";
+    stopBtn.addEventListener("click", () => {
+      this.plugin.sync2Manager.cancelDrain();
+      new Notice("Sync cancellation requested.", 4000);
+    });
+
+    const render = (status: ReturnType<
+      typeof this.plugin.sync2Manager.getDrainStatus
+    >): void => {
+      if (status.state === "running") {
+        const elapsed = status.startedAt
+          ? Math.round((Date.now() - status.startedAt) / 1000)
+          : 0;
+        const pathLabel = status.currentPath ?? "(initialising)";
+        const counter =
+          status.totalFiles > 0
+            ? `${status.currentFile} / ${status.totalFiles}`
+            : "—";
+        statusLine.setText(
+          `🌀 Syncing with GitHub for ${elapsed}s\n` +
+            `Currently: ${pathLabel}\n` +
+            `File: ${counter}`,
+        );
+        stopBtn.style.display = "inline-block";
+        if (this.drainStatusTickTimer === null) {
+          this.drainStatusTickTimer = setInterval(() => render(
+            this.plugin.sync2Manager.getDrainStatus(),
+          ), 1000);
+        }
+      } else {
+        statusLine.setText("⏸ Sync idle");
+        stopBtn.style.display = "none";
+        if (this.drainStatusTickTimer !== null) {
+          clearInterval(this.drainStatusTickTimer);
+          this.drainStatusTickTimer = null;
+        }
+      }
+      if (status.lastError !== null) {
+        const ago = Math.round(
+          (Date.now() - status.lastError.whenMs) / 1000,
+        );
+        errorLine.setText(
+          `⚠ Last error (${ago}s ago): ${status.lastError.message}`,
+        );
+      } else {
+        errorLine.setText("");
+      }
+    };
+
+    this.drainStatusUnsubscribe = this.plugin.sync2Manager.setDrainStatusListener(
+      (s) => render(s),
+    );
   }
 }
 
