@@ -36,7 +36,9 @@ export class TokenExpiredModal extends Modal {
 
   open(): void {
     super.open();
-    this.titleEl.setText("GitHub token expired or invalid");
+    this.titleEl.setText(
+      "GitHub Easy Sync — GitHub token expired or invalid",
+    );
     this.contentEl.empty();
 
     const intro = this.contentEl.createDiv();
