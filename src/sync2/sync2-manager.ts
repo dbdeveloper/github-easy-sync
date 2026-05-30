@@ -2874,6 +2874,48 @@ export class Sync2Manager {
         }
       }
 
+      // Size guard: skip 3-way merge for files larger than
+      // RECONCILE_AUTO_MERGE_LIMIT. Above this size two things
+      // bite: (a) node-diff3 hits a hard scaling cliff around
+      // 4 MB on mobile (~85 s at 4.6 MB observed on Pixel 6 Pro);
+      // (b) field-observed Capacitor bridge stalls during the
+      // base64 decode of multi-MB GitHub blob responses, even
+      // though the same payload decodes cleanly in isolation.
+      // The size guard sidesteps both by skipping the
+      // attemptAutoMerge dance — the path stays in batch.files
+      // so the subsequent push step uploads OURS bytes, making
+      // the local side win for this file. Documented loss of
+      // automated 3-way merge for big files; the trade is
+      // accepted vs. the user-facing "infinite hang" we'd
+      // otherwise reach.
+      //
+      // Provisional 1 MB — Stage 8 perf tests + Worker offload
+      // (Stage 4) will likely lift this. Exposed as a constant
+      // for adjustability; future revision will pipe through
+      // settings.
+      const RECONCILE_AUTO_MERGE_LIMIT = 1_000_000;
+      const oursIsLarge =
+        oursBytes.byteLength > RECONCILE_AUTO_MERGE_LIMIT;
+      const baseIsLarge =
+        baseBytes !== null &&
+        baseBytes.byteLength > RECONCILE_AUTO_MERGE_LIMIT;
+      const theirsIsLarge =
+        theirsBytes !== null &&
+        theirsBytes.byteLength > RECONCILE_AUTO_MERGE_LIMIT;
+      if (oursIsLarge || baseIsLarge || theirsIsLarge) {
+        this.logger.warn(
+          "Sync2 reconcile path SKIP auto-merge — file > size limit, ours pushed as-is",
+          () => ({
+            path,
+            limit: RECONCILE_AUTO_MERGE_LIMIT,
+            oursBytes: oursBytes.byteLength,
+            theirsBytes: theirsBytes?.byteLength ?? 0,
+            baseBytes: baseBytes?.byteLength ?? 0,
+          }),
+        );
+        continue;
+      }
+
       let pluginJs: PluginJsContext | undefined;
       if (
         theirsFetched !== null &&
