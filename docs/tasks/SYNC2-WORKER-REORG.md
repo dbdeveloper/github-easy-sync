@@ -8,6 +8,78 @@
 
 ---
 
+## 0. Guiding principles
+
+These are the architectural North Stars that every stage in this
+rework must serve. If a design choice within a stage conflicts
+with one of these, the principle wins and the choice is revised.
+
+### P1. "Click Sync, keep editing"
+
+The plugin must never freeze the user's editor while it does
+GitHub work. The existing `.push-queue` already gave offline
+resilience and crash safety — the missing piece is that the active
+drain still blocks the JS main thread when it crunches CPU. With
+Web Workers proven (see §1) we can route every CPU- or
+network-heavy operation off the main thread, so the user keeps
+typing while the plugin syncs in the background.
+
+This implies: anything that takes more than a frame (~16 ms) of
+main-thread time is a candidate for the Worker orchestra.
+
+### P2. SHA-first by default — never read or push what we already know
+
+Every reconcile, push, and pull decision should start from
+SHAs alone:
+
+- `ChangeDetector` skips a file when `mtime + size` match its
+  manifest snapshot — never re-reads bytes when the metadata
+  proves the file unchanged.
+- `enqueue` stores the file's SHA alongside path + mtime + size
+  in the manifest, computed once at change-detection time.
+- Reconcile compares `ours.sha` vs `base.sha` vs `theirs.sha`
+  before fetching any bytes. ~75 % of paths resolve from SHAs
+  alone (no remote change / ours wins / theirs wins).
+- Push pipeline checks GitHub-side blob SHA before uploading
+  bytes (if the blob exists with the right SHA, just reference it
+  in the tree — never re-upload).
+
+This pays for itself on every sync, not only large-file ones.
+A 200-file vault with three changed files runs three SHA reads
+instead of three byte reads — orders of magnitude less I/O and
+network.
+
+### P3. Worker orchestra, not a single Worker
+
+The Web Worker feasibility test (§1) proved one Worker round-trip
+costs ~5–10 ms. Constructing a Worker per operation is wasteful;
+sharing one Worker across all operations serializes work that
+could parallelize. The right answer is a small orchestra:
+
+- **CPU worker pool** (2–4 workers): parallel base64 decode for
+  different files, parallel diff3 merges, parallel SHA
+  computation. Pool size auto-tunes to `navigator.hardwareConcurrency`
+  with a sane fallback of 2.
+- **Dedicated network worker** (1): all GitHub API calls in
+  serial. Rate-limiting, retry backoff, and quota accounting
+  stay in one place. Pre-flight validation (§12.1 of
+  PSEUDO-MERGE-MODE.md) lives here.
+- **Main thread**: orchestration only — triggers, UI state, fast
+  vault reads (~25 ms each), postMessage to/from workers, settings.
+
+Timeouts in workers can be generous (5–10 min for a giant merge)
+because the user is never blocked — they just see live progress
+and have the `[Cancel sync]` modal (Stage 7) if they want to stop.
+
+### P4. No regressions allowed
+
+All 635 existing unit tests stay green. Every stage of this
+rework either adds tests or refines existing ones — never deletes
+coverage. Integration scenarios (A through L buckets) stay
+intact.
+
+---
+
 ## 1. Context
 
 Between 2.0.1-beta5 ship and now (May 26–30), a multi-day field
@@ -60,27 +132,66 @@ These passed real-device tests and matter for the rework:
 
 1. **`fetch(getResourcePath)` for queue reads** — bypasses Capacitor
    base64 bridge; faster than `vault.adapter.readBinary`; works for
-   both queue snapshots and live vault paths.
-2. **Size guard** `RECONCILE_AUTO_MERGE_LIMIT = 1_000_000` — kept as
-   defense in depth. node-diff3 hits a real cliff at ~4 MB
-   regardless of where it runs.
-3. **SHA-skip before push** — if ours.sha === theirs.sha skip the
-   blob upload; saves real bandwidth on large-file no-op pushes.
-4. **Read ours FIRST in reconcile** — clean WebView state for the
-   `fetch` call; consistent ~25 ms read regardless of preceding
-   blob fetches.
+   both queue snapshots and live vault paths. **`getResourcePath` is
+   an officially documented part of Obsidian's `DataAdapter` API** —
+   not a hack. On mobile the URL takes the form
+   `http://localhost/_capacitor_file_/...`, a Capacitor-internal
+   scheme designed so WebView's native fetch can resolve local
+   files without a JS↔native bridge round-trip. Use confidently,
+   document the design choice in CLAUDE.md.
+
+2. **Size guard** `RECONCILE_AUTO_MERGE_LIMIT` — kept as defense in
+   depth. node-diff3 hits a real cliff at ~4 MB regardless of where
+   it runs. Default value is **provisional** — set to 5 MB based on
+   the Stage 4 perf data, and **exposed in Settings** as
+   `maxAutoMergeSizeBytes` so advanced users can tune up or down
+   for their corpus. Stage 8 perf tests provide the empirical
+   baseline.
+
+3. **SHA-first as universal strategy** — this is the centerpiece, see
+   §0 P2. Not a "skip when sha matches" special case; the manifest
+   stores `{ path → sha, mtime, size, lastSynced }` and every
+   decision starts from SHAs alone. ChangeDetector skips a file when
+   `mtime + size` match the snapshot — no byte read needed at all.
+   Reconcile compares SHAs before fetching content. Push checks
+   GitHub blob existence before uploading. Stage 5 implements this.
+
+4. **Read ours FIRST in reconcile** — still applies as a clean
+   ordering choice, but the original *reason* (clean WebView state
+   for the read) disappears once the Worker orchestra absorbs CPU
+   work. With workers, main thread isn't competing with
+   heavy operations during the read. The pattern stays for code
+   clarity (read what we know is local first, then go to network)
+   but framing in code comments must update.
+
 5. **`setTimeout(0)` yield between batch files** — fixes UI freeze
-   from microtask-only awaits; bridge gets time to process queued
-   appends.
-6. **60 s per-file timeout in reconcile** — cheap insurance, surfaces
-   any stuck path as a clean error.
+   from microtask-only awaits on the main thread. Once the entire
+   reconcile loop moves into a Worker, this matters less inside
+   the loop, but the main thread still needs yields between
+   high-level orchestration steps (batches drained, UI updates).
+   Keep the pattern; document it as a main-thread tool, not a
+   blanket prescription.
+
+6. **60 s per-file timeout in reconcile** — keep as a safety net,
+   but **raise considerably in Workers**. With main thread free,
+   the user doesn't experience the timeout-firing as a freeze; we
+   can let a giant merge run 5–10 min in the CPU pool. The
+   user-facing escape is the `[Cancel sync]` modal (Stage 7), not
+   an automatic timeout. Main-thread step timeouts stay tight.
+
 7. **Blobs-API fallback in `getContentsAtRef`** (beta5 fix) —
-   catastrophic-data-loss prevention. Must stay.
+   catastrophic-data-loss prevention. Must stay. **In the new
+   architecture, the fallback logic lives inside the dedicated
+   network worker** (see §5), since that worker owns all GitHub
+   API calls and contains the retry/error-classification policy.
+
 8. **`PushQueue.readFile` unit tests** (18 tests added in beta5) —
    round-trip integrity across text/binary, small/large, special
    chars in paths, empty files, deep nesting. Keep.
+
 9. **Web Worker via inline Blob URL** — proven 46 ms round-trip for
-   2.6 MB base64 decode. Production-ready.
+   2.6 MB base64 decode. Production-ready. **Builds the foundation
+   for the Worker orchestra** (§0 P3, §5).
 
 ---
 
@@ -110,42 +221,125 @@ These were investigation artifacts, falsified or superseded:
 
 ---
 
-## 5. New architecture (Web Worker offload)
+## 5. New architecture — Worker orchestra
 
-### 5.1 Worker infrastructure
+The plugin runs as a small orchestra of cooperating threads. The
+main thread orchestrates and handles UI; CPU work parallelizes
+across a pool; network I/O serializes through a dedicated worker.
+This is the implementation of §0 P3.
 
-- **One shared Worker per plugin instance**, lazy-init on first use,
-  kept alive for session.
-- **Message protocol** with request IDs (concurrent ops multiplex
-  freely; tree-builder might fire multiple SHA computations in
-  parallel).
-- **esbuild separate entry point** at `src/worker/sync-worker.ts`,
-  bundled as IIFE, inlined into main bundle as a string for Blob
-  URL construction. Avoids `importScripts(url)` (Capacitor `app://`
-  URLs in worker context are unproven and risk regression).
-- **Graceful fallback to main-thread execution** if `new Worker()`
-  throws (older Capacitor versions, security policies). Size guard
-  remains the safety net.
+### 5.1 Thread layout
 
-### 5.2 Operations to offload (priority order)
+```
+                  ┌─────────────────────────────────────┐
+                  │           Main thread               │
+                  │  • UI, settings, triggers           │
+                  │  • Fast vault reads (~25ms each)    │
+                  │  • Orchestration: who does what     │
+                  │  • postMessage in/out               │
+                  └────────┬────────────────┬───────────┘
+                           │                │
+            ┌──────────────┴───┐    ┌───────┴────────────┐
+            │  CPU worker pool │    │  Network worker    │
+            │  (2-4 workers)   │    │  (single)          │
+            │                  │    │                    │
+            │ • base64 decode  │    │ • GitHub API calls │
+            │ • diff3 merge    │    │ • Blobs fallback   │
+            │ • SHA-1 compute  │    │ • Retry / backoff  │
+            │ • parallel       │    │ • Rate-limit       │
+            │   per-file       │    │ • Pre-flight       │
+            └──────────────────┘    └────────────────────┘
+```
 
-Worker has ~5–10 ms postMessage overhead, so only move what
-benefits. Threshold-gate every migration.
+**Pool size auto-tunes** to `Math.max(2, Math.min(4, navigator.hardwareConcurrency - 1))`
+with a fallback of 2 if the API is unavailable.
 
-1. **`mergeText` (node-diff3)** — biggest win. 3-second freeze →
-   3 seconds in background, UI live.
-2. **`calculateGitBlobSHA`** for files > 100 KB — moderate win,
-   runs many times per sync.
-3. **`base64ToArrayBuffer`** for strings > 2 MB — eliminates entire
-   class of "mobile bridge hang" risk.
-4. **Do NOT move small operations**. Threshold-gate; below the
-   threshold, main-thread execution wins.
+### 5.2 Build infrastructure (Approach A confirmed)
 
-### 5.3 Bundle size impact
+- **esbuild separate entry points:**
+  - `src/worker/cpu-worker.ts` — pool worker, includes node-diff3
+    library, atob wrapper, SHA-1 implementation.
+  - `src/worker/network-worker.ts` — GitHub API client, retries,
+    Blobs fallback.
+- Each builds as a standalone IIFE → string → inlined into the
+  main bundle as `const CPU_WORKER_SOURCE = "..."` and
+  `const NETWORK_WORKER_SOURCE = "..."`.
+- Runtime: `new Worker(URL.createObjectURL(new Blob([CPU_WORKER_SOURCE], { type: "application/javascript" })))`.
+- This avoids `importScripts(url)` (Capacitor `app://` URLs in
+  worker context are unproven and risk regression).
 
-Current `main.js`: ~150 KB. Worker code adds ~50 KB (node-diff3
-core + atob wrappers + SHA-1). Total ~200 KB. Acceptable; document
-in CHANGELOG.
+### 5.3 Message protocol
+
+Single typed envelope with request IDs so any worker can multiplex:
+
+```typescript
+type WorkerRequest =
+  | { id: string; op: "decode-base64"; b64: string }
+  | { id: string; op: "merge-text"; ours: string; base: string; theirs: string }
+  | { id: string; op: "compute-sha"; bytes: ArrayBuffer }
+  | { id: string; op: "github-blob-get"; sha: string }
+  | { id: string; op: "github-blob-create"; bytes: ArrayBuffer }
+  | { id: string; op: "github-tree-create"; entries: TreeEntry[] }
+  // (one variant per worker op — see WorkerClient for full set)
+  ;
+type WorkerResponse =
+  | { id: string; ok: true; result: unknown }
+  | { id: string; ok: false; error: string };
+```
+
+`WorkerClient` (main-thread wrapper) holds the pool, dispatches
+based on op type (CPU-bound → next-free pool worker; network →
+queued network worker), and returns a `Promise<result>` keyed by
+request ID. Transferable `ArrayBuffer`s move zero-copy.
+
+### 5.4 Operations to offload (priority order)
+
+Worker round-trip ~5–10 ms. Only offload above-threshold:
+
+1. **`mergeText` (node-diff3)** → CPU worker, any size ≥ 100 KB.
+   The biggest win: 3 s freeze becomes 3 s in background, UI live.
+2. **`calculateGitBlobSHA`** → CPU worker, files ≥ 100 KB. Many
+   per sync; cheap parallelism win.
+3. **`base64ToArrayBuffer`** → CPU worker, strings ≥ 2 MB.
+   Eliminates the mobile bridge hang risk entirely.
+4. **All GitHub HTTP calls** → network worker. Single point of
+   retry, rate-limit, error classification (per `errors.ts`).
+   Blobs-API fallback (§3 item 7) lives here.
+5. **Reconcile orchestration** stays on main thread — it just
+   coordinates many short workers, never doing heavy work
+   itself. ChangeDetector + push-queue persistence + manifest
+   updates stay on main thread (touch vault.adapter, which only
+   works from main).
+
+### 5.5 Graceful fallback
+
+If `new Worker()` throws (security policy, older Capacitor, etc.),
+the `WorkerClient` falls back to main-thread execution of every
+operation. Size guard (§3 item 2) remains the secondary safety net
+for the CPU operations. Detected once at construction; cached;
+covered by tests.
+
+### 5.6 Cancellation
+
+`worker.terminate()` is synchronous and instant. The `WorkerClient`
+maintains an "abort signal" tied to the per-sync session; if the
+user clicks the `[Cancel sync]` modal (Stage 7), it:
+
+1. Sets the `abortRequested` flag on `Sync2Manager`.
+2. Terminates every in-flight Worker job (CPU pool + network
+   worker).
+3. Re-creates fresh workers from the pool source string for the
+   next sync. (Cheap — Blob URL + new Worker is ~5–10 ms.)
+4. Drain returns gracefully, batch stays in `.attempted` state on
+   disk so the next sync retries cleanly.
+
+### 5.7 Bundle size impact
+
+Current `main.js`: ~150 KB. Worker sources add:
+- CPU worker (with node-diff3): ~60 KB
+- Network worker (HTTP client + retries): ~30 KB
+
+Total `main.js`: ~240 KB. Acceptable; document in CHANGELOG.
 
 ---
 
@@ -195,69 +389,158 @@ Each as a separate commit:
 **Acceptance:** all 635 existing unit tests pass + new unit tests
 pass + the integration F-large-file-over-1mb suite passes.
 
-### Stage 3: Worker infrastructure POC (~3-4 hours)
+### Stage 3: Worker orchestra infrastructure POC (~4-5 hours)
 
-Goal: prove the Worker bundle pipeline end-to-end.
+Goal: prove the full orchestra build pipeline + pool + dedicated
+network worker shape, end-to-end.
 
-- esbuild config: separate entry point for worker.ts
-- Build pipeline: inline built worker code as string into main bundle
-- `src/worker/worker-client.ts` — main-thread side; lifecycle, message
-  protocol, request ID multiplexing
-- `src/worker/sync-worker.ts` — worker side; pings + echo for now
-- New unit tests: worker construction, ping/pong round-trip, request
-  ID multiplexing
-- New integration test: worker survives across multiple syncs
+- esbuild config: two separate entry points
+  - `src/worker/cpu-worker.ts`
+  - `src/worker/network-worker.ts`
+- Build pipeline emits each as a standalone IIFE → string →
+  inlined into the main bundle as `const CPU_WORKER_SOURCE` and
+  `const NETWORK_WORKER_SOURCE`.
+- `src/worker/worker-client.ts` — main-thread orchestra controller:
+  - Constructs CPU pool (auto-sized to
+    `Math.max(2, Math.min(4, hardwareConcurrency - 1))`).
+  - Constructs the single network worker.
+  - Maintains pending-request map keyed by request ID.
+  - `dispatch(op)` — picks the right worker (CPU vs network) and
+    returns `Promise<result>`.
+  - `terminateAll()` for cancellation.
+  - Graceful fallback: if `new Worker()` throws, every op runs
+    on main thread instead.
+- Stage 3 ops shipped:
+  - CPU worker: `ping` + `echo` only (no node-diff3 yet).
+  - Network worker: `ping` only.
+- New unit tests:
+  - Worker pool construction + size matches expected
+  - Round-trip ping/pong against CPU pool and network worker
+  - Request ID multiplexing (10 concurrent pings, all return)
+  - Graceful fallback when Worker constructor throws (mock)
+- New integration test: orchestra survives across two consecutive
+  Sync2Manager.syncAll() calls (no leak, no construction-per-sync).
+- Bundle inspection: `main.js` contains the worker sources as
+  string literals; **no `require('fs'|'path')` at module scope**
+  per CLAUDE.md mobile constraint.
 
-**Acceptance:** ping/pong + bundle inspection (no `require('fs')`
-at module level), all tests pass.
+**Acceptance:** orchestra pings green, pool size correct on a
+test machine, fallback works, all tests pass.
 
-### Stage 4: Migrate `mergeText` to Worker (~3-4 hours)
+### Stage 4: CPU worker — mergeText + SHA + base64 (~4-5 hours)
 
-Goal: 3-way merge runs in background; size guard ceiling rises.
+Goal: parallel CPU work across the pool; UI stays responsive
+during multi-second compute.
 
-- Worker bundles node-diff3
-- Async wrapper around postMessage with promise-per-request
-- Main-thread fallback if Worker fails / unavailable
-- Raise `RECONCILE_AUTO_MERGE_LIMIT` to 3 MB (verified empirically)
-- New unit tests: large-file (3 MB synthetic markdown) merge via
-  worker, worker failure → main-thread fallback
-- New integration test: real GitHub round-trip with 3 MB file
-  divergence on both sides
+- Add `merge-text`, `compute-sha`, `decode-base64` ops to
+  `cpu-worker.ts`.
+- Worker bundles node-diff3 (~50 KB), a SHA-1 implementation
+  (built-in `crypto.subtle.digest('SHA-1', ...)` works in worker
+  scope), and uses native `atob` for base64.
+- `WorkerClient.mergeText`, `computeSHA`, `decodeBase64` — async
+  wrappers; dispatch picks an idle pool worker.
+- Reconcile / push-queue / tree-builder updated to call these via
+  `WorkerClient` instead of direct synchronous library calls.
+  Threshold-gated per §5.4.
+- Raise `RECONCILE_AUTO_MERGE_LIMIT` per Stage 8 perf data;
+  provisional 5 MB.
+- New unit tests:
+  - 3 MB merge via worker pool, byte-exact vs main-thread result
+  - 4 concurrent merges run in parallel (timing assertion)
+  - Worker failure → main-thread fallback path
+  - Decode > 2 MB byte-exact vs `base64ToArrayBuffer`
+- New integration tests:
+  - Real GitHub round-trip with 3 MB file divergence on both sides
+  - Two large files in same batch — merges run in parallel
 
-**Acceptance:** UI stays responsive (no main-thread lock-up) during
-merge of 1-3 MB inputs on real Obsidian Mobile.
+**Acceptance:** UI stays responsive (verified on a Pixel 6 Pro
+running Obsidian Mobile) during merge of 1-3 MB inputs.
 
-### Stage 5: SHA-first reconcile (~4-6 hours)
+### Stage 5: SHA-first as default (manifest mtime+size cache + reconcile rework) (~5-7 hours)
 
-Goal: most reconcile paths skip byte fetch entirely.
+Goal: implement §0 P2 fully. Universal SHA-first strategy with
+manifest cache so we never read or push what we already know.
 
-- Store SHA in queue manifest at enqueue time (cost: one SHA per
-  changed file at enqueue; recovered as N savings per reconcile)
-- Reconcile compares SHAs before fetching content
-- Branches:
+**Manifest cache (foundation):**
+- Extend `SnapshotStore`'s per-path record to
+  `{ sha, mtime, size, lastSynced }` (currently just `sha`).
+- `ChangeDetector` first checks `mtime + size` against snapshot;
+  if both match, the file is provably unchanged — skip the read
+  entirely. This is the biggest day-to-day win: a 200-file vault
+  with 3 changed files does 3 reads instead of 200.
+- If `mtime` or `size` differ, read the file once, compute SHA via
+  the CPU worker pool (Stage 4), compare to snapshot.sha. If
+  matching, it's a false-alarm (touch without content change) —
+  update mtime in snapshot, do nothing else.
+
+**SHA-first reconcile:**
+- Reconcile fetches base & theirs **metadata only** (Contents API
+  returns SHA without content for files ≤ 1 MB; for larger it
+  returns the metadata envelope and we skip the inline content).
+- Branches before any blob fetch:
   - `base.sha === theirs.sha` → no remote change, push ours
-  - `base.sha === ours.sha` → theirs wins; fetch theirs, write to
-    vault
-  - `theirs.sha === ours.sha` → ours wins, push as-is
-  - all three differ → fetch both, merge (via Worker per Stage 4)
-- New unit tests: each branch of the SHA matrix
-- New integration tests: SHA-only no-op, SHA-only theirs-wins on
-  large files
+  - `theirs.sha === ours.sha` → already in sync, drop from batch
+  - `base.sha === ours.sha` → theirs wins; only theirs full bytes
+    needed
+  - all three differ → both full bytes needed, merge via Worker
 
-**Acceptance:** 75% of "no real change" reconcile paths skip blob
-fetch; observed in integration suite.
+**SHA-first push:**
+- Before uploading a blob: check `GET /repos/.../git/blobs/{sha}`
+  via the network worker. If GitHub already has this SHA, the
+  tree-builder references it without re-uploading bytes — saves
+  bandwidth, especially on large-file no-op pushes.
 
-### Stage 6: Migrate large base64 decode to Worker (~2 hours)
+- New unit tests:
+  - `ChangeDetector` skips read when `mtime + size` match
+  - `ChangeDetector` rereads when `mtime` differs but content
+    matches — updates snapshot mtime
+  - Reconcile takes each SHA-matrix branch correctly
+  - Push skips upload when GitHub-side blob already exists
+- New integration tests:
+  - 200-file vault, 3 changes — assert 3 reads (not 200)
+  - SHA-only theirs-wins on a 3 MB file (no main-thread merge)
+  - Push of a file whose blob already exists remotely (zero blob
+    upload)
 
-Goal: eliminate the entire "mobile bridge hang" risk class.
+**Acceptance:** observed network/disk savings in integration
+suite; SHA-skip path covered for all eight cells of the
+ours/base/theirs SHA matrix.
 
-- Threshold-gated: only for strings > 2 MB
-- Worker uses native `atob` (proven OK in feasibility test)
-- New unit tests: decode > 2 MB via worker matches main-thread
-  output byte-exact
+### Stage 6: Network worker — GitHub API migration (~5-7 hours)
 
-**Acceptance:** no main-thread freeze observable when reconcile of
-3 MB markdown file runs on phone.
+Goal: every GitHub HTTP call goes through the dedicated network
+worker. Single point of retry, rate-limit, error classification,
+and Blobs-API fallback (§3 item 7).
+
+- Move `src/github/client.ts` HTTP-call methods into
+  `src/worker/network-worker.ts`:
+  - `getBranchHead`, `getContentsAtRef` (incl. Blobs fallback),
+    `getBlob`, `getCompare`, `getTree`
+  - `createBlob`, `createTree`, `createCommit`, `updateBranchHead`
+  - Retry policy, rate-limit handling, error classification
+    (typed errors from `src/errors.ts` are re-thrown on the main
+    side via `WorkerResponse.ok: false`).
+- `WorkerClient` exposes thin wrappers — `wc.getBranchHead(...)`,
+  etc. — that look identical to today's `GithubClient` API. The
+  call sites in `sync2-manager.ts`, `tree-builder.ts` swap to
+  `WorkerClient` without otherwise changing.
+- Main thread keeps a tiny `GithubClient` shim that delegates to
+  `WorkerClient` so existing tests that mock `GithubClient`
+  continue to work.
+- Pre-flight validation (§12.1 of PSEUDO-MERGE-MODE.md) stays in
+  Sync2Manager — it's orchestration, not network I/O.
+- New unit tests:
+  - Each HTTP op round-trips through worker correctly
+  - Retry policy fires on 429 / 5xx
+  - Typed errors deserialize correctly across the postMessage
+    boundary
+  - Network worker survives consecutive calls (no leaks)
+- Integration tests: existing J-series (API failures) suite runs
+  green against the network-worker-mediated client.
+
+**Acceptance:** all integration tests pass; no `requestUrl` calls
+on the main thread; the Blobs-API fallback lives entirely inside
+the network worker.
 
 ### Stage 7: Cancellation + UX polish (~3-4 hours)
 
