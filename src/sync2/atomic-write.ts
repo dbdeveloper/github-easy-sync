@@ -67,8 +67,9 @@ export const SYNC_BAK_SUFFIX = ".sync-bak";
 // trailing dots work cleanly.
 export const SYNC_MOD_MARKER_SUFFIX = ".sync-tmp.";
 
-// modifyMarkerPathFor: returns the marker path for a given
-// target. Same folder, dot-prefixed basename, `.sync-tmp.` suffix.
+// modifyMarkerPathFor: returns the modify-in-place marker path
+// for a given target. Same folder, dot-prefixed basename,
+// `.sync-tmp.` suffix.
 export function modifyMarkerPathFor(targetPath: string): string {
   const slashIdx = targetPath.lastIndexOf("/");
   const dir = slashIdx >= 0 ? targetPath.slice(0, slashIdx + 1) : "";
@@ -79,6 +80,11 @@ export function modifyMarkerPathFor(targetPath: string): string {
 // Inverse of modifyMarkerPathFor. Recognises a marker by its
 // shape — basename starts with `.`, ends with `.sync-tmp.` (literal
 // trailing dot), middle slice non-empty.
+//
+// Note: the atomic-rename strategy does NOT use a marker — the
+// presence of `.sync-bak` itself signals "rename in progress",
+// and the existing SHA-based recovery handles it correctly.
+// Adding a parallel `.sync-bak.` marker would be redundant.
 export function parseModifyMarkerPath(markerPath: string): string | null {
   if (!markerPath.endsWith(SYNC_MOD_MARKER_SUFFIX)) return null;
   const slashIdx = markerPath.lastIndexOf("/");
