@@ -615,93 +615,145 @@ and Blobs-API fallback (§3 item 7).
 on the main thread; the Blobs-API fallback lives entirely inside
 the network worker.
 
-### Stage 7: Cancellation + UX polish (~4-5 hours)
+### Stage 7: Cancellation + Settings rework + UX polish (~5-7 hours)
 
 Goal: user can abort a stuck sync without the cancel UI getting
 in the way of the common case (committing new changes while the
-drain is running).
+drain is running). The Settings page is reorganised so a single
+toggle controls the commit-vs-sync semantics, with two
+independent ribbon-visibility toggles layered on top.
 
-The earlier "second click on [Sync] = confirm-cancel modal"
-design was rejected (2026-05-30): it conflated three actions on
-the same button — commit new changes (frequent), trigger drain
-(frequent), cancel running drain (rare). A modal that fires on
-every click after the first inverts the priority, punishing the
-common case to handle the rare one. The redesign splits cleanly.
+#### Settings model
 
-**Default mode (single `[Sync with GitHub]` button):**
+The user-driven design rests on three orthogonal toggles. The
+first one is semantic (changes engine behaviour); the other two
+are purely UI.
 
-- First click: change detection + create/merge batch + start
-  drain. Same behaviour as today.
-- Subsequent clicks during drain: change detection + merge into
-  the latest pending batch (`mergeIntoLatestPending`). **No
-  modal, no cancel prompt** — the user is just adding more work.
-- Badge on the Sync ribbon icon: count of unsent commits.
-  Rationale: pending network work belongs visually near the
-  network action, so the badge stays on `[Sync]` regardless of
-  whether Commit and Sync are split or combined.
+**Semantic toggle: `syncStartsWithCommit` (default: true)**
 
-- **Cancel lives in Settings.** A new "Drain status" section at
-  the top of the plugin settings page shows:
-  - "Drain running for: 23 s" (live updating while page open)
-  - "Last error: …" (most recent, if any)
-  - `[Stop drain]` button — direct action, no confirmation modal
-    (Settings is already the deliberate path; double-protection
-    is friction)
-  - When idle: shows "Last sync: 2 min ago • 0 errors" or
-    similar passive state
+| Value | Behaviour |
+|---|---|
+| `true` | Single-click `[Sync with GitHub]` performs commit (change-detection + enqueue) **then** drains. Interval ticks and startup sync also do commit + drain. This matches today's behaviour and is the default. |
+| `false` | `[Sync with GitHub]` only drains the existing `.push-queue`. Commit is the user's separate action. Interval ticks and startup sync also drain only — if the queue is empty, they fall through to pull. |
 
-**Advanced split mode (Settings toggle "Split Commit and Sync
-buttons"):**
+This single toggle replaces the existing `autoCommitOnInterval`
+setting (which becomes redundant) and unifies the
+manual-vs-interval and startup-vs-runtime semantics under one
+choice.
 
-- `[Commit]` ribbon button: change detection + enqueue to
-  `.push-queue/`. Never touches the network. Repeat clicks just
-  add more commits.
-- `[Sync with GitHub]` ribbon button: drain only. Never commits.
-- Second click on `[Sync]` while drain running: the
-  cancel-confirmation modal IS appropriate here, because the
-  second click is a deliberate "what's going on with this
-  drain?" question, not a "I want to commit" request.
-- Modal content same as before — live progress + `[Cancel sync]`
-  / `[Keep going]`.
-- Badge on `[Sync]` (NOT `[Commit]`): pending-batch count.
-- Settings drain-status section stays present and works the
-  same way as in default mode.
+**UI toggle 1: `showSyncRibbonButton` (existing, default: true)**
 
-**Common implementation pieces (apply to both modes):**
+Always shows the `[Sync with GitHub]` ribbon icon when enabled.
+The icon's badge displays the count of unsent commits
+(`.push-queue/` length). The badge stays here regardless of
+mode — pending network work belongs visually near the network
+action.
 
-- Per-file progress state on `Sync2Manager` (`current`, `total`,
-  `currentPath`), surfaced via callback. Replaces the static
-  "Push 0/4 files to GitHub" counter that the field incident
-  showed as unhelpful.
-- Per-file Notice "Reconciling X/N: <path>".
-- Cancellation flag on `Sync2Manager` (`abortRequested`); drain
-  checks between files. If a Worker job is in flight, also calls
-  `worker.terminate()` so CPU-heavy operations stop immediately.
-- `Sync2Manager.cancelDrain()` method is the engine API; both
-  the Settings `[Stop drain]` button and the split-mode modal
-  call into it.
-- Settings page subscribes to a `drainStateChanged` event from
-  `Sync2Manager` (or polls on a short interval while visible) so
-  the live timer updates without overwhelming render budget.
-- Stuck-batch detection: passive Notice surfaces if drain has
-  been "running" for > 5 min, even in default mode where the
-  Sync button doesn't open a modal.
+**UI toggle 2: `showCommitRibbonButton` (NEW, default: false)**
 
-**Tests:**
+When enabled, shows a separate `[Commit]` ribbon icon.
+Independent of `syncStartsWithCommit`:
 
-- Unit: `cancelDrain()` mid-flight, with and without Worker jobs
-  in progress.
-- Unit (default mode): repeated Sync clicks during drain merge
-  into the latest pending batch, no modal opens.
+- With `syncStartsWithCommit = true` AND commit button visible:
+  the user can pre-stage extra commits before clicking Sync.
+  Three clicks of Commit then one click of Sync produces up to
+  4 commits queued (or 1 consolidated commit if "Consolidate
+  commits into one" is enabled — see below).
+- With `syncStartsWithCommit = false` AND commit button visible:
+  the canonical "split mode" — Commit enqueues, Sync drains.
+- With `syncStartsWithCommit = false` AND commit button hidden:
+  unusable shape. The settings UI should call this out (warning
+  badge next to the toggle, or disable the toggle combo). The
+  user can only drain; nothing ever gets queued.
+
+#### Renames and removals
+
+| Old name | New name | Why |
+|---|---|---|
+| `Auto-commit on interval sync` | (removed) | Subsumed by `syncStartsWithCommit` |
+| `Accumulate offline syncs into one commit` | `Consolidate commits into one (if possible)` | Now applies to offline batches **and** the case where Sync starts with commit + multiple files changed. |
+| `Push plugins data.json to GitHub` | `Sync plugins data.json` | Cleaner; same action |
+
+#### Settings migration
+
+`loadSettings()` runs a one-time migration on load:
+
+- If old `autoCommitOnInterval === true` → set
+  `syncStartsWithCommit = true` (no change — that was the user's
+  intent). Delete the old key.
+- If old `autoCommitOnInterval === false` → set
+  `syncStartsWithCommit = false`. Delete the old key.
+- Rename `accumulateOfflineSyncsIntoOne` → `consolidateCommits`.
+- Rename `pushPluginsDataJson` → `syncPluginsDataJson`.
+
+#### Cancellation UX
+
+Cancel is rare. It does NOT live on the Sync button in default
+single-button mode — modal-on-every-click frustrates the common
+"add another commit" case. Cancel lives in two places:
+
+1. **Settings, top of page — "Drain status" section.** Always
+   present. Shows:
+   - When idle: "Last sync: 2 min ago — 0 errors" (passive)
+   - When active: "Drain running for: 23 s" (live updating)
+   - Last error (if any) with timestamp
+   - `[Stop drain]` button — direct action, no confirmation
+     modal (Settings is already the deliberate path)
+
+2. **Split mode only (`syncStartsWithCommit = false` AND
+   commit-button visible)** — second click on Sync while drain
+   is running opens a confirmation modal. This is the only
+   layout where the second click is unambiguously "I'm asking
+   about this drain" — single-button mode interprets it as
+   "I want to commit too".
+
+#### Engine API
+
+`Sync2Manager.cancelDrain()` is the engine entry point. Both
+the Settings `[Stop drain]` button and the split-mode modal
+call it.
+
+Internally:
+- Sets `abortRequested = true` on `Sync2Manager`.
+- Drain checks the flag between files (cheap; just before each
+  `setTimeout(0)` yield added in Stage 2).
+- If a Worker job is in flight, calls `worker.terminate()` so
+  CPU-heavy operations stop immediately.
+- Cleanup: pending batch stays in `.attempted` state on disk so
+  the next sync retries cleanly.
+
+#### Live progress
+
+Per-file progress on `Sync2Manager`: `current`, `total`,
+`currentPath`. Surfaced via a `drainStateChanged` callback the
+Settings page subscribes to so the timer + status update without
+polling. Also drives a per-file Notice ("Reconciling X/N:
+<path>") that replaces the static "Push 0/4 files to GitHub"
+counter the field incident showed as unhelpful.
+
+#### Tests
+
+- Unit: `syncStartsWithCommit` toggle changes runtime semantics
+  (interval, startup, sync click), tested for both true/false.
+- Unit: setting migration — existing `autoCommitOnInterval`
+  values translate correctly; rename keys carry forward; users
+  with no value get the default.
+- Unit: `cancelDrain()` mid-flight, with and without Worker jobs.
+- Unit (default single-button mode): repeated Sync clicks during
+  drain merge into the latest pending batch; no modal opens.
 - Unit (split mode): Commit doesn't trigger drain; Sync doesn't
-  enqueue; second click on Sync opens modal.
-- Unit (toggle): enabling/disabling "Split Commit and Sync"
-  rewires the ribbon without losing drain state.
+  enqueue; second click on Sync opens the modal.
+- Unit (commit ribbon toggle independent): all four combinations
+  of `syncStartsWithCommit × showCommitRibbonButton` render the
+  ribbon as specified.
+- Unit (Settings warning): `syncStartsWithCommit = false` AND
+  `showCommitRibbonButton = false` surfaces a warning in
+  Settings about the unusable shape.
 - Integration (default mode): drain stuck → Settings shows
   timer + last error + `[Stop drain]` works.
 - Integration (split mode): cancel modal closes drain cleanly.
 
-**Acceptance:**
+#### Acceptance
 
 - Default mode: clicking Sync during drain never opens a cancel
   modal; Settings `[Stop drain]` returns UI to interactive
@@ -709,8 +761,10 @@ buttons"):**
 - Split mode: second click on `[Sync]` during drain opens
   confirmation modal within 1 second; `[Cancel sync]` returns
   UI to interactive state in another ~1 second.
-- The badge count on `[Sync]` matches `.push-queue/` length in
-  both modes.
+- Badge count on `[Sync]` matches `.push-queue/` length in all
+  four toggle combinations.
+- Existing users (loadSettings) migrate cleanly with no manual
+  action; their previous interval-commit behaviour is preserved.
 
 ### Stage 8: Perf tests + final size-guard tuning (~3 hours)
 
