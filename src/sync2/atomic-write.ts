@@ -2,7 +2,7 @@
 // Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
 // AGPL-3.0 — see LICENSE.
 
-import { Vault } from "obsidian";
+import { TFile, Vault } from "obsidian";
 import { calculateGitBlobSHA } from "../utils";
 import type SnapshotStore from "./snapshot-store";
 import { safeRename } from "./cross-platform";
@@ -133,6 +133,37 @@ export async function atomicWriteFile(
   bytes: ArrayBuffer,
   afterCommit?: () => Promise<void>,
 ): Promise<void> {
+  // Editor-friendly fast path: when the target file already exists
+  // in the vault (TFile present) and the runtime exposes the
+  // Obsidian-idiomatic vault.modifyBinary API, write in place. This
+  // crucially preserves any open MarkdownView's cursor + scroll
+  // position — the rename strategy below would otherwise close the
+  // view because Obsidian sees the rename as "the file at this path
+  // disappeared". The atomic-rename safety only matters for creating
+  // brand-new files; for modify-in-place, `modifyBinary` is what
+  // Obsidian's own pull/sync flows use.
+  //
+  // Defensive: mock-obsidian (unit tests) doesn't expose
+  // getAbstractFileByPath / modifyBinary, so the typeof checks
+  // gate the fast path. Production Obsidian on desktop + mobile
+  // ships both APIs.
+  const getter = (
+    vault as { getAbstractFileByPath?: (p: string) => unknown }
+  ).getAbstractFileByPath;
+  const modBin = (
+    vault as { modifyBinary?: (f: TFile, b: ArrayBuffer) => Promise<void> }
+  ).modifyBinary;
+  if (typeof getter === "function" && typeof modBin === "function") {
+    const existing = getter.call(vault, path);
+    if (existing instanceof TFile) {
+      await modBin.call(vault, existing, bytes);
+      if (afterCommit) {
+        await afterCommit();
+      }
+      return;
+    }
+  }
+
   // Pre-suffix staging paths so Obsidian's file explorer still
   // recognizes the staging file by extension (a `.md.sync-tmp`
   // file is hidden under "Show all file types: false" but a

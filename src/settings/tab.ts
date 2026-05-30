@@ -557,9 +557,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           "separate [Commit] ribbon button that enqueues local " +
           "changes to .push-queue without touching the network. " +
           "Most useful in split mode (`Sync starts with commit` " +
-          "OFF) where it's the only way to add commits — Settings " +
-          "shows a warning if you turn the master toggle OFF " +
-          "without enabling this.",
+          "OFF) where it's the only way to add commits.",
       )
       .addToggle((toggle) => {
         toggle
@@ -569,34 +567,11 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
             await this.plugin.saveSettings();
             if (value) this.plugin.showCommitRibbonIcon();
             else this.plugin.hideCommitRibbonIcon();
-            // Re-render to refresh the unusable-shape warning.
-            this.display();
           });
       });
 
-    // Unusable-shape warning surface: master toggle OFF AND commit
-    // ribbon button OFF means there's no way to commit anything.
-    // Sync only drains, but nothing ever gets enqueued. Surface
-    // a Notice-style warning right where the toggles live so the
-    // user can spot the misconfiguration without leaving the page.
-    if (
-      this.plugin.settings.syncStartsWithCommit === false &&
-      (this.plugin.settings.showCommitRibbonButton ?? false) === false
-    ) {
-      const warn = containerEl.createDiv();
-      warn.style.background = "var(--background-modifier-error)";
-      warn.style.color = "var(--text-on-accent)";
-      warn.style.padding = "0.75em 1em";
-      warn.style.borderRadius = "4px";
-      warn.style.margin = "0.5em 0 1em 0";
-      warn.style.fontSize = "0.9em";
-      warn.setText(
-        "⚠ Misconfigured: `Sync starts with commit` is OFF and " +
-          "`Show commit ribbon button` is OFF too. Nothing will " +
-          "ever be enqueued — Sync clicks only drain an already-empty " +
-          "queue. Turn one of the two ON to make the plugin usable.",
-      );
-    }
+    // (No "misconfigured shape" warning here — the user is
+    // responsible for their own toggle combinations.)
 
     // ── Logging ─────────────────────────────────────────────────────
     new Setting(containerEl).setName("Logging").setHeading();
