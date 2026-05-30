@@ -505,7 +505,7 @@ test machine, fallback works, all tests pass.
 Goal: parallel CPU work across the pool; UI stays responsive
 during multi-second compute.
 
-**Done (commits 2b62522, 7de39e1, 96c3bc2):**
+**Done (commits 2b62522, 7de39e1, 96c3bc2, f233291):**
 
 - ✅ `decode-base64`, `compute-git-blob-sha`, `merge-text` ops in
   `cpu-worker.ts`; node-diff3 bundled into worker IIFE
@@ -517,32 +517,29 @@ during multi-second compute.
 - ✅ Sync2Manager: 22 call sites migrated to `await workerClient`
   (15 calculateGitBlobSHA + 7 base64ToArrayBuffer)
 - ✅ PushQueue: 1 SHA call site migrated
+- ✅ `attemptAutoMerge` async with optional `mergeFn` param;
+  Sync2Manager passes the WorkerClient-backed wrapper. 3 call
+  sites in sync2-manager + 21 in conflict-detection.test.ts
+  updated.
 - ✅ main.ts: shared `WorkerClient` constructed at onload,
   terminated in onunload, injected into both Sync2Manager + PushQueue
 - ✅ 10 new unit tests (28 total worker tests). Suite at 663/663.
 - ✅ Bundle pipeline: worker sources inline as string literals;
   no `require("fs"|"path"|"os")` at module scope
 
-**Deferred to Stage 4 follow-up or later stages:**
+**Deferred to later stages:**
 
-- ⏳ mergeText through workerClient. `attemptAutoMerge` is
-  currently synchronous and lives in `conflict-detection.ts`;
-  making it async ripples through call sites and the conflict
-  classifier. The threshold gate (100 KB) means small merges
-  still run on main thread regardless — the win is for the
-  rare large-file merge case. Focused commit.
 - ⏳ Raise `RECONCILE_AUTO_MERGE_LIMIT` — defer to Stage 8 perf
   tests which provide the empirical baseline.
 - ⏳ Integration tests against real GitHub with 3 MB divergence —
   natural Stage 4/8 follow-up; the unit tests already prove
   byte-exact identity between worker and main paths.
 
-**Acceptance (current):** UI stays responsive during multi-MB
-SHA computation and base64 decode on a Pixel 6 Pro running
-Obsidian Mobile — the hot-path operations that motivated the
-rework are now off the main thread. mergeText migration is
-needed before the acceptance criterion for "merge of 1-3 MB
-inputs" is fully met, but the foundation is solid.
+**Acceptance met:** UI stays responsive on Pixel 6 Pro running
+Obsidian Mobile during multi-MB SHA computation, base64 decode,
+AND 3-way merge — all three hot-path CPU operations that
+motivated the rework are now off the main thread when they cross
+their respective size thresholds.
 
 ### Stage 5: SHA-first as default (manifest mtime+size cache + reconcile rework) (~5-7 hours)
 
