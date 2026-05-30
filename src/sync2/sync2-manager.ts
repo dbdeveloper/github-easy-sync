@@ -3,6 +3,7 @@
 // AGPL-3.0 — see LICENSE.
 
 import { Vault, arrayBufferToBase64, base64ToArrayBuffer } from "obsidian";
+import WorkerClient from "../worker/worker-client";
 import {
   GetTreeResponseItem,
   NewTreeRequestItem,
@@ -362,6 +363,15 @@ export interface Sync2ManagerDeps {
   renameFile?: (oldPath: string, newPath: string) => Promise<void>;
   // Override the clock for deterministic tests.
   now?: () => number;
+  // Optional Worker orchestra controller. When provided, hot-path
+  // CPU operations (SHA computation, base64 decode, 3-way merge)
+  // dispatch through the worker pool — threshold-gated, large
+  // inputs only. When omitted (most unit tests, fallback
+  // environments), a default WorkerClient is constructed which
+  // falls back to main-thread execution since Web Worker isn't
+  // available in Node test environment. Either way the algorithms
+  // are byte-exact (worker and fallback share the same code).
+  workerClient?: WorkerClient;
 }
 
 export class Sync2Manager {
@@ -381,6 +391,7 @@ export class Sync2Manager {
   private readonly conflictWatcher: ConflictWatcher | undefined;
   private readonly conflictCounter: ConflictCounter | undefined;
   private readonly accumulateOfflineSyncs: boolean;
+  private readonly workerClient: WorkerClient;
   private readonly onProgress: ProgressFactory | undefined;
   private readonly onLocalCommitted:
     | ((filesCount: number) => void)
@@ -429,6 +440,7 @@ export class Sync2Manager {
     this.conflictWatcher = deps.conflictWatcher;
     this.conflictCounter = deps.conflictCounter;
     this.accumulateOfflineSyncs = deps.accumulateOfflineSyncs ?? false;
+    this.workerClient = deps.workerClient ?? new WorkerClient();
     this.onProgress = deps.onProgress;
     this.onLocalCommitted = deps.onLocalCommitted;
     this.onNoLocalChanges = deps.onNoLocalChanges;
@@ -875,7 +887,7 @@ export class Sync2Manager {
             (await this.vault.adapter.exists(f.filename))
           ) {
             const localBuf = await this.vault.adapter.readBinary(f.filename);
-            const localSha = await calculateGitBlobSHA(localBuf);
+            const localSha = await this.workerClient.computeGitBlobSHA(localBuf);
             if (localSha === f.sha) {
               const stat = await this.vault.adapter.stat(f.filename);
               if (stat) {
@@ -1283,7 +1295,7 @@ export class Sync2Manager {
               sha: item.sha,
               retry: true,
             });
-            const bytes = base64ToArrayBuffer(blob.content);
+            const bytes = await this.workerClient.decodeBase64(blob.content);
             if (hasTextExtension(canonical)) {
               const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
                 bytes,
@@ -1331,7 +1343,7 @@ export class Sync2Manager {
         }
 
         const localBuf = await this.vault.adapter.readBinary(filePath);
-        const localSha = await calculateGitBlobSHA(localBuf);
+        const localSha = await this.workerClient.computeGitBlobSHA(localBuf);
 
         if (localSha === item.sha) {
           // Identical content. Stat-cache the snapshot so subsequent
@@ -1421,7 +1433,7 @@ export class Sync2Manager {
     item: GetTreeResponseItem,
   ): Promise<void> {
     const blob = await this.client.getBlob({ sha: item.sha, retry: true });
-    const bytes = base64ToArrayBuffer(blob.content);
+    const bytes = await this.workerClient.decodeBase64(blob.content);
     if (hasTextExtension(filePath)) {
       const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
       const { canonicalSha, changed } = await this.writeRemoteText(
@@ -1516,7 +1528,7 @@ export class Sync2Manager {
       return;
     }
 
-    const theirsBytes = base64ToArrayBuffer(blob.content) as ArrayBuffer;
+    const theirsBytes = await this.workerClient.decodeBase64(blob.content) as ArrayBuffer;
 
     // Case 2: ours deleted, theirs modified → delete-vs-modify.
     if (localChange.kind === "deleted") {
@@ -1540,7 +1552,7 @@ export class Sync2Manager {
       : new ArrayBuffer(0);
     const baseFetched = await this.safeFetchContents(path, baseRef);
     const baseBytes = baseFetched
-      ? (base64ToArrayBuffer(baseFetched.content) as ArrayBuffer)
+      ? (await this.workerClient.decodeBase64(baseFetched.content))
       : null;
 
     let pluginJs: PluginJsContext | undefined;
@@ -1595,7 +1607,7 @@ export class Sync2Manager {
       kind: "modify-vs-modify",
       theirsContent: theirsBytes,
       theirsBlobSha: blob.sha,
-      oursBlobSha: await calculateGitBlobSHA(oursBytes),
+      oursBlobSha: await this.workerClient.computeGitBlobSHA(oursBytes),
       remoteDevice: await this.fetchRemoteDevice(headRef),
       fromBatchId: null,
     });
@@ -1606,7 +1618,7 @@ export class Sync2Manager {
     base64Content: string,
     afterCommit?: () => Promise<void>,
   ): Promise<void> {
-    const bytes = base64ToArrayBuffer(base64Content);
+    const bytes = await this.workerClient.decodeBase64(base64Content);
     await this.ensureParentDir(path);
     // Atomic-with-backup: a crash mid-write (especially of a plugin's
     // manifest.json or main.js bundle) would otherwise leave the file
@@ -1677,7 +1689,7 @@ export class Sync2Manager {
     return {
       baseMtime: stat.mtime,
       baseSize: stat.size,
-      baseSha: await calculateGitBlobSHA(bytes),
+      baseSha: await this.workerClient.computeGitBlobSHA(bytes),
     };
   }
 
@@ -1990,7 +2002,7 @@ export class Sync2Manager {
       if (exists) {
         const buf = await this.vault.adapter.readBinary(closedPath);
         content = new Uint8Array(buf);
-        contentSha = await calculateGitBlobSHA(buf);
+        contentSha = await this.workerClient.computeGitBlobSHA(buf);
       }
       await this.queue.enqueueSynthetic({
         path: closedPath,
@@ -2103,7 +2115,7 @@ export class Sync2Manager {
     const bytes = new TextEncoder().encode(canonical).buffer as ArrayBuffer;
     // Atomic-with-backup. See writeBinaryRemote rationale.
     await atomicWriteFile(this.vault, path, bytes, afterCommit);
-    const canonicalSha = await calculateGitBlobSHA(bytes);
+    const canonicalSha = await this.workerClient.computeGitBlobSHA(bytes);
     return { canonicalSha, changed };
   }
 
@@ -2125,7 +2137,7 @@ export class Sync2Manager {
       const { content: canonical } = normalizeText(remoteText);
       const canonicalBytes = new TextEncoder().encode(canonical)
         .buffer as ArrayBuffer;
-      const canonicalSha = await calculateGitBlobSHA(canonicalBytes);
+      const canonicalSha = await this.workerClient.computeGitBlobSHA(canonicalBytes);
       return localSha === canonicalSha;
     } catch {
       // Fail closed: if we can't fetch / decode the blob, fall through
@@ -2857,7 +2869,7 @@ export class Sync2Manager {
       const theirsBytes =
         theirsFetched === null
           ? null
-          : (base64ToArrayBuffer(theirsFetched.content) as ArrayBuffer);
+          : (await this.workerClient.decodeBase64(theirsFetched.content));
       // Diagnostic probe after both blobs are in memory — this is
       // the peak-byte point of the iteration. Lazy lambda; runs only
       // when logging is enabled.
@@ -2873,7 +2885,7 @@ export class Sync2Manager {
             : null,
       }));
       const baseBytes = baseFetched
-        ? (base64ToArrayBuffer(baseFetched.content) as ArrayBuffer)
+        ? (await this.workerClient.decodeBase64(baseFetched.content))
         : null;
 
       // Convergence short-circuit: if ours.bytes === theirs.bytes,
@@ -2897,7 +2909,7 @@ export class Sync2Manager {
         theirsFetched !== null &&
         oursBytes.byteLength === theirsBytes.byteLength
       ) {
-        const oursSha = await calculateGitBlobSHA(oursBytes);
+        const oursSha = await this.workerClient.computeGitBlobSHA(oursBytes);
         if (oursSha === theirsFetched.sha) {
           await this.detector.recordSync(path, theirsFetched.sha);
           await this.queue.removeFile(batchId, path);
@@ -2952,7 +2964,7 @@ export class Sync2Manager {
         // This is the §0 P2 (SHA-first by default) principle
         // applied to the size-guard path. Stage 5 generalises
         // the same idea across the entire reconcile flow.
-        const oursSha = await calculateGitBlobSHA(oursBytes);
+        const oursSha = await this.workerClient.computeGitBlobSHA(oursBytes);
         if (theirsFetched !== null && oursSha === theirsFetched.sha) {
           await this.detector.recordSync(path, theirsFetched.sha);
           await this.queue.removeFile(batchId, path);
@@ -3056,7 +3068,7 @@ export class Sync2Manager {
         kind: "modify-vs-modify",
         theirsContent: theirsBytes!,
         theirsBlobSha: theirsFetched!.sha,
-        oursBlobSha: await calculateGitBlobSHA(oursBytes),
+        oursBlobSha: await this.workerClient.computeGitBlobSHA(oursBytes),
         remoteDevice: await this.fetchRemoteDevice(currentHead),
         fromBatchId: batchId,
       });
@@ -3087,7 +3099,7 @@ export class Sync2Manager {
       }
       // Remote modified since base → register delete-vs-modify.
       // ours = "deleted", theirs = remote bytes.
-      const theirsBytes = base64ToArrayBuffer(theirs.content) as ArrayBuffer;
+      const theirsBytes = await this.workerClient.decodeBase64(theirs.content) as ArrayBuffer;
       await this.queue.removeDeletion(batchId, path);
       await this.registerConflictAndDropPath({
         vaultPath: path,
@@ -3228,8 +3240,8 @@ export class Sync2Manager {
           vaultPath: path,
           kind: "modify-vs-modify",
           theirsContent: newOurs,
-          theirsBlobSha: await calculateGitBlobSHA(newOurs),
-          oursBlobSha: await calculateGitBlobSHA(oursBytes),
+          theirsBlobSha: await this.workerClient.computeGitBlobSHA(newOurs),
+          oursBlobSha: await this.workerClient.computeGitBlobSHA(oursBytes),
           remoteDevice: await this.fetchRemoteDevice(currentHead),
           fromBatchId: id,
         });
@@ -3283,7 +3295,7 @@ export class Sync2Manager {
         // assigned (it's deterministic).
         const buf = new TextEncoder().encode(entry.content)
           .buffer as ArrayBuffer;
-        out.set(entry.path, await calculateGitBlobSHA(buf));
+        out.set(entry.path, await this.workerClient.computeGitBlobSHA(buf));
       }
     }
     return out;

@@ -28,6 +28,7 @@ import PendingDeletionsStore from "./sync2/pending-deletions-store";
 import { ConflictCounter } from "./sync2/conflict-counter";
 import { ConflictWatcher } from "./sync2/conflict-watcher";
 import { ConflictStatusIndicator } from "./sync2/views/conflict-status-indicator";
+import WorkerClient from "./worker/worker-client";
 import { PreSyncConflictModal } from "./sync2/views/pre-sync-conflict-modal";
 import manifest from "../manifest.json";
 
@@ -50,6 +51,13 @@ export default class GitHubSyncPlugin extends Plugin {
   conflictWatcher!: ConflictWatcher;
   conflictCounter!: ConflictCounter;
   logger!: Logger;
+  // Shared Worker orchestra controller — lazy-init at onload, kept
+  // alive for the plugin lifetime, terminated on onunload. Stage 4
+  // routes hot-path CPU operations (SHA computation, base64 decode,
+  // 3-way merge) through this orchestra. Threshold-gated: small
+  // inputs run inline on the main thread; only large ones round-trip
+  // to the worker pool.
+  workerClient!: WorkerClient;
   // Exposed for the settings tab's "Push plugins data.json" toggle,
   // which reads/writes the allow line directly via this owner.
   invariants!: GitignoreInvariants;
@@ -185,6 +193,9 @@ export default class GitHubSyncPlugin extends Plugin {
       this.vaultRenameListener = null;
     }
     this.conflictWatcher?.stop();
+    // Terminate Worker pool — each Worker holds Blob URLs + a thread
+    // that the OS would otherwise keep alive until process exit.
+    this.workerClient?.terminate();
   }
 
   // ── settings ────────────────────────────────────────────────────────
@@ -436,6 +447,7 @@ export default class GitHubSyncPlugin extends Plugin {
     conflictWatcher.start();
     this.conflictWatcher = conflictWatcher;
 
+    this.workerClient = new WorkerClient();
     this.sync2Manager = new Sync2Manager({
       vault: this.app.vault,
       store,
@@ -447,6 +459,7 @@ export default class GitHubSyncPlugin extends Plugin {
       invariants: this.invariants,
       configDir: this.app.vault.configDir,
       selfPluginId: manifest.id,
+      workerClient: this.workerClient,
       // Label read live from settings so the user can change it in
       // the settings tab and the next sync picks up the new value —
       // no plugin reload needed. Commit messages themselves are
