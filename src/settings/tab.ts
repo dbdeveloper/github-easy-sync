@@ -400,13 +400,15 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Sync starts with commit")
       .setDesc(
-        "Master toggle (default ON). When ON, every Sync surface " +
-          "(manual click, interval, startup) does change-detection + " +
-          "commit + drain — today's default behaviour. When OFF, Sync " +
-          "only drains the existing .push-queue (or pulls when empty); " +
-          "commit becomes the user's separate action via the [Commit] " +
-          "ribbon button. Turn the [Commit] ribbon button ON below if " +
-          "you choose this — otherwise nothing ever gets enqueued.",
+        "Master toggle (default ON). When ON, every Sync action " +
+          "(manual click, interval, startup) first commits your " +
+          "local changes, then uploads them to GitHub — today's " +
+          "default behaviour. When OFF, Sync only uploads the " +
+          "commits you've already staged (or pulls when there's " +
+          "nothing to upload); committing becomes a separate action " +
+          "via the [Commit] ribbon button. Turn the [Commit] ribbon " +
+          "button ON below if you choose this — otherwise nothing " +
+          "ever gets staged.",
       )
       .addToggle((toggle) => {
         toggle
@@ -440,13 +442,13 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Consolidate commits into one (if possible)")
       .setDesc(
-        "Fold consecutive commit-enqueue actions into the same " +
-          ".push-queue batch when no drain has happened in between. " +
-          "Covers two cases: (1) offline-accumulate — when push is " +
-          "pending and new Sync clicks arrive, they merge into the " +
-          "stuck batch so eventual replay is one commit; (2) split-mode " +
-          "[Commit] taps — clicking [Commit] several times in a row " +
-          "without an intervening [Sync] collapses into one batch.",
+        "Fold consecutive commits into a single batch when no " +
+          "upload has happened in between. Covers two cases: " +
+          "(1) Offline accumulate — when an upload is pending and " +
+          "new Sync clicks arrive, they merge into the stuck batch " +
+          "so eventual replay is one commit; (2) Split-mode " +
+          "[Commit] taps — clicking [Commit] several times in a " +
+          "row without an intervening [Sync] collapses into one batch.",
       )
       .addToggle((toggle) =>
         toggle
@@ -660,7 +662,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       this.drainStatusTickTimer = null;
     }
 
-    new Setting(parent).setName("Drain status").setHeading();
+    new Setting(parent).setName("GitHub sync status").setHeading();
 
     const card = parent.createDiv();
     card.style.padding = "0.75em 1em";
@@ -677,7 +679,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     errorLine.style.color = "var(--text-error)";
     const stopBtnWrap = card.createDiv();
     stopBtnWrap.style.marginTop = "0.5em";
-    const stopBtn = stopBtnWrap.createEl("button", { text: "Stop drain" });
+    const stopBtn = stopBtnWrap.createEl("button", { text: "Stop sync" });
     stopBtn.style.padding = "0.4em 0.9em";
     stopBtn.style.background = "var(--background-modifier-error)";
     stopBtn.style.color = "var(--text-on-accent)";
@@ -686,7 +688,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     stopBtn.style.cursor = "pointer";
     stopBtn.addEventListener("click", () => {
       this.plugin.sync2Manager.cancelDrain();
-      new Notice("Drain cancellation requested.", 4000);
+      new Notice("Sync cancellation requested.", 4000);
     });
 
     const render = (status: ReturnType<
@@ -702,7 +704,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
             ? `${status.currentFile} / ${status.totalFiles}`
             : "—";
         statusLine.setText(
-          `🌀 Drain running for ${elapsed}s\n` +
+          `🌀 Syncing with GitHub for ${elapsed}s\n` +
             `Currently: ${pathLabel}\n` +
             `File: ${counter}`,
         );
@@ -713,7 +715,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           ), 1000);
         }
       } else {
-        statusLine.setText("⏸ Drain idle");
+        statusLine.setText("⏸ Sync idle");
         stopBtn.style.display = "none";
         if (this.drainStatusTickTimer !== null) {
           clearInterval(this.drainStatusTickTimer);
