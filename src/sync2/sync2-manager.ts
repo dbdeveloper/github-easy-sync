@@ -641,6 +641,19 @@ export class Sync2Manager {
     this.logger.info("Sync2 cancelDrain requested");
   }
 
+  // Stage 7 error capture. Called by main.ts's sync() catch block
+  // (and backgroundDrain) right before re-throwing or swallowing
+  // an error. Surfaces in the Settings drain-status section as
+  // "⚠ Last error (Ns ago): {message}". Survives drain completion
+  // — only overwritten on the next error or cleared by a successful
+  // next drain.
+  recordDrainError(err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err);
+    this.emitDrainStatus({
+      lastError: { message, whenMs: Date.now() },
+    });
+  }
+
   // Subscribe to drain status changes (Stage 7 Settings "Drain
   // status" section). Returns an unsubscribe function.
   setDrainStatusListener(listener: (s: DrainStatus) => void): () => void {

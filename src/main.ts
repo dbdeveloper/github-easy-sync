@@ -659,6 +659,9 @@ export default class GitHubSyncPlugin extends Plugin {
       // log showed nothing, making bug reports actionable only when
       // the user happened to screenshot the toast in time.
       this.logger.error("syncAll click failed", { err: describeError(err) });
+      // Stage 7: surface in the Settings drain-status section so
+      // the user sees "Last error: …" without opening the log.
+      this.sync2Manager.recordDrainError(err);
       new Notice(`Error syncing. ${err}`);
     }
     // Drain may have mutated ConflictStore (Phase A SHA-match
@@ -679,6 +682,7 @@ export default class GitHubSyncPlugin extends Plugin {
       await this.sync2Manager.resumeQueue();
     } catch (err) {
       void this.logger.error("Interval drain failed", `${err}`);
+      this.sync2Manager.recordDrainError(err);
     }
   }
 
