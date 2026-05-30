@@ -674,17 +674,23 @@ Independent of `syncStartsWithCommit`:
 | `Accumulate offline syncs into one commit` | `Consolidate commits into one (if possible)` | Now applies to offline batches **and** the case where Sync starts with commit + multiple files changed. |
 | `Push plugins data.json to GitHub` | `Sync plugins data.json` | Cleaner; same action |
 
-#### Settings migration
+#### Settings migration — none. Manual `data.json` update.
 
-`loadSettings()` runs a one-time migration on load:
+The plugin user base is currently one person (the project owner)
+with two devices (desktop + mobile). Writing a one-time migration
+that runs in `loadSettings()`, then carries forward dormantly in
+every later release, is more code than the situation calls for.
 
-- If old `autoCommitOnInterval === true` → set
-  `syncStartsWithCommit = true` (no change — that was the user's
-  intent). Delete the old key.
-- If old `autoCommitOnInterval === false` → set
-  `syncStartsWithCommit = false`. Delete the old key.
-- Rename `accumulateOfflineSyncsIntoOne` → `consolidateCommits`.
-- Rename `pushPluginsDataJson` → `syncPluginsDataJson`.
+When Stage 7 ships, the implementation will print the new
+expected shape of `data.json` to the plugin log on first load
+(only when the OLD keys are still present). The user copies the
+diff to each device by hand. After two reloads (one per device)
+the OLD keys are gone, the new keys are stable, and the
+migration code never has to exist.
+
+If the user base grows past this person before Stage 7 ships,
+revisit — adding a real migration is then ~10 lines and worth
+the cost.
 
 #### Cancellation UX
 
@@ -735,9 +741,8 @@ counter the field incident showed as unhelpful.
 
 - Unit: `syncStartsWithCommit` toggle changes runtime semantics
   (interval, startup, sync click), tested for both true/false.
-- Unit: setting migration — existing `autoCommitOnInterval`
-  values translate correctly; rename keys carry forward; users
-  with no value get the default.
+- (No migration test — see "Settings migration" above; manual
+  data.json update.)
 - Unit: `cancelDrain()` mid-flight, with and without Worker jobs.
 - Unit (default single-button mode): repeated Sync clicks during
   drain merge into the latest pending batch; no modal opens.
@@ -763,8 +768,9 @@ counter the field incident showed as unhelpful.
   UI to interactive state in another ~1 second.
 - Badge count on `[Sync]` matches `.push-queue/` length in all
   four toggle combinations.
-- Existing users (loadSettings) migrate cleanly with no manual
-  action; their previous interval-commit behaviour is preserved.
+- The Stage 7 ship-time log line clearly enumerates the OLD →
+  NEW key mapping so the user can update each device's
+  `data.json` by hand without having to read the diff.
 
 ### Stage 8: Perf tests + final size-guard tuning (~3 hours)
 
