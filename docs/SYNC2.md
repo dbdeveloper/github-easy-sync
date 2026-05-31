@@ -1446,14 +1446,28 @@ ONLY signal. That's why it's essential there.
 Added in 2.0.2-beta2. When a Sync delivers updated files to some
 plugin's directory under `<configDir>/plugins/<id>/`, Obsidian
 keeps running the OLD code in memory until the user manually
-disables + re-enables the plugin. The fix is to call Obsidian's
-internal `app.plugins.reloadPlugin(id)` at the end of any drain
-or recovery sweep that touched a plugin file.
+disables + re-enables the plugin. The fix is to perform that
+reload programmatically at the end of any drain or recovery sweep
+that touched a plugin file.
 
-This is BRAT's pattern (the Beta Reviewers Auto-update Tool
-calls `reloadPlugin` after each install) applied to the sync
-flow. The API is documented but not in Obsidian's public
-typings; we access it via `(this.app as any).plugins.reloadPlugin`.
+**The reload primitive (`reloadPluginById`).** None of Obsidian's
+plugin-manager methods are in the public typings; we feature-detect.
+A first implementation assumed `app.plugins.reloadPlugin(id)` and
+shipped — then a field report (2026-05-31) showed it failing
+silently on **Obsidian Mobile**, where `reloadPlugin` does **not
+exist**. The log carried the tell: *"BRAT-style reload requested but
+app.plugins.reloadPlugin is unavailable"*. The portable primitive is
+the one BRAT actually uses: **`disablePlugin(id)` then
+`enablePlugin(id)`**, which exists on desktop and mobile alike.
+
+`reloadPluginById(app, id)` therefore prefers `reloadPlugin` when
+present (a single atomic call on desktop) and otherwise falls back
+to `disablePlugin` + `enablePlugin`. For a self-reload this means
+the running instance disables itself (its `onunload` runs), then
+re-enables — loading the new `main.js` already on disk from the
+marker swap (§12). `canReloadPlugins` gates the whole path: if
+neither mechanism is present, the engine logs a warning and skips
+rather than throwing.
 
 ### 11.1 Which paths trigger reload
 

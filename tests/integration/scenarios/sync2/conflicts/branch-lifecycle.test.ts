@@ -124,7 +124,7 @@ describe.skipIf(!integrationEnabled())(
         // Branch commit messages use the hardcoded format
         // `conflict ({deviceLabel})` — see src/sync2/commit-message.ts.
         const messages = await getBranchCommitMessages(cb!.name);
-        expect(messages.some((m) => m.startsWith("conflict ("))).toBe(true);
+        expect(messages.some((m) => m.startsWith("Conflict at "))).toBe(true);
 
         // Main on remote still has theirs (push skipped the path).
         expect(await readRemoteFile(branch, "note.md")).toBe(

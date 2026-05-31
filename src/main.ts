@@ -3,6 +3,7 @@
 // AGPL-3.0 — see LICENSE.
 
 import {
+  App,
   EventRef,
   MarkdownView,
   Plugin,
@@ -47,6 +48,58 @@ import manifest from "../manifest.json";
 // sweet spot — long enough to read "Commit 3 files" without rushing,
 // short enough that consecutive Sync clicks don't stack notices.
 const BRIEF_NOTICE_MS = 700;
+
+// Internal Obsidian plugin-manager surface we touch for the
+// BRAT-style auto-reload (§20/§21). None of these are in the public
+// typings; we feature-detect each.
+interface ObsidianPluginManager {
+  enabledPlugins?: Set<string>;
+  reloadPlugin?: (id: string) => Promise<void>;
+  disablePlugin?: (id: string) => Promise<void>;
+  enablePlugin?: (id: string) => Promise<void>;
+}
+
+function pluginManagerOf(app: App): ObsidianPluginManager | undefined {
+  return (app as unknown as { plugins?: ObsidianPluginManager }).plugins;
+}
+
+// True when SOME reload mechanism is available — `reloadPlugin`
+// (desktop) OR the `disablePlugin` + `enablePlugin` pair (universal,
+// including Obsidian Mobile, where `reloadPlugin` does NOT exist —
+// the field-reported 2026-05-31 bug).
+function canReloadPlugins(pm: ObsidianPluginManager | undefined): boolean {
+  if (!pm) return false;
+  if (typeof pm.reloadPlugin === "function") return true;
+  return (
+    typeof pm.disablePlugin === "function" &&
+    typeof pm.enablePlugin === "function"
+  );
+}
+
+// Reload a plugin by id. Prefers the single-call `reloadPlugin` when
+// present; otherwise falls back to disable-then-enable, which is what
+// BRAT uses and what works on Obsidian Mobile. For self-reload the
+// caller schedules this on a timeout so the current stack unwinds
+// before `disablePlugin(self)` tears the running instance down; the
+// new code is already on disk (the marker swap completed), so
+// `enablePlugin` loads it.
+async function reloadPluginById(app: App, id: string): Promise<void> {
+  const pm = pluginManagerOf(app);
+  if (!pm) throw new Error("app.plugins unavailable");
+  if (typeof pm.reloadPlugin === "function") {
+    await pm.reloadPlugin(id);
+    return;
+  }
+  if (
+    typeof pm.disablePlugin === "function" &&
+    typeof pm.enablePlugin === "function"
+  ) {
+    await pm.disablePlugin(id);
+    await pm.enablePlugin(id);
+    return;
+  }
+  throw new Error("no reload mechanism available (reloadPlugin / disable+enable)");
+}
 
 // Plugin entry point. Orchestrates Sync2Manager + ConflictStore;
 // commands, ribbons, settings tab, and IntervalScheduler wiring live
@@ -149,10 +202,16 @@ export default class GitHubSyncPlugin extends Plugin {
           adapter: this.app.vault.adapter,
           pluginDir: `${this.app.vault.configDir}/plugins/${manifest.id}`,
           reloadPlugin: () => {
-            const plugins = (this.app as unknown as {
-              plugins?: { reloadPlugin?: (id: string) => Promise<void> };
-            }).plugins;
-            void plugins?.reloadPlugin?.(manifest.id);
+            void reloadPluginById(this.app, manifest.id).catch((err) => {
+              try {
+                console.error(
+                  "[github-easy-sync] self-reload failed",
+                  err,
+                );
+              } catch {
+                // ignore
+              }
+            });
           },
           notice: (msg, durationMs) => new Notice(msg, durationMs),
         });
@@ -1346,34 +1405,28 @@ export default class GitHubSyncPlugin extends Plugin {
 
   // 2.0.2-beta2 BRAT-style auto-reload handler. Called by Sync2Manager
   // at end of a successful drain with the IDs of plugins whose files
-  // were just written. For each ID where the plugin is currently
-  // enabled, schedule app.plugins.reloadPlugin(id) via setTimeout.
-  // The 500ms delay lets the drain stack frame unwind so Obsidian's
-  // plugin lifecycle gets a clean teardown.
+  // were just written. For each enabled affected plugin, reload it via
+  // `reloadPluginById` (reloadPlugin on desktop; disable+enable on
+  // Mobile, where reloadPlugin does NOT exist — the field-reported
+  // 2026-05-31 bug). Scheduled on a 500ms timeout so the drain stack
+  // frame unwinds before a self-reload tears this instance down.
   private handlePluginsAffectedReload(ids: string[]): void {
-    // Obsidian's `app.plugins` is documented but not in the public
-    // typings; access via `any` and guard each step.
-    const plugins = (this.app as unknown as {
-      plugins?: {
-        enabledPlugins?: Set<string>;
-        reloadPlugin?: (id: string) => Promise<void>;
-      };
-    }).plugins;
-    if (!plugins?.reloadPlugin) {
+    const plugins = pluginManagerOf(this.app);
+    if (!canReloadPlugins(plugins)) {
       this.logger?.warn(
-        "BRAT-style reload requested but app.plugins.reloadPlugin is unavailable",
+        "BRAT-style reload requested but no reload mechanism is available " +
+          "(neither app.plugins.reloadPlugin nor disablePlugin+enablePlugin)",
         { ids },
       );
       return;
     }
-    const enabled = plugins.enabledPlugins;
+    const enabled = plugins?.enabledPlugins;
     const willReload: string[] = [];
     for (const id of ids) {
       // Skip disabled plugins — reload would just enable them, which
-      // is surprising. Skip OURSELVES too unless our own main.js was
-      // actually replaced — atomicWriteFile already swapped on disk,
-      // so reload picks up the new code via Obsidian's normal load
-      // path. We treat self the same as any other plugin.
+      // is surprising. Self (github-easy-sync) is treated the same as
+      // any other plugin: the new main.js is already on disk (the
+      // marker swap completed), so disable+enable loads the new code.
       if (enabled !== undefined && !enabled.has(id)) {
         this.logger?.info(
           "BRAT-style reload skipped: plugin not enabled",
@@ -1386,14 +1439,16 @@ export default class GitHubSyncPlugin extends Plugin {
     if (willReload.length === 0) return;
     for (const id of willReload) {
       setTimeout(() => {
-        try {
-          void plugins.reloadPlugin!(id);
-        } catch (err) {
-          this.logger?.error("reloadPlugin call threw", {
-            id,
-            err: describeError(err),
+        reloadPluginById(this.app, id)
+          .then(() => {
+            this.logger?.info("BRAT-style reload done", { id });
+          })
+          .catch((err) => {
+            this.logger?.error("reloadPlugin failed", {
+              id,
+              err: describeError(err),
+            });
           });
-        }
       }, 500);
     }
     const label =

@@ -136,7 +136,7 @@ describe.skipIf(!integrationEnabled())(
         // At least 2 conflict commits now: initial registration +
         // the edit-while-in-conflict push.
         const conflictCommitCount = messages.filter((m) =>
-          m.startsWith("conflict ("),
+          m.startsWith("Conflict at "),
         ).length;
         expect(conflictCommitCount).toBeGreaterThanOrEqual(2);
 
