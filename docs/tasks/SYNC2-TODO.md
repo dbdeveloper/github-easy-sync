@@ -80,6 +80,72 @@ in the drain-status section that links to the same modal. So even
 if the modal-throttle has elapsed, the user sees the actionable
 state.
 
+### BRAT-style auto-reload after pull (synced plugins on mobile)
+
+When `syncConfigDir = true` (or when the `Sync plugins data.json`
+gate is on for a specific plugin), an updated `main.js` /
+`manifest.json` for some plugin under
+`<configDir>/plugins/<id>/` may land on the device via the pull
+step. Without an explicit reload, Obsidian keeps running the OLD
+code from memory — the user has to disable + re-enable the
+plugin by hand, which they often forget. BRAT solves this by
+calling Obsidian's internal `app.plugins.reloadPlugin(id)` after
+each install/update; we should mirror that.
+
+Public Obsidian API: `app.plugins.reloadPlugin(pluginId: string)`
+— deprecated in name but stable for years; what BRAT and the
+Community Plugins store both use under the hood.
+
+Trigger detection — at the end of a successful drain, walk
+the just-pulled paths for the
+`<configDir>/plugins/<id>/(main.js|manifest.json|styles.css)`
+shape; collect the affected plugin IDs. For each ID where the
+plugin is currently enabled in `this.app.plugins.enabledPlugins`,
+schedule a reload. Skip IDs that were just disabled or aren't
+recognised.
+
+Self-reload (github-easy-sync reloading itself) is the
+interesting case. Two cooperating mechanisms:
+
+  1. Marker file: write a zero-byte
+     `<vault>/<configDir>/plugins/github-easy-sync/.reload-pending`
+     RIGHT AFTER the drain commits the new code to disk but
+     BEFORE the reload actually fires. If a crash or
+     mid-reload teardown leaves the plugin in a half-state,
+     the marker survives on disk. The plugin's next onload
+     pass observes the marker → calls
+     `app.plugins.reloadPlugin('github-easy-sync')` from a
+     deferred `setTimeout(..., 0)` (so onload returns first,
+     then Obsidian starts the reload from a clean call
+     stack) → removes the marker after the call resolves.
+
+  2. Deferred reload via `setTimeout`: in the happy path, the
+     reload is scheduled with a small delay (say 500 ms) AFTER
+     drain.finally has executed and the snapshot is persisted.
+     This keeps the call clear of any in-flight `await drain`
+     stack frame so Obsidian's plugin lifecycle can wire down
+     the old instance cleanly before bringing up the new one.
+
+Combined: the marker is the crash-safe backstop, the timeout is
+the normal path. Either way, the user sees a brief
+`"Plugin github-easy-sync updated — reloading"` Notice that
+hides itself when the new instance's onload toasts its own
+"Plugin onload complete" log line.
+
+Other-plugin reload (any installed plugin OTHER than us) is
+straightforward — same `reloadPlugin(id)` call, no marker
+needed, no race with our own state. Show a tidy notice
+`"Reloaded N plugins: <list>"` so the user knows what changed.
+
+Tests:
+- Unit (mock-obsidian): no real `app.plugins.reloadPlugin`
+  exists, so test the trigger-detection logic (pulled-path
+  walk + ID extraction + enabledPlugins gate) against a fake
+  app object. Marker write + remove path tested via the
+  filesystem adapter.
+- Integration: optional — would require a second plugin to
+  install on the int-test repo; defer until field demand.
+
 ### `data.json` migration code (if user base grows past one person)
 
 The 2.0.2-beta rename (`autoCommitOnSync` → `syncStartsWithCommit`,
