@@ -386,7 +386,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Git author name (optional)")
       .setDesc(
-        "Like `git config user.name`. Defaults to the Owner above " +
+        "Like `git config user.name`. Defaults to the `Owner` property above " +
           "when empty, so usually you only need to fill the email " +
           "below to stamp commits with your identity + local commit " +
           "time. Leave both empty to use the token's GitHub account.",

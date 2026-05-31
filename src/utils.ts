@@ -189,6 +189,35 @@ export function isWriteRetriableStatus(status: number): boolean {
 }
 
 /**
+ * Retry predicate for git-ref UPDATES (PATCH /git/refs/heads/...),
+ * i.e. `updateBranchHead` / `updateReference`. Identical to the
+ * write predicate EXCEPT it does NOT retry 422.
+ *
+ * A 422 on a ref update is "Update is not a fast forward" (or a
+ * bad-ref-state variant): the remote head moved between the push's
+ * head-read and the PATCH, so the commit we built no longer
+ * fast-forwards. Re-issuing the IDENTICAL PATCH cannot help — the
+ * head won't move back; recovery requires reconciling the batch
+ * against the new head, which the next drain does (processBatch
+ * Case 4). The old behaviour (422 treated as transient via
+ * `isWriteRetriableStatus`) retried the doomed PATCH ~6 times over
+ * ~33 s of exponential backoff, which the user experienced as a
+ * hang before the push failed (field report 2026-05-31). Fail fast
+ * instead: throw immediately so the batch stays queued and the next
+ * drain reconciles.
+ *
+ * Note: the OTHER 422 the push pipeline sees — GitRPC::BadObjectState
+ * on a redundant deletion entry in POST /git/trees — is a genuinely
+ * self-resolving case and stays retriable via `createTree`'s
+ * `isWriteRetriableStatus`. This predicate is scoped to ref updates
+ * only, so that case is untouched.
+ */
+export function isRefUpdateRetriableStatus(status: number): boolean {
+  if (status === 422) return false;
+  return isWriteRetriableStatus(status);
+}
+
+/**
  * Recognise a transient connection-level error worth retrying.
  *
  * Three runtimes hit this codepath:

@@ -3,6 +3,7 @@ import {
   isRetriableError,
   isRetriableStatus,
   isWriteRetriableStatus,
+  isRefUpdateRetriableStatus,
   retryUntil,
 } from "../src/utils";
 
@@ -245,5 +246,33 @@ describe("status retry predicates (regression sanity)", () => {
     expect(isWriteRetriableStatus(409)).toBe(true);
     expect(isWriteRetriableStatus(500)).toBe(true);
     expect(isWriteRetriableStatus(404)).toBe(false);
+  });
+
+  it("isRefUpdateRetriableStatus: like the write predicate but 422 → false", () => {
+    // The fix (field report 2026-05-31): a 422 on PATCH /git/refs is
+    // "not a fast forward" — non-transient, must NOT retry.
+    expect(isRefUpdateRetriableStatus(422)).toBe(false);
+    // Genuinely-transient statuses still retry.
+    expect(isRefUpdateRetriableStatus(429)).toBe(true);
+    expect(isRefUpdateRetriableStatus(500)).toBe(true);
+    expect(isRefUpdateRetriableStatus(503)).toBe(true);
+    expect(isRefUpdateRetriableStatus(409)).toBe(true);
+    // Non-retriable client errors stay non-retriable.
+    expect(isRefUpdateRetriableStatus(404)).toBe(false);
+    expect(isRefUpdateRetriableStatus(401)).toBe(false);
+    expect(isRefUpdateRetriableStatus(200)).toBe(false);
+  });
+
+  it("isRefUpdateRetriableStatus differs from isWriteRetriableStatus ONLY at 422", () => {
+    for (const s of [200, 401, 404, 409, 422, 429, 500, 502, 503]) {
+      if (s === 422) {
+        expect(isRefUpdateRetriableStatus(s)).toBe(false);
+        expect(isWriteRetriableStatus(s)).toBe(true);
+      } else {
+        expect(isRefUpdateRetriableStatus(s)).toBe(
+          isWriteRetriableStatus(s),
+        );
+      }
+    }
   });
 });

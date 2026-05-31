@@ -8,6 +8,7 @@ import { GitHubSyncSettings } from "src/settings/settings";
 import {
   isRetriableStatus,
   isWriteRetriableStatus,
+  isRefUpdateRetriableStatus,
   retryUntil,
 } from "src/utils";
 // URL-encoding for GitHub Contents-API paths lives in the
@@ -703,7 +704,11 @@ export default class GithubClient {
           `ref ${ref}${force ? " (force)" : ""}`,
         );
       },
-      (res) => !isWriteRetriableStatus(res.status),
+      // Ref-update predicate: a 422 ("not a fast forward") is
+      // non-transient — fail fast so the next drain reconciles
+      // instead of retrying the doomed PATCH. See
+      // isRefUpdateRetriableStatus + SYNC2.md §4.1.
+      (res) => !isRefUpdateRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 
@@ -874,7 +879,13 @@ export default class GithubClient {
           `branch head${force ? " (force)" : ""}`,
         );
       },
-      (res) => !isWriteRetriableStatus(res.status),
+      // Ref-update predicate: 422 "not a fast forward" is
+      // non-transient (the head moved; retrying the identical PATCH
+      // can't help). Fail fast → next drain reconciles. Was
+      // isWriteRetriableStatus, which retried 422 ~6× over ~33s and
+      // read as a hang (field report 2026-05-31). See
+      // isRefUpdateRetriableStatus + SYNC2.md §4.1.
+      (res) => !isRefUpdateRetriableStatus(res.status),
       retry ? maxRetries : 0,
     );
 

@@ -684,6 +684,33 @@ have content the server resolves regardless of base-tree state.
 The discipline is targeted at the one entry shape that turns
 "remote state changed under us" into a hard failure.
 
+**Two different 422s, two different retry policies.** The push
+pipeline can receive a 422 from two distinct endpoints, and they
+must be handled oppositely. The `GitRPC::BadObjectState` above
+(POST `/git/trees`) is treated as transient — `createTree` retries
+it via `isWriteRetriableStatus`, because the redundant-deletion
+variant self-resolves once the empty reconcile lands. The other is
+on the final step of a push, the PATCH to `/git/refs/heads/<branch>`
+that moves the branch head to the new commit. If the remote head
+advanced between the push's head-read and this PATCH — another
+device pushed, or, on a single device, the same deterministic
+commit got pushed twice — GitHub answers 422 *"Update is not a
+fast forward."* This 422 is **not** transient: retrying the
+identical PATCH cannot help, because the new commit no longer
+fast-forwards the moved head; only reconciling the batch against
+the new head can. A first implementation routed ref updates
+through `isWriteRetriableStatus` too, so a non-ff PATCH retried
+~6 times over ~33 seconds of exponential backoff before failing —
+which a user (field report, 2026-05-31) experienced as a hang.
+The fix scopes ref updates to `isRefUpdateRetriableStatus`, which
+is the write predicate minus 422: a non-ff PATCH fails fast, the
+push throws, the batch stays queued, and the next drain's reconcile
+(§the push enters Case 4 — `expectedHead != currentHead` — re-targets
+the batch onto the new head and, finding the commit already
+present, reuses it) completes the work without the wasted backoff.
+Failing fast routes both the same-commit collision and a genuine
+multi-device divergence into the same recovery path.
+
 ### 4.2 Pending-deletions queue
 
 Pull-side sanitize (§3) materialises a forbidden-named GitHub file

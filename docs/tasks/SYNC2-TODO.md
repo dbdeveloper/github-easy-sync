@@ -57,6 +57,37 @@ Integration tests under `tests/integration/scenarios/sync2/corruption/`:
 
 ## P1 — Polish
 
+### Harden against drain overlap spanning a plugin reload
+
+Surfaced while fixing the ref-update 422 hang (field report
+2026-05-31). The 422 "not a fast forward" on PATCH /git/refs was
+triggered by *something* setting the branch head to our own
+deterministic commit SHA before our PATCH landed — i.e. the same
+batch pushed twice. On a single device with one deviceLabel +
+fixed `batch.createdAt`, the commit is fully deterministic
+(tree + parent + message + author date), so two pushes collide on
+the same SHA and the second PATCH is non-ff.
+
+The fail-fast fix makes this self-recover (next drain reconciles,
+no hang), so this is no longer user-visible. But the *root* — two
+drains running at once — shouldn't happen given the `running`
+re-entrant guard. The likely escape hatch is a drain that spans a
+plugin reload (the BRAT-style disable+enable): the old instance's
+interval/drain overlapping the new instance's startup pulse, two
+guards, two drains. Worth hardening:
+
+- A cross-instance lock (a `.drain-lock` marker in `.push-queue/`
+  with a timestamp + stale-timeout) so a second *instance* can't
+  start a drain while the first is mid-flight.
+- Or: on reload, ensure the outgoing instance's `onunload`
+  cancels any in-flight drain (cancelDrain) and clears its
+  interval before the new instance's startup sync fires.
+
+Not urgent (fail-fast covers the symptom); do it when touching the
+reload path next. Do NOT "fix" it by de-determinising commits — the
+deterministic SHA is load-bearing for resume/idempotency (the
+"reuse parent commit" path).
+
 ### Token-expiry surface in Settings  ✅ DONE (2.0.2-beta2)
 
 The TokenExpiredModal opens at most once per hour, so a user whose
