@@ -74,18 +74,23 @@ drains running at once — shouldn't happen given the `running`
 re-entrant guard. The likely escape hatch is a drain that spans a
 plugin reload (the BRAT-style disable+enable): the old instance's
 interval/drain overlapping the new instance's startup pulse, two
-guards, two drains. Worth hardening:
+guards, two drains.
 
-- A cross-instance lock (a `.drain-lock` marker in `.push-queue/`
-  with a timestamp + stale-timeout) so a second *instance* can't
-  start a drain while the first is mid-flight.
-- Or: on reload, ensure the outgoing instance's `onunload`
-  cancels any in-flight drain (cancelDrain) and clears its
-  interval before the new instance's startup sync fires.
+**Partly DONE (2.0.2-beta2):** `onunload` now calls
+`sync2Manager.cancelDrain()` as its first action (before
+`stopSyncInterval()` clears the timer), so the outgoing instance
+aborts its in-flight drain before the incoming instance's startup
+sync fires. cancelDrain sets `abortRequested`; the drain loop bails
+between batches/files. This closes the common overlap window.
 
-Not urgent (fail-fast covers the symptom); do it when touching the
-reload path next. Do NOT "fix" it by de-determinising commits — the
-deterministic SHA is load-bearing for resume/idempotency (the
+**Still open (lower priority):** cancelDrain only sets a flag — an
+HTTP call already in flight finishes, so the old drain can still
+complete its current batch before stopping. A fuller guard would be
+a cross-instance lock (a `.drain-lock` marker in `.push-queue/` with
+a timestamp + stale-timeout) so a second *instance* cannot begin a
+drain while the first is mid-flight at all. Do it if the overlap
+recurs in the field. Do NOT "fix" it by de-determinising commits —
+the deterministic SHA is load-bearing for resume/idempotency (the
 "reuse parent commit" path).
 
 ### Token-expiry surface in Settings  ✅ DONE (2.0.2-beta2)
@@ -122,11 +127,21 @@ truth. Box visibility is live: the four credential-field
 
 ## P2 — Backlog
 
-### `attemptAutoMerge`-side mergeFn deferred resolution
+### `attemptAutoMerge`-side mergeFn dedup  ✅ DONE (2.0.2-beta2)
 
-Currently `attemptAutoMerge` takes an optional `mergeFn` that
-defaults to the sync `mergeText`. Sync2Manager passes the
-WorkerClient-backed async wrapper. Consider lifting `mergeFn` to a
-true dependency on the engine layer rather than per-call, so
-test/production paths share more configuration.
+Landed as the minimal variant (commit `534ac74`). The three
+`attemptAutoMerge` call sites (pull, push-reconcile, resolution-
+synthesis) each inlined an identical `mergeFn: (o,b,t) =>
+this.workerClient.mergeText(...)` — a drift hazard. Hoisted to a
+single pre-bound private arrow field `Sync2Manager.mergeViaWorker:
+MergeTextFn`; the sites pass `mergeFn: this.mergeViaWorker`.
+
+NOT lifted into `attemptAutoMerge`'s signature as a constructor-
+level engine dependency (the original framing). That framing
+claimed it would let test/production "share more configuration" —
+but they intentionally DON'T: unit tests use the default
+synchronous `mergeText` (no worker), production routes through the
+worker (off-main-thread, SYNC2 §8). The per-call `mergeFn?`
+parameter stays as the public opt-in seam; the change only dedups
+the production wiring.
 

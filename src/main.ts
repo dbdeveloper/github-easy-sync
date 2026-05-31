@@ -412,6 +412,22 @@ export default class GitHubSyncPlugin extends Plugin {
   }
 
   async onunload(): Promise<void> {
+    // 2.0.2-beta2 hardening (SYNC2-TODO "drain overlap spanning a
+    // plugin reload"). Abort any in-flight drain on THIS (outgoing)
+    // instance before teardown completes, so it can't keep pushing
+    // while the incoming instance's startup sync fires. Without this,
+    // the disable+enable reload path could leave two drains running —
+    // the old instance's and the new one's — racing to push the same
+    // deterministic commit, which is what produced the ref-update 422
+    // hang on desktop. cancelDrain is a no-op when nothing is running;
+    // the drain loop checks abortRequested between batches/files and
+    // bails cleanly. stopSyncInterval() below clears the timer so no
+    // fresh tick starts a drain during teardown.
+    try {
+      this.sync2Manager?.cancelDrain();
+    } catch (err) {
+      this.logger?.warn("onunload: cancelDrain failed", { err: `${err}` });
+    }
     this.stopSyncInterval();
     if (this.vaultDeleteListener) {
       this.app.vault.offref(this.vaultDeleteListener);
