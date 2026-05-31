@@ -209,7 +209,7 @@ export default class GitHubSyncPlugin extends Plugin {
       });
       this.addCommand({
         id: "pull-push",
-        name: "Pull and push (no new commit)",
+        name: "Pull from repo and push stored commits",
         icon: "arrow-down-up",
         callback: this.uploadOnly.bind(this),
       });
