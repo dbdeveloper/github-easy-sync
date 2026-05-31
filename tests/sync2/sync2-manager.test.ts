@@ -328,6 +328,7 @@ function fixture(opts?: {
     branch: string;
   };
   progressBytesThreshold?: number;
+  onPluginsAffected?: (ids: string[]) => void;
 }): {
   root: string;
   vault: Vault;
@@ -418,6 +419,7 @@ function fixture(opts?: {
       opts?.progressBytesThreshold !== undefined
         ? opts.progressBytesThreshold
         : 0,
+    onPluginsAffected: opts?.onPluginsAffected,
     now: () => clock.nowMs(),
   });
   return {
@@ -2505,6 +2507,225 @@ describe("Sync2Manager.syncAll — basic flow", () => {
     expect(
       f.client.calls.filter((c) => c.op === "createCommit").length,
     ).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("Sync2Manager — onPluginsAffected (BRAT-style auto-reload trigger)", () => {
+  // 2.0.2-beta2: pull-side writes to <configDir>/plugins/<id>/<file>
+  // are tracked through the drain cycle. At drain end (on full
+  // success) the callback fires with the union of affected plugin
+  // IDs so main.ts can call reloadPlugin(id) for each.
+  //
+  // Coverage matrix:
+  //  - Other plugin's main.js pulled → callback fires with [id]
+  //  - Other plugin's manifest.json / styles.css / data.json → fires
+  //  - Our OWN plugin's file pulled → fires too (parent decides
+  //    whether to actually reload self)
+  //  - Multiple plugins → unioned, deduplicated
+  //  - Subdirectory files (plugins/x/data/y.json) → NOT included
+  //  - Non-plugin paths (notes, themes) → callback doesn't fire
+  //  - Failed drain → callback doesn't fire (set preserved for next)
+
+  it("plugin main.js pulled → callback fires once with that plugin's id", async () => {
+    const calls: string[][] = [];
+    const f = fixture({
+      onPluginsAffected: (ids) => calls.push(ids.slice()),
+    });
+    f.client.setBranchHead("FRESH_HEAD");
+    f.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
+    // Adoption from fresh remote — `<configDir>/plugins/some-plugin/main.js`
+    // counts as a plugin file. The path is what determines tracking;
+    // bytes can be arbitrary.
+    f.client.setContentAtRef(
+      "FRESH_HEAD",
+      `${CONFIG_DIR}/plugins/some-plugin/main.js`,
+      "console.log('hi')",
+    );
+
+    await f.manager.syncAll();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(["some-plugin"]);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  it("plugin manifest.json pulled → callback fires", async () => {
+    const calls: string[][] = [];
+    const f = fixture({
+      onPluginsAffected: (ids) => calls.push(ids.slice()),
+    });
+    f.client.setBranchHead("FRESH_HEAD");
+    f.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
+    f.client.setContentAtRef(
+      "FRESH_HEAD",
+      `${CONFIG_DIR}/plugins/some-plugin/manifest.json`,
+      '{"id":"some-plugin","version":"1.0.0"}',
+    );
+
+    await f.manager.syncAll();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(["some-plugin"]);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  it("plugin styles.css pulled → callback fires", async () => {
+    const calls: string[][] = [];
+    const f = fixture({
+      onPluginsAffected: (ids) => calls.push(ids.slice()),
+    });
+    f.client.setBranchHead("FRESH_HEAD");
+    f.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
+    f.client.setContentAtRef(
+      "FRESH_HEAD",
+      `${CONFIG_DIR}/plugins/some-plugin/styles.css`,
+      ".x { color: red; }",
+    );
+
+    await f.manager.syncAll();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(["some-plugin"]);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  it("plugin data.json pulled → callback fires", async () => {
+    const calls: string[][] = [];
+    const f = fixture({
+      onPluginsAffected: (ids) => calls.push(ids.slice()),
+    });
+    f.client.setBranchHead("FRESH_HEAD");
+    f.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
+    f.client.setContentAtRef(
+      "FRESH_HEAD",
+      `${CONFIG_DIR}/plugins/some-plugin/data.json`,
+      "{}",
+    );
+
+    await f.manager.syncAll();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(["some-plugin"]);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  it("our OWN plugin file pulled → callback fires too (main.ts handles whether to actually reload self)", async () => {
+    const calls: string[][] = [];
+    const f = fixture({
+      onPluginsAffected: (ids) => calls.push(ids.slice()),
+    });
+    f.client.setBranchHead("FRESH_HEAD");
+    f.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
+    f.client.setContentAtRef(
+      "FRESH_HEAD",
+      `${CONFIG_DIR}/plugins/${SELF_PLUGIN_ID}/main.js`,
+      "new-self-bytes",
+    );
+
+    await f.manager.syncAll();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual([SELF_PLUGIN_ID]);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  it("multiple plugins pulled → callback fires once with deduplicated id list", async () => {
+    const calls: string[][] = [];
+    const f = fixture({
+      onPluginsAffected: (ids) => calls.push(ids.slice()),
+    });
+    f.client.setBranchHead("FRESH_HEAD");
+    f.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
+    f.client.setContentAtRef(
+      "FRESH_HEAD",
+      `${CONFIG_DIR}/plugins/plugin-a/main.js`,
+      "a-code",
+    );
+    f.client.setContentAtRef(
+      "FRESH_HEAD",
+      `${CONFIG_DIR}/plugins/plugin-a/manifest.json`,
+      '{"id":"plugin-a"}',
+    );
+    f.client.setContentAtRef(
+      "FRESH_HEAD",
+      `${CONFIG_DIR}/plugins/plugin-b/main.js`,
+      "b-code",
+    );
+
+    await f.manager.syncAll();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].sort()).toEqual(["plugin-a", "plugin-b"]);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  it("subdirectory files under plugins/<id>/ → NOT included", async () => {
+    const calls: string[][] = [];
+    const f = fixture({
+      onPluginsAffected: (ids) => calls.push(ids.slice()),
+    });
+    f.client.setBranchHead("FRESH_HEAD");
+    f.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
+    // Subdirectory file — should NOT trigger reload (Obsidian reads
+    // these on demand at runtime, not at plugin enable time).
+    f.client.setContentAtRef(
+      "FRESH_HEAD",
+      `${CONFIG_DIR}/plugins/some-plugin/data/user-file.json`,
+      "{}",
+    );
+
+    await f.manager.syncAll();
+
+    expect(calls).toEqual([]);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  it("non-plugin paths (notes, themes) → callback doesn't fire", async () => {
+    const calls: string[][] = [];
+    const f = fixture({
+      onPluginsAffected: (ids) => calls.push(ids.slice()),
+    });
+    f.client.setBranchHead("FRESH_HEAD");
+    f.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
+    f.client.setContentAtRef("FRESH_HEAD", "note.md", "# Hi");
+    f.client.setContentAtRef(
+      "FRESH_HEAD",
+      `${CONFIG_DIR}/themes/my-theme.css`,
+      "body { }",
+    );
+
+    await f.manager.syncAll();
+
+    expect(calls).toEqual([]);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  it("drain with no plugin files pulled → callback doesn't fire", async () => {
+    const calls: string[][] = [];
+    const f = fixture({
+      onPluginsAffected: (ids) => calls.push(ids.slice()),
+    });
+    // Idle sync — no remote changes, no local changes.
+    f.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+
+    await f.manager.syncAll();
+
+    expect(calls).toEqual([]);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  it("no onPluginsAffected callback provided → no error, drain completes", async () => {
+    const f = fixture(); // no callback
+    f.client.setBranchHead("FRESH_HEAD");
+    f.client.setTreeShaForCommit("FRESH_HEAD", "FRESH_TREE");
+    f.client.setContentAtRef(
+      "FRESH_HEAD",
+      `${CONFIG_DIR}/plugins/some-plugin/main.js`,
+      "code",
+    );
+
+    await expect(f.manager.syncAll()).resolves.toBeUndefined();
+    fs.rmSync(f.root, { recursive: true, force: true });
   });
 });
 

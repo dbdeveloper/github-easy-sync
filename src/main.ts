@@ -37,6 +37,8 @@ import { DiffEditView, DIFF2_EDIT_VIEW_TYPE } from "./diff2/diff-edit-view";
 import { TokenExpiredModal } from "./sync2/views/token-expired-modal";
 import { CancelSyncModal } from "./sync2/views/cancel-sync-modal";
 import { AuthError } from "./errors";
+import { runSelfUpdateBootloader } from "./sync2/plugin-update-bootloader";
+import { calculateGitBlobSHA } from "./utils";
 import manifest from "../manifest.json";
 
 // How long the brief local-phase notices stay visible. 700ms is the
@@ -133,6 +135,43 @@ export default class GitHubSyncPlugin extends Plugin {
   async onload(): Promise<void> {
     const startedAt = Date.now();
     try {
+      // 2.0.2-beta2 self-update bootloader. Runs BEFORE loadSettings,
+      // before logger init, before anything else — handles a pending
+      // `main.sync-tmp.js` left by a previous self-update that
+      // crashed mid-protocol. If the bootloader applies the swap,
+      // it schedules reloadPlugin and we ABORT the rest of onload
+      // (we'll be re-entered with the NEW code in ~500ms).
+      try {
+        const bootloaderResult = await runSelfUpdateBootloader({
+          adapter: this.app.vault.adapter,
+          pluginDir: `${this.app.vault.configDir}/plugins/${manifest.id}`,
+          computeSha: calculateGitBlobSHA,
+          reloadPlugin: () => {
+            const plugins = (this.app as unknown as {
+              plugins?: { reloadPlugin?: (id: string) => Promise<void> };
+            }).plugins;
+            void plugins?.reloadPlugin?.(manifest.id);
+          },
+          notice: (msg, durationMs) => new Notice(msg, durationMs),
+        });
+        if (bootloaderResult.action === "applied") {
+          // Reload is scheduled. Don't continue onload — old code
+          // would just run briefly then get torn down.
+          return;
+        }
+      } catch (err) {
+        // Bootloader is best-effort. If it throws, fall through to
+        // normal onload — the next drain may recover.
+        try {
+          console.error(
+            "[github-easy-sync] Self-update bootloader threw, continuing normal onload",
+            err,
+          );
+        } catch {
+          // ignore
+        }
+      }
+
       await this.loadSettings();
       this.logger = new Logger(
         this.app.vault,
@@ -768,6 +807,17 @@ export default class GitHubSyncPlugin extends Plugin {
       onQueueDepthChanged: (depth: number) => {
         this.refreshRibbonPendingBatchesBadge(depth);
       },
+      // 2.0.2-beta2 BRAT-style auto-reload. Fires at end of a
+      // successful drain with the IDs of plugins whose top-level
+      // files (main.js / manifest.json / styles.css / data.json)
+      // were just written. For each enabled affected plugin, call
+      // reloadPlugin(id) via setTimeout (500ms unwind for the
+      // in-flight drain stack frame) so the NEW code takes effect
+      // immediately instead of waiting for the user to disable +
+      // re-enable by hand.
+      onPluginsAffected: (ids: string[]) => {
+        this.handlePluginsAffectedReload(ids);
+      },
     });
 
     // Conflict resolution events (sibling delete, edit, rename) are
@@ -1248,6 +1298,66 @@ export default class GitHubSyncPlugin extends Plugin {
       });
       new Notice(`Commit failed:\n${err}`, 10000);
     }
+  }
+
+  // 2.0.2-beta2 BRAT-style auto-reload handler. Called by Sync2Manager
+  // at end of a successful drain with the IDs of plugins whose files
+  // were just written. For each ID where the plugin is currently
+  // enabled, schedule app.plugins.reloadPlugin(id) via setTimeout.
+  // The 500ms delay lets the drain stack frame unwind so Obsidian's
+  // plugin lifecycle gets a clean teardown.
+  private handlePluginsAffectedReload(ids: string[]): void {
+    // Obsidian's `app.plugins` is documented but not in the public
+    // typings; access via `any` and guard each step.
+    const plugins = (this.app as unknown as {
+      plugins?: {
+        enabledPlugins?: Set<string>;
+        reloadPlugin?: (id: string) => Promise<void>;
+      };
+    }).plugins;
+    if (!plugins?.reloadPlugin) {
+      this.logger?.warn(
+        "BRAT-style reload requested but app.plugins.reloadPlugin is unavailable",
+        { ids },
+      );
+      return;
+    }
+    const enabled = plugins.enabledPlugins;
+    const willReload: string[] = [];
+    for (const id of ids) {
+      // Skip disabled plugins — reload would just enable them, which
+      // is surprising. Skip OURSELVES too unless our own main.js was
+      // actually replaced — atomicWriteFile already swapped on disk,
+      // so reload picks up the new code via Obsidian's normal load
+      // path. We treat self the same as any other plugin.
+      if (enabled !== undefined && !enabled.has(id)) {
+        this.logger?.info(
+          "BRAT-style reload skipped: plugin not enabled",
+          { id },
+        );
+        continue;
+      }
+      willReload.push(id);
+    }
+    if (willReload.length === 0) return;
+    for (const id of willReload) {
+      setTimeout(() => {
+        try {
+          void plugins.reloadPlugin!(id);
+        } catch (err) {
+          this.logger?.error("reloadPlugin call threw", {
+            id,
+            err: describeError(err),
+          });
+        }
+      }, 500);
+    }
+    const label =
+      willReload.length === 1
+        ? `Plugin "${willReload[0]}" updated — reloading…`
+        : `${willReload.length} plugins updated — reloading…`;
+    new Notice(label, 5000);
+    this.logger?.info("BRAT-style reload scheduled", { ids: willReload });
   }
 
   // 2.0.2-beta2: cancel the currently-running drain. Silently

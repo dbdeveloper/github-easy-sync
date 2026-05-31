@@ -16,6 +16,7 @@ import {
 } from "../utils";
 import ChangeDetector from "./change-detector";
 import { atomicWriteFile } from "./atomic-write";
+import { extractAffectedPluginId } from "./plugin-update-bootloader";
 import {
   needsSanitization,
   sanitizeFilename,
@@ -350,6 +351,17 @@ export interface Sync2ManagerDeps {
   // the mutation that triggered the callback. No-op in unit tests
   // that don't pass it.
   onQueueDepthChanged?(depth: number): void;
+  // 2.0.2-beta2: fired at the end of a successful drain when one or
+  // more plugin files (main.js / manifest.json / styles.css /
+  // data.json) under `<configDir>/plugins/<id>/` were written.
+  // main.ts uses it to call `app.plugins.reloadPlugin(id)` for each
+  // affected plugin so the new code takes effect immediately
+  // instead of waiting for the user to disable + re-enable by hand.
+  // Self-plugin update (github-easy-sync's own files) goes through
+  // here too; the bootloader at our onload() top is just the
+  // crash-recovery backstop for the case where the swap was left
+  // mid-protocol.
+  onPluginsAffected?(pluginIds: string[]): void;
   // When true, a new sync click while pending batches exist (i.e.
   // earlier push attempt failed — typically offline) folds the new
   // changes into the latest pending batch instead of stacking. The
@@ -454,6 +466,12 @@ export class Sync2Manager {
     | ((summary: { pushedFiles: number; pulledFiles: number }) => void)
     | undefined;
   private readonly onQueueDepthChanged: ((depth: number) => void) | undefined;
+  private readonly onPluginsAffected:
+    | ((pluginIds: string[]) => void)
+    | undefined;
+  // 2.0.2-beta2: accumulated through a drain cycle by maybeMarkPluginAffected.
+  // Cleared at drain end after the callback fires.
+  private affectedPluginIds: Set<string> = new Set();
   // Accumulator for the pull-side phases (bootstrapFromRemote +
   // pullIfNeeded) so onSyncCompleted can report how many files
   // actually came down from the remote. Reset at the start of each
@@ -525,6 +543,7 @@ export class Sync2Manager {
     this.onNoLocalChanges = deps.onNoLocalChanges;
     this.onSyncCompleted = deps.onSyncCompleted;
     this.onQueueDepthChanged = deps.onQueueDepthChanged;
+    this.onPluginsAffected = deps.onPluginsAffected;
     this.remoteIdentity = deps.remoteIdentity;
     this.progressBytesThreshold =
       deps.progressBytesThreshold ?? PROGRESS_BYTES_THRESHOLD;
@@ -1843,6 +1862,17 @@ export class Sync2Manager {
     });
   }
 
+  // 2.0.2-beta2: when a remote-driven write hits a plugin file under
+  // `<configDir>/plugins/<id>/(main.js|manifest.json|styles.css|
+  // data.json)`, add `<id>` to the drain-scoped affected set so we
+  // can fire `onPluginsAffected` once at the end and the main
+  // thread can call `reloadPlugin(id)`. Subdirectory files and
+  // anything outside plugins/ are ignored.
+  private maybeMarkPluginAffected(path: string): void {
+    const id = extractAffectedPluginId(path, this.configDir);
+    if (id !== null) this.affectedPluginIds.add(id);
+  }
+
   private async writeBinaryRemote(
     path: string,
     base64Content: string,
@@ -1857,6 +1887,7 @@ export class Sync2Manager {
     // bytes are in place but BEFORE the backup cleanup so the
     // onload recovery sweep can disambiguate state.
     await atomicWriteFile(this.vault, path, bytes, afterCommit);
+    this.maybeMarkPluginAffected(path);
   }
 
   private async applyRemoteDeletion(
@@ -2364,6 +2395,7 @@ export class Sync2Manager {
     const bytes = new TextEncoder().encode(canonical).buffer as ArrayBuffer;
     // Atomic-with-backup. See writeBinaryRemote rationale.
     await atomicWriteFile(this.vault, path, bytes, afterCommit);
+    this.maybeMarkPluginAffected(path);
     const canonicalSha = await this.workerClient.computeGitBlobSHA(bytes);
     return { canonicalSha, changed };
   }
@@ -2713,6 +2745,22 @@ export class Sync2Manager {
         currentFile: 0,
       });
       this.abortRequested = false;
+      // 2.0.2-beta2: fire plugin-affected callback. ONLY on full
+      // drain success (failed drain leaves the set populated; the
+      // next drain accumulates more IDs and fires once the cycle
+      // completes). This avoids "plugin reloaded mid-failure" UX.
+      if (drainSucceeded && this.affectedPluginIds.size > 0) {
+        const ids = Array.from(this.affectedPluginIds);
+        this.affectedPluginIds.clear();
+        try {
+          this.onPluginsAffected?.(ids);
+        } catch (err) {
+          this.logger.warn(
+            "Sync2 drain: onPluginsAffected callback threw",
+            { err: `${err}`, ids },
+          );
+        }
+      }
       // No listener resume — ConflictWatcher is read-only and was
       // never paused. Drain doesn't own listener lifecycle.
     }
