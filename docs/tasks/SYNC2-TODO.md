@@ -71,42 +71,6 @@ live; the Notice is for users who don't have Settings open.
 loop progresses. Subscribes to the same `drainStatusChanged`
 callback the Settings page uses.
 
-### Pending-commits badge follows whichever ribbon icon is visible
-
-Right now the unsent-commits count badge is bolted onto the
-`[Sync]` ribbon icon (per the Stage 7 §5.1 rule: "pending network
-work belongs visually near the network action"). That assumption
-breaks for legitimate configurations the user surfaced:
-
-- `Sync strategy: On interval` + `[Sync]` ribbon icon HIDDEN +
-  `[Commit]` ribbon icon VISIBLE — the user commits manually and
-  the interval timer takes care of sync. They never click Sync;
-  hiding its icon is reasonable. But they ALSO lose visibility
-  into how many commits are queued, because the count lives on
-  the hidden icon.
-
-The fix is a single placement rule:
-
-  - `[Sync]` visible → count badge on `[Sync]`.
-  - `[Sync]` hidden AND `[Commit]` visible → count badge on
-    `[Commit]`.
-  - Both hidden → no badge anywhere. (Fully automatic
-    commit+sync every N minutes, OR hotkey-driven workflow —
-    either way the user has chosen no-icon UX.)
-
-Implementation:
-- `refreshRibbonPendingBatchesBadge(depth)` in main.ts becomes
-  the central dispatch. It picks the right icon based on the two
-  settings (`showSyncRibbonButton`, `showCommitRibbonButton`) and
-  writes the badge onto the chosen one, clearing any badge on
-  the other.
-- The setting onChange handlers for both toggles call into the
-  same dispatch so flipping toggles re-renders the badge
-  immediately.
-- Existing call sites (`onQueueDepthChanged`, the initial paint
-  in `showSyncRibbonIcon`) stay; they hit the dispatch which
-  routes correctly.
-
 ### Token-expiry surface in Settings drain-status
 
 Right now the TokenExpiredModal opens once per hour; the Settings

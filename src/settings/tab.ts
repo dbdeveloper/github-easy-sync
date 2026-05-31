@@ -400,15 +400,11 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Sync starts with commit")
       .setDesc(
-        "Master toggle (default ON). When ON, every Sync action " +
+        "Master toggle. When ON, every Sync action " +
           "(manual click, interval, startup) first commits your " +
-          "local changes, then uploads them to GitHub — today's " +
-          "default behaviour. When OFF, Sync only uploads the " +
-          "commits you've already staged (or pulls when there's " +
-          "nothing to upload); committing becomes a separate action " +
-          "via the [Commit] ribbon button. Turn the [Commit] ribbon " +
-          "button ON below if you choose this — otherwise nothing " +
-          "ever gets staged.",
+          "local changes, then uploads them to GitHub. When OFF, " +
+          "do only pull from repo and push already staged commits; committing " +
+          "becomes a separate action via the [Commit] ribbon button.",
       )
       .addToggle((toggle) => {
         toggle
@@ -422,7 +418,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Auto-canonicalize text files")
       .setDesc(
-        "When ON (default), the plugin rewrites text files locally to " +
+        "When ON, the plugin rewrites text files locally to " +
           "LF line endings, strips UTF-8 BOM, and ensures a trailing " +
           "newline — both on pull (after fetching from GitHub) and on " +
           "commit (before snapshotting your edits into the queue). " +
@@ -460,7 +456,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Sync configs (Obsidian + plugins)")
+      .setName("Sync configs (.obsidian/ folder)")
       .setDesc(
         "Sync everything under your vault's config folder (Obsidian settings, " +
           "installed plugins, snippets). This setting is per-device and never " +
@@ -480,7 +476,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Sync plugins data.json")
+      .setName("Sync plugins data.json (global .gitignore rule!)")
       .setDesc(
         "ENABLE WITH CAUTION! Plugin data.json files may contain " +
         "sensitive data (API tokens, credentials, license keys) that you " +
@@ -537,9 +533,9 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Show sync ribbon button")
       .setDesc(
-        "Display the Sync ribbon button (action depends on the " +
+        "Display the [Sync with GitHub] ribbon button (action depends on the " +
           "`Sync starts with commit` master toggle above). The icon's " +
-          "badge shows the count of unsent commits in .push-queue.",
+          "badge shows the count of unsent commits in the commit queue.",
       )
       .addToggle((toggle) => {
         toggle
@@ -556,8 +552,8 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
       .setName("Show commit ribbon button")
       .setDesc(
         "Independent of the master toggle. When ON, shows a " +
-          "separate [Commit] ribbon button that enqueues local " +
-          "changes to .push-queue without touching the network. " +
+          "separate [Commit] ribbon button that enqueues changed files " +
+          "to the local commit queue without touching the network. " +
           "Most useful in split mode (`Sync starts with commit` " +
           "OFF) where it's the only way to add commits.",
       )
@@ -572,8 +568,40 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           });
       });
 
-    // (No "misconfigured shape" warning here — the user is
-    // responsible for their own toggle combinations.)
+      // ── Performance ─────────────────────────────────────────────────
+      new Setting(containerEl).setName("Performance").setHeading();
+
+      new Setting(containerEl)
+          .setName("Maximum auto-merge file size (KB)")
+          .setDesc(
+              "Skip the 3-way text auto-merge for files larger than this. " +
+              "Above the threshold the engine just uploads your local " +
+              "bytes (no automated merge) — useful to sidestep multi-MB " +
+              "merge slowdowns. Default 1024 KB (1 MB). Increasing past " +
+              "~2 MB may cause noticeable hangs even with worker offload.",
+          )
+          .addText((text) => {
+              const current = Math.round(
+                  (this.plugin.settings.maxAutoMergeSizeBytes ?? 1_000_000) / 1024,
+              );
+              text
+                  .setPlaceholder("1024")
+                  .setValue(String(current))
+                  .onChange(async (value) => {
+                      const kb = Number((value ?? "").trim());
+                      if (!Number.isFinite(kb) || kb <= 0) {
+                          // Invalid input — fall back to default. Don't surface
+                          // a modal; the placeholder + description tell the user
+                          // what's expected.
+                          this.plugin.settings.maxAutoMergeSizeBytes = 1_000_000;
+                      } else {
+                          this.plugin.settings.maxAutoMergeSizeBytes = Math.round(
+                              kb * 1024,
+                          );
+                      }
+                      await this.plugin.saveSettings();
+                  });
+          });
 
     // ── Logging ─────────────────────────────────────────────────────
     new Setting(containerEl).setName("Logging").setHeading();
@@ -614,42 +642,6 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           });
         });
     }
-
-    // ── Performance ─────────────────────────────────────────────────
-    new Setting(containerEl).setName("Performance").setHeading();
-
-    new Setting(containerEl)
-      .setName("Maximum auto-merge file size (KB)")
-      .setDesc(
-        "Skip the 3-way text auto-merge for files larger than this. " +
-          "Above the threshold the engine just uploads your local " +
-          "bytes (no automated merge) — useful to sidestep multi-MB " +
-          "merge slowdowns. Default 1024 KB (1 MB). Increasing past " +
-          "~2 MB may cause noticeable hangs even with worker offload; " +
-          "see docs/tasks/SYNC2-WORKER-REORG.md and tests/perf/README.md.",
-      )
-      .addText((text) => {
-        const current = Math.round(
-          (this.plugin.settings.maxAutoMergeSizeBytes ?? 1_000_000) / 1024,
-        );
-        text
-          .setPlaceholder("1024")
-          .setValue(String(current))
-          .onChange(async (value) => {
-            const kb = Number((value ?? "").trim());
-            if (!Number.isFinite(kb) || kb <= 0) {
-              // Invalid input — fall back to default. Don't surface
-              // a modal; the placeholder + description tell the user
-              // what's expected.
-              this.plugin.settings.maxAutoMergeSizeBytes = 1_000_000;
-            } else {
-              this.plugin.settings.maxAutoMergeSizeBytes = Math.round(
-                kb * 1024,
-              );
-            }
-            await this.plugin.saveSettings();
-          });
-      });
 
     // ── Danger zone ─────────────────────────────────────────────────
     new Setting(containerEl).setName("Danger zone").setHeading();

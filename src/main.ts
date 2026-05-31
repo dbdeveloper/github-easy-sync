@@ -103,6 +103,15 @@ export default class GitHubSyncPlugin extends Plugin {
   // not the unresolved-conflict count. Fed by Sync2Manager's
   // onQueueDepthChanged callback.
   ribbonPendingBatchesBadge: HTMLElement | null = null;
+  // 2.0.2-beta2: parallel badge for the [Commit] ribbon icon. The
+  // badge follows whichever icon is visible — when [Sync] is
+  // hidden but [Commit] is shown, the user still sees the queue
+  // depth on the icon they CAN see. See refreshRibbonPendingBatchesBadge.
+  commitRibbonPendingBatchesBadge: HTMLElement | null = null;
+  // 2.0.2-beta2: latest known queue depth, kept here so a settings
+  // toggle that hides one icon and shows another can repaint the
+  // badge without re-querying the on-disk queue.
+  private currentQueueDepth: number = 0;
 
   // Vault listeners — sibling-file delete/rename closes the matching
   // conflict record. Refs kept so we can offref them on unload.
@@ -943,44 +952,102 @@ export default class GitHubSyncPlugin extends Plugin {
     // (DIFF2_IMPLEMENTATION_PLAN.md R2.7.4).
   }
 
-  // Subtle absolute-positioned numeric pill in the ribbon sync
-  // icon's corner. The exact styling is left to user themes — we
-  // attach a CSS class so theme authors can override.
-  // Visibility rules (PSEUDO-MERGE-MODE §12.3):
-  //   depth === 0 → no badge (idle state).
-  //   depth >= 1  → `(N)` badge in orange pill.
+  // Subtle absolute-positioned numeric pill in a ribbon icon's
+  // corner. 2.0.2-beta2: routing rule — the badge follows
+  // whichever ribbon icon is visible.
+  //
+  //   [Sync] visible              → badge on [Sync].
+  //   [Sync] hidden + [Commit] on → badge on [Commit].
+  //   Both hidden                  → no badge anywhere (fully
+  //                                  automatic OR hotkey-only UX).
+  //
+  // Pending count is independent of the ribbon icon's PURPOSE
+  // (network upload near Sync vs local enqueue near Commit) —
+  // what matters is the user can SEE the count somewhere as long
+  // as they kept any sync-related icon visible.
   private refreshRibbonPendingBatchesBadge(depth: number): void {
-    if (!this.syncRibbonIcon) return;
-    if (depth <= 0) {
-      this.ribbonPendingBatchesBadge?.remove();
+    this.currentQueueDepth = depth;
+    this.applyPendingBatchesBadge();
+  }
+
+  // 2.0.2-beta2: paints the badge on whichever ribbon icon the
+  // current settings + cached depth dictate. Idempotent — safe to
+  // call on every settings toggle.
+  private applyPendingBatchesBadge(): void {
+    const depth = this.currentQueueDepth;
+    // Pick the target icon per the routing rule. The chosen icon
+    // owns the badge; the other gets cleared.
+    let target: HTMLElement | null = null;
+    let targetField: "sync" | "commit" | null = null;
+    if (this.syncRibbonIcon) {
+      target = this.syncRibbonIcon;
+      targetField = "sync";
+    } else if (this.commitRibbonIcon) {
+      target = this.commitRibbonIcon;
+      targetField = "commit";
+    }
+    // Clear the non-target field's badge.
+    if (targetField !== "sync" && this.ribbonPendingBatchesBadge) {
+      this.ribbonPendingBatchesBadge.remove();
       this.ribbonPendingBatchesBadge = null;
+    }
+    if (targetField !== "commit" && this.commitRibbonPendingBatchesBadge) {
+      this.commitRibbonPendingBatchesBadge.remove();
+      this.commitRibbonPendingBatchesBadge = null;
+    }
+    if (target === null || depth <= 0) {
+      // Nothing to render.
+      if (this.ribbonPendingBatchesBadge) {
+        this.ribbonPendingBatchesBadge.remove();
+        this.ribbonPendingBatchesBadge = null;
+      }
+      if (this.commitRibbonPendingBatchesBadge) {
+        this.commitRibbonPendingBatchesBadge.remove();
+        this.commitRibbonPendingBatchesBadge = null;
+      }
       return;
     }
-    if (!this.ribbonPendingBatchesBadge) {
-      this.ribbonPendingBatchesBadge = this.syncRibbonIcon.createSpan({
-        cls: "github-easy-sync-ribbon-pending-batches-badge",
-      });
-      const el = this.ribbonPendingBatchesBadge;
-      el.style.position = "absolute";
-      el.style.top = "2px";
-      el.style.right = "2px";
-      el.style.minWidth = "14px";
-      el.style.height = "14px";
-      el.style.padding = "0 3px";
-      el.style.borderRadius = "7px";
-      el.style.background = "var(--color-green, #16a34a)";
-      el.style.color = "white";
-      el.style.fontSize = "10px";
-      el.style.lineHeight = "14px";
-      el.style.textAlign = "center";
-      el.style.pointerEvents = "none";
-      this.syncRibbonIcon.style.position = "relative";
+    // Get or create the badge on the target icon.
+    const existing =
+      targetField === "sync"
+        ? this.ribbonPendingBatchesBadge
+        : this.commitRibbonPendingBatchesBadge;
+    const badge =
+      existing ?? this.createPendingBatchesBadgeOn(target);
+    if (targetField === "sync") {
+      this.ribbonPendingBatchesBadge = badge;
+    } else {
+      this.commitRibbonPendingBatchesBadge = badge;
     }
-    this.ribbonPendingBatchesBadge.setText(String(depth));
-    this.ribbonPendingBatchesBadge.setAttribute(
+    badge.setText(String(depth));
+    badge.setAttribute(
       "aria-label",
       `${depth} push batch${depth === 1 ? "" : "es"} pending`,
     );
+  }
+
+  // 2.0.2-beta2: build the absolute-positioned numeric pill node.
+  // Style stays inline here so the same look applies whether the
+  // host is [Sync] or [Commit].
+  private createPendingBatchesBadgeOn(parent: HTMLElement): HTMLElement {
+    const el = parent.createSpan({
+      cls: "github-easy-sync-ribbon-pending-batches-badge",
+    });
+    el.style.position = "absolute";
+    el.style.top = "2px";
+    el.style.right = "2px";
+    el.style.minWidth = "14px";
+    el.style.height = "14px";
+    el.style.padding = "0 3px";
+    el.style.borderRadius = "7px";
+    el.style.background = "var(--color-green, #16a34a)";
+    el.style.color = "white";
+    el.style.fontSize = "10px";
+    el.style.lineHeight = "14px";
+    el.style.textAlign = "center";
+    el.style.pointerEvents = "none";
+    parent.style.position = "relative";
+    return el;
   }
 
   // ── status bar ──────────────────────────────────────────────────────
@@ -1067,6 +1134,9 @@ export default class GitHubSyncPlugin extends Plugin {
     this.ribbonPendingBatchesBadge = null;
     this.syncRibbonIcon?.remove();
     this.syncRibbonIcon = null;
+    // 2.0.2-beta2: the badge may now move to [Commit] if it's
+    // still visible. Repaint with the cached depth.
+    this.applyPendingBatchesBadge();
   }
 
   // ── commit ribbon (Stage 7) ─────────────────────────────────────────
@@ -1085,11 +1155,18 @@ export default class GitHubSyncPlugin extends Plugin {
       "Commit local changes (no upload)",
       this.commit.bind(this),
     );
+    // 2.0.2-beta2: if [Sync] is currently hidden, the depth badge
+    // moves to this newly-shown [Commit] icon.
+    this.applyPendingBatchesBadge();
   }
 
   hideCommitRibbonIcon(): void {
+    this.commitRibbonPendingBatchesBadge?.remove();
+    this.commitRibbonPendingBatchesBadge = null;
     this.commitRibbonIcon?.remove();
     this.commitRibbonIcon = null;
+    // 2.0.2-beta2: ensure no stale badge sticks around.
+    this.applyPendingBatchesBadge();
   }
 
   // Click handler for [Commit]: enqueue local changes to .push-queue
@@ -1158,18 +1235,18 @@ export default class GitHubSyncPlugin extends Plugin {
     try {
       const outcome = await this.sync2Manager.commitFile(path);
       if (outcome.kind === "ignored") {
-        new Notice(`File is in ignore list — not committed:\n${path}`, 6000);
+        new Notice("File is in git-ignore list", 6000);
       } else if (outcome.kind === "no-change") {
-        new Notice(`Nothing to commit for:\n${path}`, 3000);
+        new Notice("File was not changed", 3000);
       } else if (outcome.kind === "committed") {
-        new Notice(`Committed:\n${path}`, BRIEF_NOTICE_MS);
+        new Notice(`File committed`, BRIEF_NOTICE_MS);
       }
     } catch (err) {
       this.logger?.error("commit-file command failed", {
         err: describeError(err),
         path,
       });
-      new Notice(`Commit failed: ${err}`, 10000);
+      new Notice(`Commit failed:\n${err}`, 10000);
     }
   }
 
