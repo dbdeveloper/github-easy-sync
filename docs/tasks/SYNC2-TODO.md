@@ -57,16 +57,35 @@ Integration tests under `tests/integration/scenarios/sync2/corruption/`:
 
 ## P1 — Polish
 
-### Token-expiry surface in Settings drain-status
+### Token-expiry surface in Settings  ✅ DONE (2.0.2-beta2)
 
-Right now the TokenExpiredModal opens once per hour; the Settings
-drain-status section keeps showing "Last error" generically. Add
-a dedicated red banner ("GitHub token expired — click to renew")
-in the drain-status section that links to the same modal. So even
-if the modal-throttle has elapsed, the user sees the actionable
-state.
+The TokenExpiredModal opens at most once per hour, so a user whose
+token expired between modal showings only saw a generic "Last
+error" line. Two Settings surfaces now carry an actionable
+token-help box (a shared affordance with two link buttons —
+GitHub token page + README walkthrough):
 
-#### Status
+1. **GitHub sync status section** — when the last drain error was a
+   401/403, a help box appears under the error line.
+   `DrainStatus.lastError` gained an `isAuthError` flag
+   (`recordDrainError` detects `AuthError` / a 401|403 status) so
+   the section surfaces the box without re-parsing the message.
+
+2. **Test connection** — the help box appears below the probe
+   result on a 401/403, AND proactively whenever any required
+   credential field (token / owner / repo / branch) is empty —
+   even before the user clicks Test. On first launch every field
+   is empty, so a newcomer opening Settings immediately sees the
+   two key links and knows where to go.
+
+Shared component: `src/sync2/views/token-help.ts`
+(`GITHUB_TOKENS_URL`, `PLUGIN_README_URL`, `renderTokenHelpBox`).
+TokenExpiredModal refactored to import the URLs from there so all
+three surfaces (modal, drain-status, Test) stay in one source of
+truth. Box visibility is live: the four credential-field
+`onChange` handlers + the Test outcome both call
+`refreshTokenHelp()`.
+
 ---
 
 

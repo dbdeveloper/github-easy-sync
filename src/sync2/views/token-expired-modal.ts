@@ -3,6 +3,7 @@
 // AGPL-3.0 — se LICENSE.
 
 import { App, Modal, Setting } from "obsidian";
+import { GITHUB_TOKENS_URL, PLUGIN_README_URL } from "./token-help";
 
 // Surfaced when GitHub returns 401 ("Bad credentials") or 403 on a
 // sync surface — typically because the fine-grained PAT expired.
@@ -22,9 +23,9 @@ import { App, Modal, Setting } from "obsidian";
 // hour. The drain status section in Settings keeps a passive
 // banner up the whole time the token is invalid.
 
-const GITHUB_TOKENS_URL = "https://github.com/settings/personal-access-tokens";
-const PLUGIN_README_URL =
-  "https://github.com/dbdeveloper/github-easy-sync/blob/main/README.md#github-token-setup";
+// URLs live in ./token-help so the modal, the Settings drain-status
+// box, and the Test-connection box all point at the same two
+// destinations.
 
 export class TokenExpiredModal extends Modal {
   constructor(

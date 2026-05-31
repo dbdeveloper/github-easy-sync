@@ -24,7 +24,7 @@ import {
   needsSanitization,
   sanitizeFilename,
 } from "./cross-platform";
-import { StaleStateError } from "../errors";
+import { StaleStateError, AuthError } from "../errors";
 import GitignoreInvariants from "./gitignore-invariants";
 import PushQueue, { EnqueueMeta } from "./push-queue";
 import SnapshotStore, { RemoteIdentity } from "./snapshot-store";
@@ -442,8 +442,15 @@ export interface DrainStatus {
   currentFile: number;
   // Last error surfaced by drain (most recent) — string for
   // serialisation simplicity, with ISO timestamp prefix for the
-  // UI to render "x minutes ago".
-  lastError: { message: string; whenMs: number } | null;
+  // UI to render "x minutes ago". `isAuthError` is set when the
+  // error was a 401/403 (AuthError), so the Settings drain-status
+  // section can surface the token-help box without re-parsing the
+  // message string.
+  lastError: {
+    message: string;
+    whenMs: number;
+    isAuthError: boolean;
+  } | null;
 }
 
 export class Sync2Manager {
@@ -712,8 +719,17 @@ export class Sync2Manager {
   // next drain.
   recordDrainError(err: unknown): void {
     const message = err instanceof Error ? err.message : String(err);
+    // Detect 401/403 so the Settings drain-status section can show the
+    // token-help box. AuthError is the typed 401/403 from the engine;
+    // also catch a bare status field on duck-typed errors from the
+    // worker network path.
+    const status =
+      err instanceof AuthError
+        ? err.status
+        : (err as { status?: number } | null)?.status;
+    const isAuthError = status === 401 || status === 403;
     this.emitDrainStatus({
-      lastError: { message, whenMs: Date.now() },
+      lastError: { message, whenMs: Date.now(), isAuthError },
     });
   }
 

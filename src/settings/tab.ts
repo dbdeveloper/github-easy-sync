@@ -14,6 +14,7 @@ import {
 import GitHubSyncPlugin from "src/main";
 import { logFileNameFor } from "src/logger";
 import { formatSyncMessage } from "src/sync2/commit-message";
+import { renderTokenHelpBox } from "src/sync2/views/token-help";
 import manifest from "../../manifest.json";
 
 // Sync2-only settings tab. Mirrors the shape of GitHubSyncSettings —
@@ -31,6 +32,16 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
   // when the user toggles a setting that re-renders the page).
   private drainStatusUnsubscribe: (() => void) | null = null;
   private drainStatusTickTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Token-help affordance near the connection probe. The box appears
+  // proactively when any required credential field is empty (so a
+  // newcomer is pointed at the token page + README before they even
+  // click Test), and after a Test that returned 401/403. `slot` is
+  // the container the box renders into; `authError` latches a
+  // probe-time auth failure so the box stays up until the fields
+  // change. Both reset on each display().
+  private tokenHelpSlot: HTMLElement | null = null;
+  private tokenHelpAuthError = false;
 
   hide(): void {
     // Inherited from PluginSettingTab; runs when the user leaves
@@ -88,6 +99,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
             // token that 401s against GitHub for "no apparent reason".
             this.plugin.settings.githubToken = value.trim();
             await this.plugin.saveSettings();
+            this.refreshTokenHelp();
           }).inputEl.type = "password";
         tokenInput = text;
       });
@@ -102,6 +114,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.githubOwner = value.trim();
             await this.plugin.saveSettings();
+            this.refreshTokenHelp();
           }),
       );
 
@@ -115,6 +128,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.githubRepo = value.trim();
             await this.plugin.saveSettings();
+            this.refreshTokenHelp();
           }),
       );
 
@@ -128,6 +142,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.githubBranch = value.trim();
             await this.plugin.saveSettings();
+            this.refreshTokenHelp();
           }),
       );
 
@@ -176,11 +191,16 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
           .onClick(async () => {
             const { githubToken, githubOwner, githubRepo, githubBranch } =
               this.plugin.settings;
+            // Fresh probe — clear any latched auth flag; the branches
+            // below re-set it on a 401/403. The token-help box still
+            // shows for empty fields via refreshTokenHelp's field check.
+            this.tokenHelpAuthError = false;
             if (!githubToken || !githubOwner || !githubRepo) {
               setProbeResult(
                 "err",
                 "✗ Fill in token, owner, and repo first.",
               );
+              this.refreshTokenHelp();
               return;
             }
             setProbeResult("info", "Probing…");
@@ -202,6 +222,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
                   "✗ 401 Unauthorized — token invalid or expired.\n" +
                     "Generate a new token on GitHub → Settings → Developer settings.",
                 );
+                this.tokenHelpAuthError = true;
                 return;
               }
               if (repoRes.status === 403) {
@@ -211,6 +232,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
                     "Fine-grained PAT needs: Contents (R/W), Metadata (R).\n" +
                     "Classic PAT needs: repo.",
                 );
+                this.tokenHelpAuthError = true;
                 return;
               }
               if (repoRes.status === 404) {
@@ -298,11 +320,27 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
               );
             } finally {
               button.setDisabled(false);
+              // Re-evaluate the token-help box after every probe
+              // outcome: shown if 401/403 latched the auth flag above
+              // OR any credential field is still empty; hidden when
+              // everything checks out.
+              this.refreshTokenHelp();
             }
           }),
       );
     // Mount the result div right after the Setting row.
     containerEl.appendChild(probeResultEl);
+
+    // Token-help slot — sits directly UNDER the probe result so any
+    // auth box appears beneath the red text. Reset the auth latch on
+    // each display(); refreshTokenHelp() (called below + from the
+    // credential-field onChanges + from Test) decides whether the box
+    // is shown. On first launch all fields are empty, so the box is
+    // visible the moment the user opens Settings — the two key links
+    // (GitHub token page + README) are right there.
+    this.tokenHelpSlot = containerEl.createDiv();
+    this.tokenHelpAuthError = false;
+    this.refreshTokenHelp();
 
     // ── Device identity ─────────────────────────────────────────────
     new Setting(containerEl).setName("Sync").setHeading();
@@ -681,6 +719,27 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
   // Sync2Manager's drainStateChanged events and re-paints the
   // timer + path + last error + [Stop drain] button. Survives
   // re-display() via the saved unsubscribe handle.
+  // Show or hide the token-help box near the connection probe. Shown
+  // when ANY required credential field is empty (proactive onboarding
+  // — newcomers see the GitHub-token + README links the instant they
+  // open Settings) OR when the last Test returned 401/403. Idempotent:
+  // re-renders the box only when its visibility flips.
+  private refreshTokenHelp(): void {
+    const slot = this.tokenHelpSlot;
+    if (!slot) return;
+    const { githubToken, githubOwner, githubRepo, githubBranch } =
+      this.plugin.settings;
+    const anyEmpty =
+      !githubToken || !githubOwner || !githubRepo || !githubBranch;
+    const shouldShow = anyEmpty || this.tokenHelpAuthError;
+    const isShown = slot.childElementCount > 0;
+    if (shouldShow && !isShown) {
+      renderTokenHelpBox(slot);
+    } else if (!shouldShow && isShown) {
+      slot.empty();
+    }
+  }
+
   private renderDrainStatusSection(parent: HTMLElement): void {
     // Tear down any previous subscription before we re-render.
     this.drainStatusUnsubscribe?.();
@@ -705,6 +764,10 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     const errorLine = card.createDiv();
     errorLine.style.marginTop = "0.5em";
     errorLine.style.color = "var(--text-error)";
+    // Slot for the token-help box, shown under the error line when the
+    // last drain error was a 401/403. Distinct from the probe's
+    // token-help slot — this one tracks the live drain status.
+    const drainTokenHelpSlot = card.createDiv();
     const stopBtnWrap = card.createDiv();
     stopBtnWrap.style.marginTop = "0.5em";
     const stopBtn = stopBtnWrap.createEl("button", { text: "Stop sync" });
@@ -759,6 +822,16 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
         );
       } else {
         errorLine.setText("");
+      }
+      // Token-help box under the error line for 401/403 failures, so a
+      // user who doesn't recognise "401" still gets the actionable
+      // links. Re-render only when visibility flips.
+      const wantHelp = status.lastError?.isAuthError === true;
+      const hasHelp = drainTokenHelpSlot.childElementCount > 0;
+      if (wantHelp && !hasHelp) {
+        renderTokenHelpBox(drainTokenHelpSlot);
+      } else if (!wantHelp && hasHelp) {
+        drainTokenHelpSlot.empty();
       }
     };
 
