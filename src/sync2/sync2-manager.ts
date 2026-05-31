@@ -16,7 +16,10 @@ import {
 } from "../utils";
 import ChangeDetector from "./change-detector";
 import { atomicWriteFile } from "./atomic-write";
-import { extractAffectedPluginId } from "./plugin-update-bootloader";
+import {
+  extractAffectedPluginId,
+  isOwnPluginRecoverableFile,
+} from "./plugin-update-bootloader";
 import {
   needsSanitization,
   sanitizeFilename,
@@ -1873,6 +1876,88 @@ export class Sync2Manager {
     if (id !== null) this.affectedPluginIds.add(id);
   }
 
+  // 2.0.2-beta2 marker-based self-update protocol for OUR plugin's
+  // main.js / manifest.json / styles.css. The bootloader (which
+  // runs at the very top of our onload() before logger/snapshot
+  // init) needs an integrity signal it can verify WITHOUT access
+  // to ground-truth SHAs from the snapshot store. The marker file
+  // `.<basename>.<ext>.sync-tmp.` is that signal: its presence
+  // certifies that the sync-tmp write completed fully and the
+  // bytes are safe to apply.
+  //
+  // Protocol (executed in current drain process — POSIX rename of
+  // a running plugin's main.js is safe; the V8 in-memory image is
+  // independent of the file's inode):
+  //   Step 1: writeBinary(sync-tmp, bytes) — full write commit
+  //   Step 2: write(marker, "")            — "sync-tmp is verified"
+  //   Step 3: rename(file → bak)           — backup (Capacitor-safe)
+  //   Step 4: rename(sync-tmp → file)      — atomic swap
+  //   Step 5: afterCommit()                — snapshot update
+  //   Step 6: remove(marker)               — marker no longer needed
+  //   Step 7: remove(bak)                  — backup cleanup
+  //   add self to affectedPluginIds        — reloadPlugin at drain end
+  //
+  // All crash windows are covered by the bootloader's Cases A/B/C
+  // (see plugin-update-bootloader.ts): marker presence + sync-tmp
+  // presence directs the next-launch recovery deterministically.
+  //
+  // Used for all three of (main.js, manifest.json, styles.css)
+  // in our plugin dir. data.json is excluded (never synced from
+  // remote — per-device state).
+  private async applySelfUpdateOwnFile(
+    path: string,
+    bytes: ArrayBuffer,
+    afterCommit?: () => Promise<void>,
+  ): Promise<void> {
+    // Derive the staging + marker + bak filenames from the target.
+    // For `<dir>/main.js`: tmp = `<dir>/main.sync-tmp.js`,
+    // marker = `<dir>/.main.js.sync-tmp.`, bak = `<dir>/main.sync-bak.js`.
+    const slash = path.lastIndexOf("/");
+    const dir = path.slice(0, slash);
+    const fileName = path.slice(slash + 1);
+    const dotIdx = fileName.lastIndexOf(".");
+    const baseName = fileName.slice(0, dotIdx);
+    const ext = fileName.slice(dotIdx);
+    const tmpPath = `${dir}/${baseName}.sync-tmp${ext}`;
+    // Marker shape matches the modify-in-place convention so the
+    // existing AtomicWriteRecovery.sweep handles this protocol as a
+    // free defense-in-depth layer if the bootloader is bypassed.
+    const markerPath = `${dir}/.${fileName}.sync-tmp.`;
+    const bakPath = `${dir}/${baseName}.sync-bak${ext}`;
+
+    // Step 1: full write of sync-tmp (awaited; bytes flushed before
+    // marker write begins).
+    await this.vault.adapter.writeBinary(tmpPath, bytes);
+    // Step 2: drop marker — "sync-tmp is the gold standard, apply it".
+    await this.vault.adapter.write(markerPath, "");
+    // Steps 3-4: atomic swap via bak intermediate (portable —
+    // Capacitor rename does not overwrite, so we have to clear the
+    // destination first).
+    if (await this.vault.adapter.exists(path)) {
+      if (await this.vault.adapter.exists(bakPath)) {
+        await this.vault.adapter.remove(bakPath);
+      }
+      await this.vault.adapter.rename(path, bakPath);
+    }
+    await this.vault.adapter.rename(tmpPath, path);
+    // Step 5: afterCommit records the new snapshot.
+    if (afterCommit) await afterCommit();
+    // Steps 6-7: cleanup (best-effort; sweep handles any leftover).
+    try {
+      await this.vault.adapter.remove(markerPath);
+    } catch {
+      // ignore — bootloader's Case B handles next-launch
+    }
+    try {
+      await this.vault.adapter.remove(bakPath);
+    } catch {
+      // ignore — sweep handles next-launch
+    }
+    // Mark for reload at drain end. The drain.finally fires
+    // onPluginsAffected → main.ts schedules reloadPlugin.
+    this.affectedPluginIds.add(this.selfPluginId);
+  }
+
   private async writeBinaryRemote(
     path: string,
     base64Content: string,
@@ -1880,6 +1965,18 @@ export class Sync2Manager {
   ): Promise<void> {
     const bytes = await this.workerClient.decodeBase64(base64Content);
     await this.ensureParentDir(path);
+    // 2.0.2-beta2: OUR plugin's main.js / manifest.json / styles.css
+    // take the marker-based self-update path instead of plain
+    // atomicWriteFile. They have the "running code matches running
+    // metadata matches running stylesheet" recursion — the bootloader
+    // at our next onload() applies any half-finished update before
+    // anything else can touch the directory.
+    if (
+      isOwnPluginRecoverableFile(path, this.configDir, this.selfPluginId)
+    ) {
+      await this.applySelfUpdateOwnFile(path, bytes, afterCommit);
+      return;
+    }
     // Atomic-with-backup: a crash mid-write (especially of a plugin's
     // manifest.json or main.js bundle) would otherwise leave the file
     // partial and break the plugin at the next Obsidian launch. The
@@ -2393,6 +2490,16 @@ export class Sync2Manager {
       : { content, changed: false };
     await this.ensureParentDir(path);
     const bytes = new TextEncoder().encode(canonical).buffer as ArrayBuffer;
+    // 2.0.2-beta2: OUR plugin's recoverable text files
+    // (manifest.json, styles.css) take the marker-based protocol
+    // alongside main.js. See writeBinaryRemote.
+    if (
+      isOwnPluginRecoverableFile(path, this.configDir, this.selfPluginId)
+    ) {
+      await this.applySelfUpdateOwnFile(path, bytes, afterCommit);
+      const canonicalSha = await this.workerClient.computeGitBlobSHA(bytes);
+      return { canonicalSha, changed };
+    }
     // Atomic-with-backup. See writeBinaryRemote rationale.
     await atomicWriteFile(this.vault, path, bytes, afterCommit);
     this.maybeMarkPluginAffected(path);

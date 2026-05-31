@@ -2,85 +2,195 @@
 // Vladyslav Kozlovskyy <dbdevelop@gmail.com>, 2026.
 // AGPL-3.0 — see LICENSE.
 
-// 2.0.2-beta2 self-update bootloader. The ONE thing
-// `app.plugins.reloadPlugin('github-easy-sync')` can't do for us:
-// pick up a `main.js` we updated WHILE WE WERE RUNNING. The bootloader
-// runs at the very top of our onload() (before logger, before
-// settings init) and handles a pending `main.sync-tmp.js` left by a
-// previous sync that updated our plugin's own code.
+// 2.0.2-beta2 self-update bootloader. The first code that runs at the
+// top of our plugin's onload(), before logger, settings, or anything
+// else. Recovers a pending self-update for any of:
 //
-// The 9-step decision tree (mirrors docs/tasks/SYNC2-TODO.md
-// "BRAT-style auto-reload" → "Self-update of github-easy-sync"):
+//   - main.js        (running code, atomic-swap target)
+//   - manifest.json  (plugin metadata Obsidian reads on enable)
+//   - styles.css     (CSS Obsidian re-applies on enable)
 //
-//   1. Check if `<plugin>/main.sync-tmp.js` exists. If NOT → return
-//      false; the caller continues normal onload.
-//   2. Read both files; compute git-blob SHA of each.
-//   3. SHAs equal → the running code already IS the new version
-//      (Obsidian re-enabled us via a fresh load and picked up the
-//      new main.js naturally). Delete sync-tmp, return false; the
-//      caller continues normal onload.
-//   4. SHAs differ AND `main.sync-bak.js` is also present → the
-//      user reinstalled mid-recovery via BRAT / Community Plugins
-//      so whatever they just installed is the source of truth.
-//      Delete BOTH temp files, return false.
-//   5. SHAs differ AND no sync-bak → swap is pending. Two paths:
-//      a. Atomic rename available (POSIX) — adapter.rename
-//         (preceded by a defensive remove of the target so the
-//         Capacitor adapter's "destination exists" failure doesn't
-//         bite us).
-//      b. Atomic rename unavailable → fallback: rename main.js to
-//         sync-bak, rename sync-tmp to main.js, remove sync-bak.
-//         A crash in the middle of this is the documented "user
-//         reinstalls via BRAT / Community Plugins" case.
-//   6. Call reloadPlugin via setTimeout(..., 500) — gives the
-//      in-flight onload stack frame time to unwind cleanly before
-//      Obsidian's plugin manager tears the old instance down.
-//   7. Return true; the caller aborts the rest of onload (we'll be
-//      re-entered with NEW code in ~500ms).
+// data.json is intentionally OUT OF SCOPE: it's per-device state we
+// never pull from remote, so it has no recovery to do.
+//
+// CORRECTNESS NOTE — why marker file, not SHA comparison
+// ────────────────────────────────────────────────────────
+// The bootloader runs BEFORE the snapshot store loads, so it has no
+// "ground truth" SHA to verify a sync-tmp file's integrity against.
+// SHA(sync-tmp) computed at startup is just the hash of whatever
+// bytes happen to be on disk — if the write was interrupted, those
+// bytes are partial and the SHA is meaningless. A previous draft of
+// this bootloader compared SHA(file) to SHA(sync-tmp) and applied
+// when they differed; that incorrectly applied corrupted bytes when
+// sync-tmp was partial.
+//
+// The fix: a separate marker file `.<basename>.<ext>.sync-tmp.` is
+// written by the drain ONLY AFTER the sync-tmp write fully
+// completes. The bootloader uses MARKER PRESENCE as the integrity
+// signal:
+//
+//   marker present + sync-tmp present  →  sync-tmp is verified complete,
+//                                          apply forward (Case A)
+//   marker present + sync-tmp absent   →  swap completed before crash,
+//                                          remove orphan marker (Case B)
+//   marker absent  + sync-tmp present  →  write was incomplete OR
+//                                          marker write never landed;
+//                                          drop sync-tmp (Case C).
+//                                          Next sync re-pulls.
+//   marker absent  + sync-tmp absent   →  nothing pending (Case D)
+//
+// The marker filename shape `.<basename>.<ext>.sync-tmp.` matches
+// the modify-in-place marker convention from PSEUDO-MERGE-MODE
+// §19.1. This is intentional: the existing AtomicWriteRecovery.sweep
+// (which runs LATER in onload, at initSync2 time) already handles
+// markers via its modify-in-place recovery branch. So the sweep
+// provides a free defense-in-depth layer — if the bootloader is
+// somehow bypassed (e.g., a code bug at the very top of main()
+// causes onload to fall through), the sweep catches the same case.
 
 import type { DataAdapter } from "obsidian";
+
+// Files in our plugin's directory the bootloader recovers. Each gets
+// the same 4-case marker logic. data.json is excluded — we don't
+// sync it from remote, so there's no pending-update concept for it.
+const SELF_UPDATE_FILES = ["main.js", "manifest.json", "styles.css"];
 
 export interface BootloaderDeps {
   adapter: DataAdapter;
   pluginDir: string; // e.g. ".obsidian/plugins/github-easy-sync"
-  computeSha: (bytes: ArrayBuffer) => Promise<string>;
   // Closure that invokes app.plugins.reloadPlugin(<self id>). Wrapped
   // so tests can capture the call without touching Obsidian's
   // internal API and so the bootloader stays platform-agnostic.
   reloadPlugin: () => void;
-  // Optional. Surfaces "Plugin updated — reloading…" so the user sees
-  // SOMETHING happen before the reload fires.
+  // Optional. Surfaces "Plugin updated — reloading…" so the user
+  // sees SOMETHING happen before the reload fires.
   notice?: (msg: string, durationMs?: number) => void;
-  // Optional. Logger sink for diagnostic lines. Falls back to console
-  // in production (logger isn't initialised yet at bootloader time).
+  // Optional. Logger sink for diagnostic lines. Falls back to
+  // console in production (logger isn't initialised yet at
+  // bootloader time).
   log?: (msg: string, ctx?: Record<string, unknown>) => void;
   // Defaults to setTimeout. Tests pass a synchronous shim that
   // captures the scheduled callback.
   scheduleReload?: (cb: () => void, delayMs: number) => void;
 }
 
+// Per-file recovery outcome. Aggregated into BootloaderResult below.
+type FileResult =
+  | { kind: "no-pending" }
+  | { kind: "cleanup-marker-orphan" }
+  | { kind: "drop-orphan-sync-tmp" }
+  | { kind: "applied" }
+  | { kind: "failed"; reason: string };
+
 export type BootloaderResult =
   | { action: "no-pending" }
-  | { action: "already-applied"; details: "deleted-sync-tmp" }
-  | { action: "stale-recovery"; details: "deleted-sync-tmp-and-bak" }
-  | { action: "applied"; via: "atomic-rename" | "fallback" }
-  | { action: "failed"; reason: string };
+  | { action: "applied"; appliedFiles: string[] }
+  | { action: "failed"; reason: string; failedFile: string };
+
+// Derives the staging filename for an original. main.js →
+// main.sync-tmp.js. manifest.json → manifest.sync-tmp.json.
+function stagingNameFor(
+  fileName: string,
+  suffix: "sync-tmp" | "sync-bak",
+): string {
+  const dotIdx = fileName.lastIndexOf(".");
+  if (dotIdx <= 0) return `${fileName}.${suffix}`;
+  const base = fileName.slice(0, dotIdx);
+  const ext = fileName.slice(dotIdx);
+  return `${base}.${suffix}${ext}`;
+}
+
+// Derives the marker filename: .<basename>.<ext>.sync-tmp.
+function markerNameFor(fileName: string): string {
+  return `.${fileName}.sync-tmp.`;
+}
+
+async function recoverOneFile(
+  deps: BootloaderDeps,
+  fileName: string,
+): Promise<FileResult> {
+  const { adapter, pluginDir, log } = deps;
+  const finalPath = `${pluginDir}/${fileName}`;
+  const tmpPath = `${pluginDir}/${stagingNameFor(fileName, "sync-tmp")}`;
+  const markerPath = `${pluginDir}/${markerNameFor(fileName)}`;
+  const bakPath = `${pluginDir}/${stagingNameFor(fileName, "sync-bak")}`;
+
+  const markerExists = await adapter.exists(markerPath);
+  const tmpExists = await adapter.exists(tmpPath);
+
+  // Case A: marker + sync-tmp → apply forward
+  if (markerExists && tmpExists) {
+    try {
+      if (await adapter.exists(finalPath)) {
+        if (await adapter.exists(bakPath)) {
+          await adapter.remove(bakPath);
+        }
+        await adapter.rename(finalPath, bakPath);
+      }
+      await adapter.rename(tmpPath, finalPath);
+      try {
+        await adapter.remove(markerPath);
+      } catch {
+        // best-effort
+      }
+      try {
+        await adapter.remove(bakPath);
+      } catch {
+        // best-effort
+      }
+    } catch (err) {
+      log?.(`Self-update bootloader: ${fileName} apply failed`, {
+        err: `${err}`,
+      });
+      return { kind: "failed", reason: "apply-failed" };
+    }
+    log?.(
+      `Self-update bootloader: ${fileName} marker + sync-tmp → applied forward`,
+    );
+    return { kind: "applied" };
+  }
+
+  // Case B: marker without sync-tmp → cleanup orphan marker
+  if (markerExists && !tmpExists) {
+    try {
+      await adapter.remove(markerPath);
+    } catch (err) {
+      log?.(`Failed to remove ${fileName} orphan marker`, {
+        err: `${err}`,
+      });
+    }
+    log?.(`Self-update bootloader: ${fileName} marker orphan cleaned`);
+    return { kind: "cleanup-marker-orphan" };
+  }
+
+  // Case C: sync-tmp without marker → drop
+  if (!markerExists && tmpExists) {
+    try {
+      await adapter.remove(tmpPath);
+    } catch (err) {
+      log?.(`Failed to drop ${fileName} incomplete sync-tmp`, {
+        err: `${err}`,
+      });
+    }
+    log?.(
+      `Self-update bootloader: ${fileName} incomplete sync-tmp dropped (no marker)`,
+    );
+    return { kind: "drop-orphan-sync-tmp" };
+  }
+
+  // Case D: nothing pending
+  return { kind: "no-pending" };
+}
 
 export async function runSelfUpdateBootloader(
   deps: BootloaderDeps,
 ): Promise<BootloaderResult> {
   const {
-    adapter,
-    pluginDir,
-    computeSha,
     reloadPlugin,
     notice,
     log,
     scheduleReload = (cb, delay) => setTimeout(cb, delay),
   } = deps;
-  const mainPath = `${pluginDir}/main.js`;
-  const tmpPath = `${pluginDir}/main.sync-tmp.js`;
-  const bakPath = `${pluginDir}/main.sync-bak.js`;
   const logFn =
     log ??
     ((msg: string, ctx?: Record<string, unknown>) => {
@@ -91,108 +201,31 @@ export async function runSelfUpdateBootloader(
       }
     });
 
-  // Step 1: no pending update → no-op
-  if (!(await adapter.exists(tmpPath))) {
+  const appliedFiles: string[] = [];
+  for (const fileName of SELF_UPDATE_FILES) {
+    const r = await recoverOneFile({ ...deps, log: logFn }, fileName);
+    if (r.kind === "failed") {
+      return {
+        action: "failed",
+        reason: r.reason,
+        failedFile: fileName,
+      };
+    }
+    if (r.kind === "applied") {
+      appliedFiles.push(fileName);
+    }
+    // Cases B/C/D for this file: continue with next file. The
+    // changes happened (marker cleared, sync-tmp dropped) but don't
+    // require reload by themselves.
+  }
+
+  if (appliedFiles.length === 0) {
     return { action: "no-pending" };
   }
 
-  // Step 2: compare SHAs
-  let mainSha: string;
-  let tmpSha: string;
-  try {
-    const mainBytes = await adapter.readBinary(mainPath);
-    const tmpBytes = await adapter.readBinary(tmpPath);
-    mainSha = await computeSha(mainBytes);
-    tmpSha = await computeSha(tmpBytes);
-  } catch (err) {
-    logFn("Failed to read main.js / sync-tmp for SHA comparison", {
-      err: `${err}`,
-    });
-    return { action: "failed", reason: "sha-read-failed" };
-  }
-
-  // Step 3: already up-to-date (Obsidian re-enabled us with new
-  // bytes — sync-tmp is a stale leftover)
-  if (mainSha === tmpSha) {
-    try {
-      await adapter.remove(tmpPath);
-    } catch (err) {
-      logFn("Failed to remove stale sync-tmp", { err: `${err}` });
-    }
-    logFn("Self-update bootloader: SHAs equal, removed sync-tmp", {
-      sha: mainSha,
-    });
-    return { action: "already-applied", details: "deleted-sync-tmp" };
-  }
-
-  // Step 4: sync-bak ALSO present (user reinstalled mid-recovery
-  // via BRAT / Community Plugins). Trust the running install,
-  // sweep both temp files away.
-  if (await adapter.exists(bakPath)) {
-    try {
-      await adapter.remove(tmpPath);
-    } catch (err) {
-      logFn("Failed to remove sync-tmp during stale-recovery sweep", {
-        err: `${err}`,
-      });
-    }
-    try {
-      await adapter.remove(bakPath);
-    } catch (err) {
-      logFn("Failed to remove sync-bak during stale-recovery sweep", {
-        err: `${err}`,
-      });
-    }
-    logFn(
-      "Self-update bootloader: stale sync-tmp + sync-bak from external reinstall, both removed",
-    );
-    return {
-      action: "stale-recovery",
-      details: "deleted-sync-tmp-and-bak",
-    };
-  }
-
-  // Step 5: apply the swap. Try Capacitor-safe pattern first
-  // (remove target, then rename) — works on every adapter the
-  // plugin supports.
-  let via: "atomic-rename" | "fallback";
-  try {
-    await adapter.remove(mainPath);
-    await adapter.rename(tmpPath, mainPath);
-    via = "atomic-rename";
-  } catch (err) {
-    logFn(
-      "Atomic-style rename failed, attempting fallback (bak intermediate)",
-      { err: `${err}` },
-    );
-    // Fallback: mv → bak, mv tmp → main, rm bak. If the second
-    // rename crashes, the user must reinstall via BRAT / Community
-    // Plugins.
-    try {
-      // If main.js was already removed by the failed first attempt,
-      // the rename-to-bak will throw too — accept the crash window
-      // and let the documented "reinstall via BRAT" path take over.
-      if (await adapter.exists(mainPath)) {
-        await adapter.rename(mainPath, bakPath);
-      }
-      await adapter.rename(tmpPath, mainPath);
-      try {
-        await adapter.remove(bakPath);
-      } catch {
-        // bak cleanup is best-effort; recovery sweep will catch it
-        // on the next run.
-      }
-      via = "fallback";
-    } catch (fallbackErr) {
-      logFn("Self-update bootloader: fallback rename also failed", {
-        err: `${fallbackErr}`,
-      });
-      return { action: "failed", reason: "rename-failed" };
-    }
-  }
-
-  // Step 6: schedule reload. 500ms lets the onload stack frame
-  // unwind before Obsidian's plugin lifecycle tears us down.
+  // At least one of (main.js, manifest.json, styles.css) was applied —
+  // schedule reloadPlugin. Obsidian re-reads all three on plugin
+  // enable, so a single reload picks up any combination of changes.
   scheduleReload(() => {
     try {
       reloadPlugin();
@@ -200,12 +233,15 @@ export async function runSelfUpdateBootloader(
       logFn("reloadPlugin call failed", { err: `${err}` });
     }
   }, 500);
-  notice?.("Plugin updated — reloading…", 5000);
-  logFn("Self-update bootloader: swap applied, reload scheduled", {
-    via,
+  const msg =
+    appliedFiles.length === 1
+      ? `Plugin updated (${appliedFiles[0]}) — reloading…`
+      : `Plugin updated (${appliedFiles.length} files) — reloading…`;
+  notice?.(msg, 5000);
+  logFn("Self-update bootloader: apply complete, reload scheduled", {
+    appliedFiles,
   });
-
-  return { action: "applied", via };
+  return { action: "applied", appliedFiles };
 }
 
 // Helper: parses a path under the vault root and returns the plugin
@@ -238,4 +274,21 @@ export function extractAffectedPluginId(
     return id;
   }
   return null;
+}
+
+// True iff the given path is one of OUR plugin's files that uses the
+// bootloader marker protocol on write. Excludes data.json (per-device
+// state, never synced from remote). Used by Sync2Manager to route
+// remote-driven writes to `applySelfUpdate*` instead of plain
+// atomicWriteFile.
+export function isOwnPluginRecoverableFile(
+  path: string,
+  configDir: string,
+  selfPluginId: string,
+): boolean {
+  const prefix = `${configDir}/plugins/${selfPluginId}/`;
+  if (!path.startsWith(prefix)) return false;
+  const rest = path.slice(prefix.length);
+  if (rest.includes("/")) return false;
+  return SELF_UPDATE_FILES.includes(rest);
 }

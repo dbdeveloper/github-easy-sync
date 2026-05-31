@@ -41,7 +41,6 @@ import {
   runSelfUpdateBootloader,
   extractAffectedPluginId,
 } from "./sync2/plugin-update-bootloader";
-import { calculateGitBlobSHA } from "./utils";
 import manifest from "../manifest.json";
 
 // How long the brief local-phase notices stay visible. 700ms is the
@@ -139,16 +138,16 @@ export default class GitHubSyncPlugin extends Plugin {
     const startedAt = Date.now();
     try {
       // 2.0.2-beta2 self-update bootloader. Runs BEFORE loadSettings,
-      // before logger init, before anything else — handles a pending
-      // `main.sync-tmp.js` left by a previous self-update that
-      // crashed mid-protocol. If the bootloader applies the swap,
-      // it schedules reloadPlugin and we ABORT the rest of onload
-      // (we'll be re-entered with the NEW code in ~500ms).
+      // before logger init, before anything else — handles pending
+      // sync-tmp + marker pairs for OUR plugin's main.js /
+      // manifest.json / styles.css left by a previous self-update
+      // that crashed mid-protocol. If the bootloader applies any
+      // swap, it schedules reloadPlugin and we ABORT the rest of
+      // onload (we'll be re-entered with the NEW code in ~500ms).
       try {
         const bootloaderResult = await runSelfUpdateBootloader({
           adapter: this.app.vault.adapter,
           pluginDir: `${this.app.vault.configDir}/plugins/${manifest.id}`,
-          computeSha: calculateGitBlobSHA,
           reloadPlugin: () => {
             const plugins = (this.app as unknown as {
               plugins?: { reloadPlugin?: (id: string) => Promise<void> };

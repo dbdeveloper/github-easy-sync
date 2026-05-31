@@ -10,13 +10,10 @@ import { Vault as MockVault } from "../../mock-obsidian";
 import {
   runSelfUpdateBootloader,
   extractAffectedPluginId,
+  isOwnPluginRecoverableFile,
 } from "../../src/sync2/plugin-update-bootloader";
-import { calculateGitBlobSHA } from "../../src/utils";
 import type { DataAdapter } from "obsidian";
 
-// Spin up a fresh fs-backed adapter for each test so the file state
-// of one case doesn't leak into the next. All bootloader tests
-// operate inside `<tmp>/.obsidian/plugins/github-easy-sync/`.
 function makeFixture() {
   const root = mkdtempSync(path.join(os.tmpdir(), "bootloader-test-"));
   const vault = new MockVault(root) as unknown as { adapter: DataAdapter };
@@ -31,16 +28,13 @@ function makeFixture() {
   };
 }
 
-async function setupPluginDir(
+async function setup(
   adapter: DataAdapter,
   pluginDir: string,
   files: Record<string, string>,
 ): Promise<void> {
   for (const [name, content] of Object.entries(files)) {
-    const full = `${pluginDir}/${name}`;
-    // Ensure parent dir exists. Mock adapter creates as needed when
-    // writing through write().
-    await adapter.write(full, content);
+    await adapter.write(`${pluginDir}/${name}`, content);
   }
 }
 
@@ -76,152 +70,127 @@ function captureReload(): {
   };
 }
 
-describe("runSelfUpdateBootloader — 9-step decision matrix", () => {
-  it("Case 1: no main.sync-tmp.js → returns 'no-pending', no reload scheduled", async () => {
+// Filenames used throughout. Bootloader handles main.js, manifest.json,
+// and styles.css (data.json is excluded — never synced from remote).
+const FILES = {
+  main: {
+    final: "main.js",
+    tmp: "main.sync-tmp.js",
+    marker: ".main.js.sync-tmp.",
+    bak: "main.sync-bak.js",
+  },
+  manifest: {
+    final: "manifest.json",
+    tmp: "manifest.sync-tmp.json",
+    marker: ".manifest.json.sync-tmp.",
+    bak: "manifest.sync-bak.json",
+  },
+  styles: {
+    final: "styles.css",
+    tmp: "styles.sync-tmp.css",
+    marker: ".styles.css.sync-tmp.",
+    bak: "styles.sync-bak.css",
+  },
+};
+
+describe("runSelfUpdateBootloader — marker-based recovery for main.js + manifest.json + styles.css", () => {
+  it("Case D: clean state (nothing pending) → 'no-pending', no reload", async () => {
     const f = makeFixture();
     try {
-      await setupPluginDir(f.adapter, f.pluginDir, {
-        "main.js": "old-code",
+      await setup(f.adapter, f.pluginDir, {
+        [FILES.main.final]: "current-code",
+        [FILES.manifest.final]: "{}",
+        [FILES.styles.final]: "/* css */",
       });
       const r = captureReload();
 
       const result = await runSelfUpdateBootloader({
         adapter: f.adapter,
         pluginDir: f.pluginDir,
-        computeSha: calculateGitBlobSHA,
         reloadPlugin: r.reloadPlugin,
         scheduleReload: r.scheduleReload,
       });
 
       expect(result).toEqual({ action: "no-pending" });
       expect(r.captured.count).toBe(0);
-      expect(r.captured.delays).toEqual([]);
-      // main.js untouched
-      expect(await f.adapter.read(`${f.pluginDir}/main.js`)).toBe("old-code");
     } finally {
       f.cleanup();
     }
   });
 
-  it("Case 2: sync-tmp present, SHAs EQUAL, no bak → deletes sync-tmp, no reload", async () => {
+  it("Case C (main.js only): sync-tmp without marker → DROPPED (NOT applied), 'no-pending'", async () => {
+    // The bug fix: previous SHA-comparison bootloader applied
+    // unverified bytes. Marker-based bootloader drops sync-tmp
+    // when marker is absent (safe — write may have been partial).
     const f = makeFixture();
     try {
-      await setupPluginDir(f.adapter, f.pluginDir, {
-        "main.js": "new-code",
-        "main.sync-tmp.js": "new-code", // SHA matches main.js
+      await setup(f.adapter, f.pluginDir, {
+        [FILES.main.final]: "current-code",
+        [FILES.main.tmp]: "POTENTIALLY-CORRUPTED-BYTES",
       });
       const r = captureReload();
 
       const result = await runSelfUpdateBootloader({
         adapter: f.adapter,
         pluginDir: f.pluginDir,
-        computeSha: calculateGitBlobSHA,
         reloadPlugin: r.reloadPlugin,
         scheduleReload: r.scheduleReload,
       });
 
-      expect(result).toEqual({
-        action: "already-applied",
-        details: "deleted-sync-tmp",
-      });
+      // No files applied → overall result is no-pending (the
+      // per-file cleanup happened but isn't surfaced in the
+      // aggregated action).
+      expect(result).toEqual({ action: "no-pending" });
       expect(r.captured.count).toBe(0);
-      expect(
-        await f.adapter.exists(`${f.pluginDir}/main.sync-tmp.js`),
-      ).toBe(false);
-      expect(await f.adapter.read(`${f.pluginDir}/main.js`)).toBe("new-code");
-    } finally {
-      f.cleanup();
-    }
-  });
-
-  it("Case 3: SHAs EQUAL but bak ALSO present → still deletes sync-tmp (bak is stale leftover, no special handling needed beyond no-op)", async () => {
-    // This case is rare: sync-bak surviving alongside sync-tmp with
-    // matching SHA means a prior recovery sweep half-finished but
-    // main.js was already up to date. We just delete sync-tmp; the
-    // sync-bak is left for the next general recovery pass (or for
-    // the user / community-plugin reinstall flow). The 9-step spec
-    // doesn't special-case it because the "delete both" only fires
-    // when SHAs DIFFER (per step 4). Verify the bootloader follows
-    // the spec exactly.
-    const f = makeFixture();
-    try {
-      await setupPluginDir(f.adapter, f.pluginDir, {
-        "main.js": "code",
-        "main.sync-tmp.js": "code",
-        "main.sync-bak.js": "old-backup",
-      });
-      const r = captureReload();
-
-      const result = await runSelfUpdateBootloader({
-        adapter: f.adapter,
-        pluginDir: f.pluginDir,
-        computeSha: calculateGitBlobSHA,
-        reloadPlugin: r.reloadPlugin,
-        scheduleReload: r.scheduleReload,
-      });
-
-      expect(result).toEqual({
-        action: "already-applied",
-        details: "deleted-sync-tmp",
-      });
-      expect(r.captured.count).toBe(0);
-      expect(
-        await f.adapter.exists(`${f.pluginDir}/main.sync-tmp.js`),
-      ).toBe(false);
-      // sync-bak left alone in this code path — it's only swept when
-      // SHAs differ (the edge-case-from-external-reinstall path).
-      expect(
-        await f.adapter.exists(`${f.pluginDir}/main.sync-bak.js`),
-      ).toBe(true);
-    } finally {
-      f.cleanup();
-    }
-  });
-
-  it("Case 4: SHAs DIFFER, bak ALSO present (external reinstall edge case) → deletes BOTH temp files, no reload", async () => {
-    const f = makeFixture();
-    try {
-      await setupPluginDir(f.adapter, f.pluginDir, {
-        "main.js": "fresh-install-from-brat",
-        "main.sync-tmp.js": "stale-pending-update",
-        "main.sync-bak.js": "what-used-to-be-old",
-      });
-      const r = captureReload();
-
-      const result = await runSelfUpdateBootloader({
-        adapter: f.adapter,
-        pluginDir: f.pluginDir,
-        computeSha: calculateGitBlobSHA,
-        reloadPlugin: r.reloadPlugin,
-        scheduleReload: r.scheduleReload,
-      });
-
-      expect(result).toEqual({
-        action: "stale-recovery",
-        details: "deleted-sync-tmp-and-bak",
-      });
-      expect(r.captured.count).toBe(0);
-      expect(
-        await f.adapter.exists(`${f.pluginDir}/main.sync-tmp.js`),
-      ).toBe(false);
-      expect(
-        await f.adapter.exists(`${f.pluginDir}/main.sync-bak.js`),
-      ).toBe(false);
-      // main.js was the fresh install — left untouched
-      expect(await f.adapter.read(`${f.pluginDir}/main.js`)).toBe(
-        "fresh-install-from-brat",
+      // Sync-tmp gone, main.js untouched (correctness — did NOT
+      // apply unverified bytes).
+      expect(await f.adapter.exists(`${f.pluginDir}/${FILES.main.tmp}`)).toBe(
+        false,
+      );
+      expect(await f.adapter.read(`${f.pluginDir}/${FILES.main.final}`)).toBe(
+        "current-code",
       );
     } finally {
       f.cleanup();
     }
   });
 
-  it("Case 5: SHAs DIFFER, no bak → applies swap via atomic rename, schedules reload", async () => {
+  it("Case B (main.js only): marker without sync-tmp → orphan cleaned, 'no-pending'", async () => {
     const f = makeFixture();
     try {
-      await setupPluginDir(f.adapter, f.pluginDir, {
-        "main.js": "old-code-bytes",
-        "main.sync-tmp.js": "new-code-bytes",
+      await setup(f.adapter, f.pluginDir, {
+        [FILES.main.final]: "post-apply-code",
+        [FILES.main.marker]: "",
+      });
+      const r = captureReload();
+
+      const result = await runSelfUpdateBootloader({
+        adapter: f.adapter,
+        pluginDir: f.pluginDir,
+        reloadPlugin: r.reloadPlugin,
+        scheduleReload: r.scheduleReload,
+      });
+
+      expect(result).toEqual({ action: "no-pending" });
+      expect(r.captured.count).toBe(0);
+      expect(await f.adapter.exists(`${f.pluginDir}/${FILES.main.marker}`)).toBe(
+        false,
+      );
+      expect(await f.adapter.read(`${f.pluginDir}/${FILES.main.final}`)).toBe(
+        "post-apply-code",
+      );
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("Case A (main.js only): marker + sync-tmp + main.js → applied, reload scheduled", async () => {
+    const f = makeFixture();
+    try {
+      await setup(f.adapter, f.pluginDir, {
+        [FILES.main.final]: "old-code-bytes",
+        [FILES.main.tmp]: "new-code-bytes",
+        [FILES.main.marker]: "",
       });
       const r = captureReload();
       const notices: string[] = [];
@@ -229,144 +198,266 @@ describe("runSelfUpdateBootloader — 9-step decision matrix", () => {
       const result = await runSelfUpdateBootloader({
         adapter: f.adapter,
         pluginDir: f.pluginDir,
-        computeSha: calculateGitBlobSHA,
         reloadPlugin: r.reloadPlugin,
         scheduleReload: r.scheduleReload,
         notice: (msg) => notices.push(msg),
       });
 
-      expect(result).toEqual({ action: "applied", via: "atomic-rename" });
+      expect(result.action).toBe("applied");
+      if (result.action === "applied") {
+        expect(result.appliedFiles).toEqual(["main.js"]);
+      }
       expect(r.captured.delays).toEqual([500]);
-      expect(r.captured.count).toBe(0); // not fired yet
       r.fireDeferred();
       expect(r.captured.count).toBe(1);
-
-      expect(await f.adapter.read(`${f.pluginDir}/main.js`)).toBe(
+      expect(await f.adapter.read(`${f.pluginDir}/${FILES.main.final}`)).toBe(
         "new-code-bytes",
       );
-      expect(
-        await f.adapter.exists(`${f.pluginDir}/main.sync-tmp.js`),
-      ).toBe(false);
-      expect(
-        await f.adapter.exists(`${f.pluginDir}/main.sync-bak.js`),
-      ).toBe(false);
-      expect(notices.length).toBe(1);
-      expect(notices[0]).toContain("reloading");
+      expect(await f.adapter.exists(`${f.pluginDir}/${FILES.main.tmp}`)).toBe(
+        false,
+      );
+      expect(await f.adapter.exists(`${f.pluginDir}/${FILES.main.marker}`)).toBe(
+        false,
+      );
+      expect(await f.adapter.exists(`${f.pluginDir}/${FILES.main.bak}`)).toBe(
+        false,
+      );
+      expect(notices[0].toLowerCase()).toContain("reloading");
     } finally {
       f.cleanup();
     }
   });
 
-  it("Case 6: failure during SHA read → returns 'failed', no swap, no reload", async () => {
+  it("Case A (manifest.json only): pending manifest update → applied, reload scheduled", async () => {
+    // Same protocol works for manifest.json (Obsidian re-reads it
+    // on plugin enable; reload picks up the new declared version /
+    // permissions / etc).
     const f = makeFixture();
     try {
-      // sync-tmp exists per exists() but readBinary throws
-      // (simulates a partial/corrupted write).
-      await setupPluginDir(f.adapter, f.pluginDir, {
-        "main.js": "old",
-        "main.sync-tmp.js": "tmp",
+      await setup(f.adapter, f.pluginDir, {
+        [FILES.main.final]: "code",
+        [FILES.manifest.final]: '{"version":"1.0.0"}',
+        [FILES.manifest.tmp]: '{"version":"2.0.0"}',
+        [FILES.manifest.marker]: "",
       });
-      const adapter: DataAdapter = {
-        ...f.adapter,
-        readBinary: async () => {
-          throw new Error("simulated read failure");
-        },
-      } as DataAdapter;
       const r = captureReload();
 
       const result = await runSelfUpdateBootloader({
-        adapter,
+        adapter: f.adapter,
         pluginDir: f.pluginDir,
-        computeSha: calculateGitBlobSHA,
         reloadPlugin: r.reloadPlugin,
         scheduleReload: r.scheduleReload,
       });
 
-      expect(result).toEqual({ action: "failed", reason: "sha-read-failed" });
-      expect(r.captured.count).toBe(0);
-      // Files all untouched — caller continues normal onload.
-      expect(
-        await f.adapter.exists(`${f.pluginDir}/main.sync-tmp.js`),
-      ).toBe(true);
-    } finally {
-      f.cleanup();
-    }
-  });
-
-  it("Case 7: atomic-rename throws → falls back to bak-intermediate path, swap applied", async () => {
-    const f = makeFixture();
-    try {
-      await setupPluginDir(f.adapter, f.pluginDir, {
-        "main.js": "old-code",
-        "main.sync-tmp.js": "new-code",
-      });
-      // First rename throws (simulates Capacitor edge case);
-      // the fallback path uses two renames + a remove.
-      let renameCalls = 0;
-      const adapter: DataAdapter = {
-        ...f.adapter,
-        remove: f.adapter.remove.bind(f.adapter),
-        rename: async (src: string, dst: string): Promise<void> => {
-          renameCalls += 1;
-          if (renameCalls === 1) {
-            throw new Error("simulated atomic rename failure");
-          }
-          // Subsequent renames go through normally
-          return f.adapter.rename(src, dst);
-        },
-        exists: f.adapter.exists.bind(f.adapter),
-      } as DataAdapter;
-      const r = captureReload();
-
-      const result = await runSelfUpdateBootloader({
-        adapter,
-        pluginDir: f.pluginDir,
-        computeSha: calculateGitBlobSHA,
-        reloadPlugin: r.reloadPlugin,
-        scheduleReload: r.scheduleReload,
-      });
-
-      expect(result).toEqual({ action: "applied", via: "fallback" });
+      expect(result.action).toBe("applied");
+      if (result.action === "applied") {
+        expect(result.appliedFiles).toEqual(["manifest.json"]);
+      }
       expect(r.captured.delays).toEqual([500]);
-      expect(await f.adapter.read(`${f.pluginDir}/main.js`)).toBe("new-code");
       expect(
-        await f.adapter.exists(`${f.pluginDir}/main.sync-tmp.js`),
-      ).toBe(false);
-      // Fallback path leaves sync-bak removed when remove() succeeds
-      expect(
-        await f.adapter.exists(`${f.pluginDir}/main.sync-bak.js`),
-      ).toBe(false);
+        await f.adapter.read(`${f.pluginDir}/${FILES.manifest.final}`),
+      ).toBe('{"version":"2.0.0"}');
     } finally {
       f.cleanup();
     }
   });
 
-  it("Case 8: BOTH renames fail (atomic AND fallback) → returns 'failed', user must reinstall", async () => {
+  it("Case A (styles.css only): pending styles update → applied, reload scheduled", async () => {
     const f = makeFixture();
     try {
-      await setupPluginDir(f.adapter, f.pluginDir, {
-        "main.js": "old-code",
-        "main.sync-tmp.js": "new-code",
+      await setup(f.adapter, f.pluginDir, {
+        [FILES.main.final]: "code",
+        [FILES.styles.final]: "/* old */",
+        [FILES.styles.tmp]: "/* new */",
+        [FILES.styles.marker]: "",
+      });
+      const r = captureReload();
+
+      const result = await runSelfUpdateBootloader({
+        adapter: f.adapter,
+        pluginDir: f.pluginDir,
+        reloadPlugin: r.reloadPlugin,
+        scheduleReload: r.scheduleReload,
+      });
+
+      expect(result.action).toBe("applied");
+      if (result.action === "applied") {
+        expect(result.appliedFiles).toEqual(["styles.css"]);
+      }
+      expect(r.captured.delays).toEqual([500]);
+      expect(
+        await f.adapter.read(`${f.pluginDir}/${FILES.styles.final}`),
+      ).toBe("/* new */");
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("multiple files pending simultaneously: ALL applied, ONE reload scheduled", async () => {
+    // Drain pulled a new plugin version where main.js + manifest.json +
+    // styles.css all changed. Each gets its own marker + sync-tmp.
+    // Bootloader applies all three, schedules ONE reload (Obsidian's
+    // reload re-reads everything anyway).
+    const f = makeFixture();
+    try {
+      await setup(f.adapter, f.pluginDir, {
+        [FILES.main.final]: "old-main",
+        [FILES.main.tmp]: "new-main",
+        [FILES.main.marker]: "",
+        [FILES.manifest.final]: "{}",
+        [FILES.manifest.tmp]: '{"new":true}',
+        [FILES.manifest.marker]: "",
+        [FILES.styles.final]: "/* old */",
+        [FILES.styles.tmp]: "/* new */",
+        [FILES.styles.marker]: "",
+      });
+      const r = captureReload();
+      const notices: { msg: string; duration?: number }[] = [];
+
+      const result = await runSelfUpdateBootloader({
+        adapter: f.adapter,
+        pluginDir: f.pluginDir,
+        reloadPlugin: r.reloadPlugin,
+        scheduleReload: r.scheduleReload,
+        notice: (msg, d) => notices.push({ msg, duration: d }),
+      });
+
+      expect(result.action).toBe("applied");
+      if (result.action === "applied") {
+        expect(result.appliedFiles).toEqual([
+          "main.js",
+          "manifest.json",
+          "styles.css",
+        ]);
+      }
+      // ONE reload, not three.
+      expect(r.captured.delays).toEqual([500]);
+      expect(notices.length).toBe(1);
+      expect(notices[0].msg).toContain("3 files");
+      // All applied
+      expect(await f.adapter.read(`${f.pluginDir}/${FILES.main.final}`)).toBe(
+        "new-main",
+      );
+      expect(
+        await f.adapter.read(`${f.pluginDir}/${FILES.manifest.final}`),
+      ).toBe('{"new":true}');
+      expect(
+        await f.adapter.read(`${f.pluginDir}/${FILES.styles.final}`),
+      ).toBe("/* new */");
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("mixed cases: main.js applied + manifest.json incomplete (no marker) + styles.css clean", async () => {
+    // Drain wrote main.js fully (marker present), but crashed
+    // while writing manifest.sync-tmp (no marker landed).
+    // Bootloader: applies main.js, drops the incomplete
+    // manifest sync-tmp, leaves styles.css alone.
+    const f = makeFixture();
+    try {
+      await setup(f.adapter, f.pluginDir, {
+        [FILES.main.final]: "old-main",
+        [FILES.main.tmp]: "new-main",
+        [FILES.main.marker]: "",
+        [FILES.manifest.final]: '{"version":"1"}',
+        [FILES.manifest.tmp]: "INCOMPLETE-BYTES",
+        // no manifest marker
+        [FILES.styles.final]: "/* css */",
+      });
+      const r = captureReload();
+
+      const result = await runSelfUpdateBootloader({
+        adapter: f.adapter,
+        pluginDir: f.pluginDir,
+        reloadPlugin: r.reloadPlugin,
+        scheduleReload: r.scheduleReload,
+      });
+
+      expect(result.action).toBe("applied");
+      if (result.action === "applied") {
+        expect(result.appliedFiles).toEqual(["main.js"]);
+      }
+      // main.js applied
+      expect(await f.adapter.read(`${f.pluginDir}/${FILES.main.final}`)).toBe(
+        "new-main",
+      );
+      // manifest.json untouched (incomplete sync-tmp was dropped)
+      expect(
+        await f.adapter.read(`${f.pluginDir}/${FILES.manifest.final}`),
+      ).toBe('{"version":"1"}');
+      expect(
+        await f.adapter.exists(`${f.pluginDir}/${FILES.manifest.tmp}`),
+      ).toBe(false);
+      // styles.css untouched
+      expect(
+        await f.adapter.read(`${f.pluginDir}/${FILES.styles.final}`),
+      ).toBe("/* css */");
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("Case A variant: marker + sync-tmp, main.js absent (crash between bak rename and tmp rename) → applied", async () => {
+    const f = makeFixture();
+    try {
+      await setup(f.adapter, f.pluginDir, {
+        [FILES.main.tmp]: "new-code-bytes",
+        [FILES.main.marker]: "",
+        [FILES.main.bak]: "old-code-bytes",
+      });
+      const r = captureReload();
+
+      const result = await runSelfUpdateBootloader({
+        adapter: f.adapter,
+        pluginDir: f.pluginDir,
+        reloadPlugin: r.reloadPlugin,
+        scheduleReload: r.scheduleReload,
+      });
+
+      expect(result.action).toBe("applied");
+      expect(r.captured.delays).toEqual([500]);
+      expect(await f.adapter.read(`${f.pluginDir}/${FILES.main.final}`)).toBe(
+        "new-code-bytes",
+      );
+      expect(await f.adapter.exists(`${f.pluginDir}/${FILES.main.bak}`)).toBe(
+        false,
+      );
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("apply failure (rename throws) → returns 'failed' with failedFile, no reload", async () => {
+    const f = makeFixture();
+    try {
+      await setup(f.adapter, f.pluginDir, {
+        [FILES.main.final]: "old",
+        [FILES.main.tmp]: "new",
+        [FILES.main.marker]: "",
       });
       const adapter: DataAdapter = {
         ...f.adapter,
+        exists: f.adapter.exists.bind(f.adapter),
         remove: f.adapter.remove.bind(f.adapter),
         rename: async (): Promise<void> => {
-          throw new Error("simulated all renames fail");
+          throw new Error("simulated rename failure");
         },
-        exists: f.adapter.exists.bind(f.adapter),
       } as DataAdapter;
       const r = captureReload();
 
       const result = await runSelfUpdateBootloader({
         adapter,
         pluginDir: f.pluginDir,
-        computeSha: calculateGitBlobSHA,
         reloadPlugin: r.reloadPlugin,
         scheduleReload: r.scheduleReload,
       });
 
-      expect(result).toEqual({ action: "failed", reason: "rename-failed" });
+      expect(result).toEqual({
+        action: "failed",
+        reason: "apply-failed",
+        failedFile: "main.js",
+      });
       expect(r.captured.count).toBe(0);
       expect(r.captured.delays).toEqual([]);
     } finally {
@@ -374,12 +465,14 @@ describe("runSelfUpdateBootloader — 9-step decision matrix", () => {
     }
   });
 
-  it("Case 9: applied swap fires Notice text user can see", async () => {
+  it("notice text aggregates count when multiple files applied", async () => {
     const f = makeFixture();
     try {
-      await setupPluginDir(f.adapter, f.pluginDir, {
-        "main.js": "old",
-        "main.sync-tmp.js": "new",
+      await setup(f.adapter, f.pluginDir, {
+        [FILES.main.tmp]: "x",
+        [FILES.main.marker]: "",
+        [FILES.manifest.tmp]: "{}",
+        [FILES.manifest.marker]: "",
       });
       const r = captureReload();
       const notices: { msg: string; duration?: number }[] = [];
@@ -387,15 +480,13 @@ describe("runSelfUpdateBootloader — 9-step decision matrix", () => {
       await runSelfUpdateBootloader({
         adapter: f.adapter,
         pluginDir: f.pluginDir,
-        computeSha: calculateGitBlobSHA,
         reloadPlugin: r.reloadPlugin,
         scheduleReload: r.scheduleReload,
-        notice: (msg, duration) => notices.push({ msg, duration }),
+        notice: (msg, d) => notices.push({ msg, duration: d }),
       });
 
       expect(notices.length).toBe(1);
-      expect(notices[0].msg.toLowerCase()).toContain("plugin");
-      expect(notices[0].msg.toLowerCase()).toContain("reload");
+      expect(notices[0].msg).toContain("2 files");
       expect(notices[0].duration).toBe(5000);
     } finally {
       f.cleanup();
@@ -406,89 +497,116 @@ describe("runSelfUpdateBootloader — 9-step decision matrix", () => {
 describe("extractAffectedPluginId — plugin file path detection", () => {
   const cfg = ".obsidian";
 
-  it("matches .obsidian/plugins/<id>/main.js → returns id", () => {
+  it("matches each of main.js / manifest.json / styles.css / data.json", () => {
     expect(
       extractAffectedPluginId(".obsidian/plugins/some-plugin/main.js", cfg),
     ).toBe("some-plugin");
-  });
-
-  it("matches .obsidian/plugins/<id>/manifest.json → returns id", () => {
     expect(
       extractAffectedPluginId(
         ".obsidian/plugins/some-plugin/manifest.json",
         cfg,
       ),
     ).toBe("some-plugin");
-  });
-
-  it("matches .obsidian/plugins/<id>/styles.css → returns id", () => {
     expect(
       extractAffectedPluginId(
         ".obsidian/plugins/some-plugin/styles.css",
         cfg,
       ),
     ).toBe("some-plugin");
-  });
-
-  it("matches .obsidian/plugins/<id>/data.json → returns id", () => {
     expect(
       extractAffectedPluginId(".obsidian/plugins/some-plugin/data.json", cfg),
     ).toBe("some-plugin");
   });
 
-  it("rejects subdirectory files under plugins/<id>/data/", () => {
+  it("rejects subdirectory files, unknown filenames, non-plugin paths", () => {
     expect(
       extractAffectedPluginId(
         ".obsidian/plugins/some-plugin/data/file.json",
         cfg,
       ),
     ).toBeNull();
-  });
-
-  it("rejects unknown top-level files under plugins/<id>/", () => {
     expect(
       extractAffectedPluginId(
         ".obsidian/plugins/some-plugin/somethingelse.txt",
         cfg,
       ),
     ).toBeNull();
-  });
-
-  it("rejects paths outside .obsidian/plugins/", () => {
     expect(extractAffectedPluginId("notes/abc.md", cfg)).toBeNull();
     expect(extractAffectedPluginId(".obsidian/themes/x.css", cfg)).toBeNull();
   });
 
-  it("rejects bare .obsidian/plugins/<id>/ with no file", () => {
+  it("rejects bare directories + respects custom configDir + handles special IDs", () => {
     expect(
       extractAffectedPluginId(".obsidian/plugins/some-plugin/", cfg),
     ).toBeNull();
     expect(
-      extractAffectedPluginId(".obsidian/plugins/some-plugin", cfg),
-    ).toBeNull();
-  });
-
-  it("respects custom configDir", () => {
-    expect(
-      extractAffectedPluginId(
-        "my-config/plugins/some-plugin/main.js",
-        "my-config",
-      ),
-    ).toBe("some-plugin");
-    expect(
-      extractAffectedPluginId(
-        ".obsidian/plugins/some-plugin/main.js",
-        "my-config",
-      ),
-    ).toBeNull();
-  });
-
-  it("handles hyphenated and dotted plugin IDs", () => {
+      extractAffectedPluginId("my-config/plugins/x/main.js", "my-config"),
+    ).toBe("x");
     expect(
       extractAffectedPluginId(
         ".obsidian/plugins/com.example.my-plugin/main.js",
         cfg,
       ),
     ).toBe("com.example.my-plugin");
+  });
+});
+
+describe("isOwnPluginRecoverableFile — write-side bootloader routing", () => {
+  const cfg = ".obsidian";
+  const self = "github-easy-sync";
+
+  it("returns true for main.js, manifest.json, styles.css under own plugin dir", () => {
+    expect(
+      isOwnPluginRecoverableFile(
+        `${cfg}/plugins/${self}/main.js`,
+        cfg,
+        self,
+      ),
+    ).toBe(true);
+    expect(
+      isOwnPluginRecoverableFile(
+        `${cfg}/plugins/${self}/manifest.json`,
+        cfg,
+        self,
+      ),
+    ).toBe(true);
+    expect(
+      isOwnPluginRecoverableFile(
+        `${cfg}/plugins/${self}/styles.css`,
+        cfg,
+        self,
+      ),
+    ).toBe(true);
+  });
+
+  it("returns false for data.json (never synced from remote)", () => {
+    expect(
+      isOwnPluginRecoverableFile(
+        `${cfg}/plugins/${self}/data.json`,
+        cfg,
+        self,
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false for OTHER plugins' files", () => {
+    expect(
+      isOwnPluginRecoverableFile(
+        `${cfg}/plugins/other-plugin/main.js`,
+        cfg,
+        self,
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false for subdirectory files and non-plugin paths", () => {
+    expect(
+      isOwnPluginRecoverableFile(
+        `${cfg}/plugins/${self}/data/x.json`,
+        cfg,
+        self,
+      ),
+    ).toBe(false);
+    expect(isOwnPluginRecoverableFile("notes/a.md", cfg, self)).toBe(false);
   });
 });
