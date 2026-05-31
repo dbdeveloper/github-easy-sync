@@ -39,9 +39,11 @@ export function renderTokenHelpBox(parent: HTMLElement): HTMLElement {
   line.style.marginBottom = "0.5em";
   line.style.fontSize = "0.85em";
   line.setText(
-    "This looks like a GitHub token problem. Fine-grained tokens " +
-      "expire (max lifetime one year). Open the token page to generate " +
-      "a new one, or read the step-by-step in the README.",
+    "This looks like a GitHub authorization problem. Token, Owner, " +
+      "Repository, and Repository branch must all be correctly filled, " +
+      "and the token must be valid (fine-grained tokens expire — max " +
+      "lifetime one year). Open the token page to generate a new one, " +
+      "or read the step-by-step setup in the README.",
   );
 
   const buttons = box.createDiv();
