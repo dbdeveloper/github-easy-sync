@@ -515,7 +515,9 @@ describe("Sync2Manager.syncAll — basic flow", () => {
 
     // Every user-driven sync commit is `sync ({deviceLabel})` —
     // see src/sync2/commit-message.ts.
-    expect(f.client.state.lastCommit?.message).toBe("sync (test-device)");
+    expect(f.client.state.lastCommit?.message).toMatch(
+      /^Sync at .+ \(test-device\)$/,
+    );
   });
 
   it("creates a binary blob first, references its SHA in the tree", async () => {
@@ -715,11 +717,11 @@ describe("Sync2Manager.syncAll — basic flow", () => {
     // commitMessage values.
     const commits = f.client.calls.filter((c) => c.op === "createCommit");
     expect(commits).toHaveLength(2);
-    expect((commits[0].args as { message: string }).message).toBe(
-      "sync (test-device)",
+    expect((commits[0].args as { message: string }).message).toMatch(
+      /^Sync at .+ \(test-device\)$/,
     );
-    expect((commits[1].args as { message: string }).message).toBe(
-      "sync (test-device)",
+    expect((commits[1].args as { message: string }).message).toMatch(
+      /^Sync at .+ \(test-device\)$/,
     );
 
     // After both, queue is empty.
@@ -750,8 +752,8 @@ describe("Sync2Manager.syncAll — basic flow", () => {
     expect(commits).toHaveLength(1);
     // syncFile uses the same hardcoded `sync ({deviceLabel})`
     // format as syncAll — no per-file templating.
-    expect((commits[0].args as { message: string }).message).toBe(
-      "sync (test-device)",
+    expect((commits[0].args as { message: string }).message).toMatch(
+      /^Sync at .+ \(test-device\)$/,
     );
 
     // Tree contains exactly the one file we asked for.
@@ -2008,8 +2010,8 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       // Commit message is derived at push time from batch.synthetic
       // (false here) + the manager's deviceLabel ("test-device") —
       // no batch-level commitMessage.
-      expect((commits[0].args as { message: string }).message).toBe(
-        "sync (test-device)",
+      expect((commits[0].args as { message: string }).message).toMatch(
+        /^Sync at .+ \(test-device\)$/,
       );
       expect(await f.queue.list()).toEqual([]);
       // batch is gone from disk

@@ -759,6 +759,73 @@ surface — a separate ribbon icon — that mirrors the status-bar
 conflict count for users who prefer the ribbon as their primary
 visual area.
 
+### 4.4 Commit message format and the local-commit timestamp
+
+Every commit the engine creates carries a message of the form
+
+```
+Sync at 2026-05-18 07:59:04.352+02:00 (Pixel6Pro)
+```
+
+— a fixed action phrase, a timestamp, and a trailing
+`(deviceLabel)`. The phrase varies by commit kind (`Sync`,
+`Resolve conflict`, `Conflict`, `Final state`, `Merge
+conflict-branch`, `Init`); the timestamp and the trailing label are
+present on all of them. The formats are hardcoded in
+`commit-message.ts` — there is no user-configurable message
+template, by deliberate design.
+
+**Why the timestamp lives in the message body, not just git
+metadata.** This is the non-obvious decision worth recording. A
+naive reading says "git already stores author and committer dates,
+so a timestamp in the message is redundant." That reading is wrong
+for this engine, because of *when* the commit object is created.
+
+sync2 separates the local commit from the network push. Clicking
+Sync (or a `commit` action) freezes the changes into a batch under
+`.push-queue/` with a `createdAt` recorded at that instant. The
+actual git commit object, however, is not created until `drain()`
+reaches the batch and calls `createCommit` — which can be much
+later: the device may be offline for hours, accumulating batches
+that all push on the next reconnection. GitHub stamps the commit's
+author and committer dates at *creation* time, i.e. push time. So
+git's metadata dates do **not** record when the user committed;
+they record when the network happened to be available.
+
+Embedding the batch's `createdAt` in the message (rendered in local
+time with a UTC offset, §`commit-message.ts:formatLocalTimestamp`)
+restores the information git's metadata loses. The message now
+answers "when did I actually make this change?" — independent of
+when it reached the server. A useful side effect is that every
+message becomes unique, so a specific commit, or a group from one
+day, is trivial to locate with a text search over `git log`.
+
+**Objection considered: set the author date instead.** The
+alternative is to pass `author.date = createdAt` to `createCommit`,
+fixing git's metadata directly and leaving the message clean. It
+was rejected for this version because GitHub attributes a commit to
+a user account by matching the author *email* to a verified email
+on that account; overriding the author object to set its date means
+also supplying name and email, and a wrong or synthetic email
+silently breaks attribution (the contribution graph stops counting
+the commit). Preserving attribution while setting the date requires
+fetching and caching the user's identity (the `{id}+{login}@users.
+noreply.github.com` form) — extra machinery for a metadata nicety
+the in-message timestamp already delivers. The message-body
+timestamp is the low-cost, attribution-safe choice; the author-date
+approach remains available as a future enhancement if git-native
+date sorting becomes a requirement.
+
+**Why no per-user template.** Provenance (which device) and timing
+(when, locally) are the only two signals a sync commit message
+needs, and both are delivered by the hardcoded format. A
+configurable template invites messages that the inverse parser
+(`parseDeviceSuffix`, which recovers the device label from the
+trailing `(label)` for multi-device observability) cannot read, and
+adds a settings surface with no corresponding user need. The
+trailing-label contract is load-bearing for the engine, so the
+format stays fixed.
+
 ---
 
 ## 5. Error Taxonomy

@@ -229,6 +229,7 @@ export default class PushQueue {
     const deletions = await this.readDeletions(batchDir);
     return {
       id,
+      createdAt: meta.createdAt,
       inProgress,
       attempted,
       synthetic: meta.synthetic,

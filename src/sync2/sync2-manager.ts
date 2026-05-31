@@ -2212,7 +2212,7 @@ export class Sync2Manager {
     const branchContent = args.kind === "delete-vs-modify" ? null : await this.readLocalBytesForBranchPush(args.vaultPath);
     await this.pushConflictPathsToBranch(
       [{ path: args.vaultPath, content: branchContent }],
-      formatConflictMessage(this.deviceLabel()),
+      formatConflictMessage(this.deviceLabel(), this.now()),
     );
 
     if (args.fromBatchId === null) return;
@@ -2480,7 +2480,7 @@ export class Sync2Manager {
     // name itself is discoverable from the merge-commit's second
     // parent SHA, and the (still-deleted) ref shows up in the
     // Network graph as a tip.
-    const message = formatMergeConflictBranchMessage(this.deviceLabel());
+    const message = formatMergeConflictBranchMessage(this.deviceLabel(), this.now());
     const mergeCommit = await this.client.createCommit({
       message,
       treeSha: mainTreeSha,
@@ -3167,7 +3167,7 @@ export class Sync2Manager {
             // initial registration commit. The branch log shows a
             // uniform sequence of conflict commits with no
             // per-commit metadata in the message itself.
-            formatConflictMessage(this.deviceLabel()),
+            formatConflictMessage(this.deviceLabel(), this.now()),
           );
           for (const p of conflictPaths) {
             await this.queue.removeFile(id, p);
@@ -3319,7 +3319,14 @@ export class Sync2Manager {
         // current deviceLabel setting. No persisted commitMessage
         // on the batch.
         commitSha = await this.client.createCommit({
-          message: commitMessageForBatch(batch.synthetic, this.deviceLabel()),
+          // whenMs = the batch's LOCAL commit moment (createdAt), not
+          // this.now() (which would be push time). Legacy batches with
+          // createdAt === 0 fall back to the current time.
+          message: commitMessageForBatch(
+            batch.synthetic,
+            this.deviceLabel(),
+            batch.createdAt || this.now(),
+          ),
           treeSha: newTreeSha,
           parent: batch.parentCommitSha ?? undefined,
           retry: true,
@@ -3424,7 +3431,7 @@ export class Sync2Manager {
     const path = this.invariants?.rootPath ?? ".gitignore";
     const buf = await this.vault.adapter.readBinary(path);
     const content = arrayBufferToBase64(buf);
-    const message = formatInitMessage(this.deviceLabel());
+    const message = formatInitMessage(this.deviceLabel(), this.now());
     this.logger.info(`Sync2 seed bare repo`, { path, message });
     const seed = await this.client.createFile({
       path,

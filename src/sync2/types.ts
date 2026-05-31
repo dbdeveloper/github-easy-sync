@@ -42,6 +42,13 @@ export type FileChange =
 export type QueueBatch = {
   // Timestamp-suffixed directory name, e.g. "20260503093823777".
   id: string;
+  // Epoch-millis local commit moment (Date.now() at enqueue). The
+  // commit object is created later at push time, so git's
+  // author/committer date reflects the push, not this; the commit
+  // MESSAGE carries this value (rendered local + offset) so the true
+  // commit moment is visible. 0 for legacy batches with no recorded
+  // createdAt — callers fall back to the current time.
+  createdAt: number;
   // Whether the runner is currently uploading this batch. Persisted as
   // an ".in-progress" marker file inside the batch directory.
   inProgress: boolean;

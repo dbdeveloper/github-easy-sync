@@ -352,7 +352,8 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     // the user what that looks like.
     const previews: Array<() => void> = [];
     const renderDeviceLabelPreview = (): string =>
-      formatSyncMessage(this.plugin.settings.deviceLabel ?? "Obsidian");
+      // Illustrative — current time stands in for a batch's createdAt.
+      formatSyncMessage(this.plugin.settings.deviceLabel ?? "Obsidian", Date.now());
 
     const deviceLabelSetting = new Setting(containerEl)
       .setName("Device label")
