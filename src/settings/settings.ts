@@ -87,6 +87,19 @@ export interface GitHubSyncSettings {
   // Multi-device users override per machine ("Phone", "Desktop"…).
   deviceLabel?: string;
 
+  // Optional git author identity, like `git config user.name` /
+  // `user.email`. When BOTH are set, the engine passes them — plus
+  // the local commit timestamp — as the commit's `author` and
+  // `committer`, so git's metadata date records when you actually
+  // committed (not when the batch later pushed). When either is
+  // empty, no override happens: GitHub stamps the authenticated
+  // token's user + push time, exactly as before. The email must be
+  // verified on your GitHub account for commits to be attributed to
+  // you (same rule as real git); an unverified email still commits,
+  // just without contribution-graph credit. See SYNC2.md §4.4.
+  gitAuthorName?: string;
+  gitAuthorEmail?: string;
+
   // Per-device gate for paths under `<configDir>/`. When OFF, the
   // sync engine treats every configDir path as ignored EXCEPT the
   // two invariant gitignores (`<configDir>/.gitignore` and

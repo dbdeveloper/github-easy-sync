@@ -741,6 +741,19 @@ export default class GitHubSyncPlugin extends Plugin {
       // no plugin reload needed. Commit messages themselves are
       // hardcoded in src/sync2/commit-message.ts.
       deviceLabel: () => this.settings.deviceLabel ?? "Obsidian",
+      // Optional git author identity (SYNC2.md §4.4). Live getter.
+      // The NAME defaults to the GitHub Owner when the dedicated
+      // field is empty (the Owner is almost always the committing
+      // user), so enabling the author stamp usually only needs the
+      // email. Returns null — no override — only when no usable name
+      // OR no email is available.
+      gitAuthor: () => {
+        const name =
+          this.settings.gitAuthorName?.trim() ||
+          this.settings.githubOwner?.trim();
+        const email = this.settings.gitAuthorEmail?.trim();
+        return name && email ? { name, email } : null;
+      },
       // Remote identity read live so the manager catches a mid-session
       // settings change (user edits the repo coords in the settings
       // tab between two Sync clicks).

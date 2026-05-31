@@ -378,6 +378,46 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     updateDeviceLabelPreview();
     previews.push(updateDeviceLabelPreview);
 
+    // Optional git author identity (SYNC2.md §4.4). When BOTH are
+    // filled, commits carry this name/email + the local commit time
+    // as git's author/committer, so the GitHub commit date reflects
+    // when you committed rather than when it pushed. Empty = no
+    // override (GitHub uses the token's user + push time).
+    new Setting(containerEl)
+      .setName("Git author name (optional)")
+      .setDesc(
+        "Like `git config user.name`. Defaults to the Owner above " +
+          "when empty, so usually you only need to fill the email " +
+          "below to stamp commits with your identity + local commit " +
+          "time. Leave both empty to use the token's GitHub account.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("Defaults to Owner")
+          .setValue(this.plugin.settings.gitAuthorName ?? "")
+          .onChange(async (value) => {
+            this.plugin.settings.gitAuthorName = value.trim();
+            await this.plugin.saveSettings();
+          }),
+      );
+    new Setting(containerEl)
+      .setName("Git author email (optional)")
+      .setDesc(
+        "Like `git config user.email`. Must be a VERIFIED email on " +
+          "your GitHub account for commits to be attributed to you " +
+          "(otherwise they still commit, just without contribution-" +
+          "graph credit — same as plain git).",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("you@example.com")
+          .setValue(this.plugin.settings.gitAuthorEmail ?? "")
+          .onChange(async (value) => {
+            this.plugin.settings.gitAuthorEmail = value.trim();
+            await this.plugin.saveSettings();
+          }),
+      );
+
     // ── Sync strategy ───────────────────────────────────────────────
     const syncStrategies = {
       manual: "Manually",

@@ -60,6 +60,16 @@ function safeLabel(deviceLabel: string): string {
   return raw.replace(/\(/g, "[").replace(/\)/g, "]");
 }
 
+// ISO 8601 form of the same local timestamp, for git's author/
+// committer `date` field — e.g. "2026-05-18T07:59:04.352+02:00".
+// Identical wall-clock + offset to formatLocalTimestamp, just with
+// the 'T' separator git expects. Used by the optional git-author
+// identity path (SYNC2.md §4.4) so git metadata records the local
+// commit moment, not push time.
+export function toGitAuthorDate(ms: number): string {
+  return formatLocalTimestamp(ms).replace(" ", "T");
+}
+
 // User-driven sync batch (syncAll, syncFile). Default for any batch
 // the engine doesn't explicitly mark as synthetic / branch-bound /
 // merge. `whenMs` is the batch's createdAt (local commit moment).

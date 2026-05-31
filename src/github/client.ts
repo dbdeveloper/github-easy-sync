@@ -279,6 +279,7 @@ export default class GithubClient {
     treeSha,
     parent,
     parents,
+    author,
     retry = false,
     maxRetries = 5,
   }: {
@@ -290,6 +291,12 @@ export default class GithubClient {
     // Multi-parent (pseudo-merge stage 7+: manual merge commits land
     // tree-of-main with parents=[main.head, branch.head]).
     parents?: string[];
+    // Optional git identity + date. When provided, sent as BOTH the
+    // commit `author` and `committer` so git's metadata date reflects
+    // the local commit moment (not push time). `date` is ISO 8601
+    // (with offset). When omitted, GitHub uses the authenticated
+    // token's user + the current (push) time. See SYNC2.md §4.4.
+    author?: { name: string; email: string; date: string };
     retry?: boolean;
     maxRetries?: number;
   }): Promise<string> {
@@ -306,6 +313,11 @@ export default class GithubClient {
               message: message,
               tree: treeSha,
               parents: parentsArr,
+              // Set author AND committer to the same identity+date so
+              // both git dates record the local commit moment.
+              ...(author !== undefined
+                ? { author, committer: author }
+                : {}),
             }),
             throw: false,
           },

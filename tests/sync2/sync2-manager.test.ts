@@ -330,6 +330,7 @@ function fixture(opts?: {
   progressBytesThreshold?: number;
   onPluginsAffected?: (ids: string[]) => void;
   onZeroByteRestored?: (path: string) => void;
+  gitAuthor?: () => { name: string; email: string } | null;
 }): {
   root: string;
   vault: Vault;
@@ -405,6 +406,7 @@ function fixture(opts?: {
     configDir: CONFIG_DIR,
     selfPluginId: SELF_PLUGIN_ID,
     deviceLabel: "test-device",
+    gitAuthor: opts?.gitAuthor,
     conflictStore: defaultConflictStore,
     consolidateCommits: opts?.consolidateCommits ?? false,
     onProgress: opts?.onProgress,
@@ -518,6 +520,44 @@ describe("Sync2Manager.syncAll — basic flow", () => {
     expect(f.client.state.lastCommit?.message).toMatch(
       /^Sync at .+ \(test-device\)$/,
     );
+  });
+
+  it("no gitAuthor configured → createCommit carries NO author override", async () => {
+    const f2 = fixture(); // no gitAuthor opt
+    writeVaultFile(f2.root, "x.md", "v");
+    f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+
+    await f2.manager.syncAll();
+
+    const commit = f2.client.calls.find((c) => c.op === "createCommit");
+    expect(commit).toBeDefined();
+    expect((commit!.args as { author?: unknown }).author).toBeUndefined();
+    fs.rmSync(f2.root, { recursive: true, force: true });
+  });
+
+  it("gitAuthor configured → createCommit carries author/committer identity + ISO local date", async () => {
+    const f2 = fixture({
+      gitAuthor: () => ({ name: "Vlad", email: "vlad@example.com" }),
+    });
+    writeVaultFile(f2.root, "x.md", "v");
+    f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
+
+    await f2.manager.syncAll();
+
+    const commit = f2.client.calls.find((c) => c.op === "createCommit");
+    const author = (
+      commit!.args as {
+        author?: { name: string; email: string; date: string };
+      }
+    ).author;
+    expect(author).toBeDefined();
+    expect(author!.name).toBe("Vlad");
+    expect(author!.email).toBe("vlad@example.com");
+    // ISO 8601 with offset, 'T' separator (toGitAuthorDate).
+    expect(author!.date).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/,
+    );
+    fs.rmSync(f2.root, { recursive: true, force: true });
   });
 
   it("creates a binary blob first, references its SHA in the tree", async () => {

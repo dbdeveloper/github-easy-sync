@@ -36,6 +36,7 @@ import {
   formatMergeConflictBranchMessage,
   formatInitMessage,
   parseDeviceSuffix,
+  toGitAuthorDate,
 } from "./commit-message";
 import ConflictStore, { ConflictKind } from "./conflict-store";
 import PendingDeletionsStore from "./pending-deletions-store";
@@ -102,6 +103,8 @@ export interface Sync2Client {
     // commits in pseudo-merge stage 7+ (multi-parent finalize).
     parent?: string;
     parents?: string[];
+    // Optional git author/committer identity + local date (SYNC2 §4.4).
+    author?: { name: string; email: string; date: string };
     retry?: boolean;
   }): Promise<string>;
   updateBranchHead(args: { sha: string; retry?: boolean }): Promise<void>;
@@ -274,6 +277,11 @@ export interface Sync2ManagerDeps {
   // conflict-store.ts for the consumers. Live-readable for the same
   // reason as the templates above.
   deviceLabel: string | (() => string);
+  // Optional git author identity (SYNC2.md §4.4). Live getter so a
+  // settings change applies on the next commit without re-wiring.
+  // Returns {name, email} when BOTH are set, else null → no author
+  // override (GitHub uses the token user + push time, as before).
+  gitAuthor?: () => { name: string; email: string } | null;
   // Pseudo-merge ConflictStore. Receives a record whenever detection
   // can't auto-resolve a conflict. Required in production; unit tests
   // that don't exercise the conflict path can omit it (the manager
@@ -466,6 +474,7 @@ export class Sync2Manager {
   private readonly configDir: string;
   private readonly selfPluginId: string;
   private readonly deviceLabel: () => string;
+  private readonly gitAuthor: () => { name: string; email: string } | null;
   private readonly conflictStore: ConflictStore | undefined;
   private readonly pendingDeletions: PendingDeletionsStore | undefined;
   private readonly conflictWatcher: ConflictWatcher | undefined;
@@ -558,6 +567,7 @@ export class Sync2Manager {
       typeof deps.deviceLabel === "function"
         ? deps.deviceLabel
         : () => deps.deviceLabel as string;
+    this.gitAuthor = deps.gitAuthor ?? (() => null);
     this.conflictStore = deps.conflictStore;
     this.pendingDeletions = deps.pendingDeletions;
     this.conflictWatcher = deps.conflictWatcher;
@@ -2369,6 +2379,7 @@ export class Sync2Manager {
     //    is main; subsequent conflicts chain on the previous one.
     const commitSha = await this.client.createCommit({
       message,
+      author: this.commitAuthorFor(this.now()),
       treeSha: newTreeSha,
       parent: cb.head,
       retry: true,
@@ -2483,6 +2494,7 @@ export class Sync2Manager {
     const message = formatMergeConflictBranchMessage(this.deviceLabel(), this.now());
     const mergeCommit = await this.client.createCommit({
       message,
+      author: this.commitAuthorFor(this.now()),
       treeSha: mainTreeSha,
       parents: [mainHead, cb.head],
       retry: true,
@@ -3038,6 +3050,21 @@ export class Sync2Manager {
     return { bytes, source: `github:${snapshotRemoteSha.slice(0, 7)}` };
   }
 
+  // 2.0.2-beta2 git-author identity (SYNC2.md §4.4). Builds the
+  // {name, email, date} object for createCommit when the user has
+  // configured both a git author name and email; returns undefined
+  // otherwise (no override → GitHub uses the token user + push time).
+  // `whenMs` is the local commit moment (batch.createdAt for batch
+  // commits, this.now() for live engine commits) — the same value
+  // the message timestamp uses, so message and git date agree.
+  private commitAuthorFor(
+    whenMs: number,
+  ): { name: string; email: string; date: string } | undefined {
+    const id = this.gitAuthor();
+    if (id === null) return undefined;
+    return { name: id.name, email: id.email, date: toGitAuthorDate(whenMs) };
+  }
+
   private async processBatch(
     id: string,
     headHint: string | null = null,
@@ -3321,12 +3348,15 @@ export class Sync2Manager {
         commitSha = await this.client.createCommit({
           // whenMs = the batch's LOCAL commit moment (createdAt), not
           // this.now() (which would be push time). Legacy batches with
-          // createdAt === 0 fall back to the current time.
+          // createdAt === 0 fall back to the current time. The same
+          // whenMs feeds the message timestamp AND the optional git
+          // author date so they agree.
           message: commitMessageForBatch(
             batch.synthetic,
             this.deviceLabel(),
             batch.createdAt || this.now(),
           ),
+          author: this.commitAuthorFor(batch.createdAt || this.now()),
           treeSha: newTreeSha,
           parent: batch.parentCommitSha ?? undefined,
           retry: true,

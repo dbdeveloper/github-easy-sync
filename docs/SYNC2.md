@@ -800,21 +800,33 @@ when it reached the server. A useful side effect is that every
 message becomes unique, so a specific commit, or a group from one
 day, is trivial to locate with a text search over `git log`.
 
-**Objection considered: set the author date instead.** The
-alternative is to pass `author.date = createdAt` to `createCommit`,
-fixing git's metadata directly and leaving the message clean. It
-was rejected for this version because GitHub attributes a commit to
-a user account by matching the author *email* to a verified email
-on that account; overriding the author object to set its date means
-also supplying name and email, and a wrong or synthetic email
-silently breaks attribution (the contribution graph stops counting
-the commit). Preserving attribution while setting the date requires
-fetching and caching the user's identity (the `{id}+{login}@users.
-noreply.github.com` form) — extra machinery for a metadata nicety
-the in-message timestamp already delivers. The message-body
-timestamp is the low-cost, attribution-safe choice; the author-date
-approach remains available as a future enhancement if git-native
-date sorting becomes a requirement.
+**Also setting git's metadata date — the optional git-author
+identity.** The message-body timestamp is the always-on,
+zero-config baseline. On top of it, the user may *optionally*
+make git's own author/committer date record the local commit
+moment too, by filling two Settings fields — **Git author name**
+and **Git author email** — that mirror `git config user.name` /
+`user.email`. When both are set (the name defaults to the GitHub
+Owner when its field is left empty), every commit is created with
+an `author` and `committer` object carrying that identity plus the
+local date (`toGitAuthorDate`, ISO 8601 with offset). git's
+metadata date then matches the in-message timestamp, so
+date-range queries (`git log --since/--until`, GitHub's UI sort)
+work on the true commit moment rather than push time.
+
+The reason this is opt-in rather than automatic: GitHub attributes
+a commit to a user account by matching the author *email* to a
+verified email on that account. Overriding the author object to
+set its date means also supplying an email, and an email that is
+not verified on the user's account silently drops attribution (the
+commit still lands, but the contribution graph doesn't count it) —
+exactly the behaviour of plain `git` with a mismatched
+`user.email`. Rather than guess an identity (or fetch and cache the
+`{id}+{login}@users.noreply.github.com` form), the engine leaves
+the fields empty by default — no override, GitHub stamps the
+token's user + push time — and lets a user who wants git-native
+dates supply an identity they know is correct. The Settings
+description states the verified-email requirement explicitly.
 
 **Why no per-user template.** Provenance (which device) and timing
 (when, locally) are the only two signals a sync commit message
