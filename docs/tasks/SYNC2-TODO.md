@@ -105,164 +105,126 @@ where the plugin is currently enabled in
 `this.app.plugins.enabledPlugins`, schedule the update protocol
 below.
 
-#### Multi-file update protocol (paranoid — main.js as atomic commit point)
+#### Update protocol — uniform for all plugins
 
-The naive "rename each file in sequence" approach risks an
-inconsistent mid-update state where some plugin files are new
-and some old. Obsidian could pick up the half-state on a reload
-and crash. The fix: treat main.js as the **atomic commit point**
-of the update. Phases:
+Same approach for OUR plugin AND for any other affected plugin —
+no special-casing of github-easy-sync. The protocol:
 
-  Phase 1 — STAGE: for every incoming file, write
-    `<plugin>/<basename>.<ext>.sync-tmp` (the existing transient
-    staging shape; the sweep already drops Path A orphan
-    sync-tmp on next onload if Phase 1 crashes).
+  1. Write each incoming file to its `<basename>.sync-tmp.<ext>`
+     sibling (the existing transient staging shape; the sweep
+     already drops Path A orphan sync-tmp on next onload).
 
-  Phase 2 — MARKER: drop a zero-byte
-    `<plugin>/.<id>.update-pending.` marker (leading + trailing
-    dot — same shape rules as the modify-in-place marker in
-    §19.1). The marker's presence is the recovery signal:
-    "Phases 3-5 are in progress; complete forward."
+  2. For each file: if the filesystem supports atomic rename
+     (POSIX — Linux, macOS, Capacitor Android-on-Chromium,
+     verified at install time), `atomic-rename
+     <basename>.sync-tmp.<ext>` → `<basename>.<ext>`. Otherwise
+     fall back to the two-step:
+       - `rename <basename>.<ext>` → `<basename>.sync-bak.<ext>`
+       - `rename <basename>.sync-tmp.<ext>` → `<basename>.<ext>`
+       - `remove <basename>.sync-bak.<ext>`
+     If a crash hits between the two renames, the user's
+     plugin won't load and they have to reinstall via BRAT or
+     Community Plugins. We accept that — it's a rare event on
+     a healthy filesystem, and the failure mode is "plugin
+     unavailable until reinstall," not "data loss."
 
-  Phase 3 — BACKUP: for every file that will be replaced,
-    rename `<plugin>/<basename>.<ext>` →
-    `<plugin>/<basename>.sync-bak.<ext>`. Skip main.js in this
-    phase.
+  3. After all files swapped: `setTimeout(() =>
+     app.plugins.reloadPlugin(id), 500)`. The 500 ms gives the
+     in-flight `await drain` stack frame time to unwind. Notice
+     `"Plugin <id> updated — reloading"`.
 
-  Phase 4 — PROMOTE non-main: for every file EXCEPT main.js,
-    rename `<basename>.<ext>.sync-tmp` → `<basename>.<ext>`. At
-    this point manifest.json, styles.css, etc. are all new on
-    disk but the plugin in memory is still old (main.js is
-    still old).
+  4. Done. No marker file, no rollback slot, no recovery
+     sweep beyond the existing Path A sync-tmp orphan cleanup.
 
-  Phase 5 — PROMOTE main.js: rename `main.js.sync-tmp` →
-    `main.js`. **This is the atomic commit.** Before this
-    rename Obsidian still loads the old plugin code; after it,
-    Obsidian loads the new code. There is no half-state where
-    the running code disagrees with main.js on disk.
+#### Self-update of github-easy-sync — minimal bootloader at the
+start of `main()`
 
-  Phase 6 — CLEANUP: backup main.js to `main.sync-bak.js` (we
-    skipped it in Phase 3 because main.js was still in use as
-    the running code's source), remove the marker, remove all
-    `.sync-bak` files (or keep them for the rollback window —
-    see below).
+This is the ONE special case. Our plugin updates itself, which
+means the running code is the OLD code at the moment we apply
+the swap. To make sure the NEW main.js gets used, the start of
+our own `main()` (the entry point Obsidian calls on plugin
+enable) acts as a thin "conditional bootloader." Not a separate
+file — just a few lines that run before anything else.
 
-  Phase 7 — RELOAD: schedule `setTimeout(() =>
-    app.plugins.reloadPlugin(id), 500)`. The 500 ms gives the
-    in-flight `await drain` stack frame time to unwind. Notice:
-    `"Plugin <id> updated — reloading"`.
+The 9-step bootloader logic:
 
-The phase ordering matters. **main.js is renamed LAST** so the
-invariant "running code matches main.js on disk" is preserved
-through every possible crash window.
+  1. At start of `main()`, before any other initialisation,
+     check if `<plugin>/main.sync-tmp.js` exists in our own
+     plugin directory.
 
-#### Recovery sweep (runs in our plugin's onload, BEFORE we touch
-anything else)
+  2. If NO → continue normal onload. Done.
 
-For each plugin dir under `<configDir>/plugins/<id>/` where a
-`<plugin>/.<id>.update-pending.` marker exists:
+  3. If YES → compute SHA of `main.js` AND
+     `main.sync-tmp.js`.
 
-  a. If `<plugin>/main.js.sync-tmp` is present →
-     - Phase 5 didn't run. Other-file sync-tmp may or may not
-       still be present.
-     - Rename remaining .sync-tmp → originals (skip main.js
-       intentionally — it's the LAST in normal order).
-     - Rename main.js.sync-tmp → main.js (atomic commit).
-     - Remove the marker.
-     - Remove .sync-bak files (or keep for rollback window).
-     - Schedule reloadPlugin(id).
+  4. If SHAs are EQUAL → the running code is already the new
+     version (Obsidian picked it up via a fresh enable; the
+     sync-tmp is leftover). Delete `main.sync-tmp.js` and
+     continue normal onload.
 
-  b. If main.js.sync-tmp is NOT present (Phase 5 already ran or
-     this is github-easy-sync re-loaded by Obsidian after
-     Phase 5+6 worked but our reloadPlugin call never fired):
-     - All originals are new. Nothing to do for the swap.
-     - Remove marker.
-     - Remove .sync-bak files (or keep).
-     - If the plugin is OUR plugin (github-easy-sync, the one
-       we just re-entered into), Obsidian already picked us up
-       fresh — no reload needed. Just log the recovery.
+  5. Edge case: `main.sync-bak.js` ALSO present alongside
+     sync-tmp. Normally impossible (sync-bak shouldn't survive
+     a successful enable that left main.js intact). But it
+     CAN happen if the user reinstalled via BRAT / Community
+     Plugins mid-recovery. Treatment: delete BOTH sync-tmp
+     and sync-bak, continue normal onload (whatever the user
+     just installed is the source of truth).
 
-#### Self-update — protecting github-easy-sync from itself
+  6. If SHAs DIFFER and the filesystem supports atomic rename
+     → `atomic-rename main.sync-tmp.js` → `main.js`.
 
-The user's question: "If we update OUR OWN plugin and we crash
-mid-update, who recovers us?"
+  7. If SHAs DIFFER and the filesystem does NOT support atomic
+     rename (Windows / Capacitor iOS quirks) → execute:
+       - `mv main.js main.sync-bak.js`
+       - `mv main.sync-tmp.js main.js`
+       - `rm main.sync-bak.js`
+     If a crash strikes between the two `mv` calls, the plugin
+     won't enable on next launch. User reinstalls via BRAT /
+     Community Plugins. Rare event, acceptable failure mode.
 
-Answer: the symmetry of the protocol IS the recovery. Two cases:
+  8. Call `app.plugins.reloadPlugin('github-easy-sync')` ONLY
+     IF main.js was actually replaced in step 6 or 7 (skip
+     when step 4 short-circuited with no rename).
 
-  Case A — crash BEFORE Phase 5 (main.js still old on disk).
-    Next Obsidian launch: OLD main.js loads → OLD code runs.
-    OLD code's onload runs the recovery sweep above. Sweep
-    finds marker + main.js.sync-tmp present → completes Phase
-    5 forward, then schedules reloadPlugin. RELOAD now picks
-    up the NEW code cleanly. We self-recover from old code.
+  9. Done. New main.js is now both on disk AND about to be
+     loaded by Obsidian's next plugin lifecycle pass.
 
-  Case B — crash AFTER Phase 5 (main.js is new on disk).
-    Next Obsidian launch: NEW main.js loads → NEW code runs.
-    NEW code's onload runs the recovery sweep. Sweep finds
-    marker + no main.js.sync-tmp → just cleans up marker and
-    .sync-bak (Phase 6 leftovers). No reload needed; we're
-    already running the new code.
+The 5-step "ordinary plugin" protocol above handles every
+plugin INCLUDING ours up to the point where the swap completes.
+This 9-step bootloader is the additional layer that handles the
+"running code IS the code being swapped" recursion specifically
+for github-easy-sync's own main.js.
 
-In both cases the plugin self-heals from its OWN code
-(whichever code main.js dictates). No external rescue is
-needed.
+#### What we DELIBERATELY don't implement
 
-#### Rollback safety net
+- Multi-slot rollback (`main.old.js` + `main.new.js`). One
+  rollback slot via the existing `.sync-bak` only, and only
+  until the next plugin enable cycle clears it.
+- "Boot previous version" Settings toggle. If the user wants
+  to roll back, they reinstall via BRAT / Community Plugins.
+- Build-time SHA embedding for integrity verification. The
+  runtime SHA check in step 3/4 of the bootloader is enough.
+- Two-file architecture (`bootloader.js` + `main.body.js`).
+  The whole bootloader is ~30 lines at the top of main(); no
+  build-pipeline split needed.
+- Multi-version history. The existing 1-rollback slot is fine
+  for the field demand we have today.
 
-Keep `.sync-bak` files for 24 hours after a successful update
-(controlled by `<plugin>/.<id>.update-applied-at.txt` timestamp).
-If the new version of github-easy-sync (or any plugin) has a
-bug that breaks the plugin's enable path, the user can either:
-
-  - Manually rename `.sync-bak` files back to originals via
-    the Files app on mobile / Finder on desktop, then disable +
-    re-enable in Settings.
-
-  - Or invoke our own "Rollback last plugin update" command,
-    which walks the plugin dir for `.sync-bak` files, renames
-    them back, and calls reloadPlugin. The command is gated
-    behind a confirmation modal (this clobbers the live
-    plugin state).
-
-The 24-hour retention is automatic and per-plugin. After 24 h
-the next sweep removes the `.sync-bak` files. Users who want
-permanent rollback can disable the auto-cleanup via Settings.
-
-#### Other-plugin reload (any installed plugin OTHER than us)
-
-Straightforward — same Phase 1-7 sequence applies, but Case A /
-Case B recovery is run by OUR plugin's onload sweep (since the
-victim plugin may not have a working onload after a crash):
-
-  - Walk all `<plugin>/<id>/.<id>.update-pending.` markers.
-  - For each: run recovery sweep.
-  - If recovery completes Phase 5, also call reloadPlugin(id).
-  - For each affected plugin ID, surface a Notice
-    `"Reloaded N plugins: <list>"`.
-
-Catch: if our own plugin crashes BEFORE we got to recover the
-victim, the victim stays broken. Mitigation: the victim's
-onload-fail Notice from Obsidian will prompt the user to
-investigate; the user can then run our "Recover broken
-plugins" command, which is the same sweep callable from the
-command palette without needing a successful drain first.
+If field experience surfaces a real need for any of these, the
+spec above (paranoid bootloader, multi-slot rollback, build-
+time SHA) is captured in the git history of this file (look for
+the "paranoid bootloader pattern" commit) and can be revived.
 
 #### Tests
 
 - Unit (mock-obsidian): test the trigger-detection logic
   (pulled-path walk + ID extraction + enabledPlugins gate)
-  against a fake app object. Each phase's crash window
-  exercised separately — the file-state matrix is finite and
-  enumerable.
+  against a fake app object. The 9-step bootloader's
+  decision-tree is enumerable (presence/absence of sync-tmp,
+  sync-bak; SHA equal/differ; FS atomic-rename support) —
+  each cell of the matrix becomes one unit test.
 
-- Integration: each crash window mirrored as a "leave the
-  filesystem in shape X, restart, assert recovery completes
-  correctly" test. mock-obsidian's adapter is fs-backed; the
-  setup just writes the partial state and the assertion is on
-  the post-sweep filesystem state. No real `reloadPlugin` —
-  the test stubs it and asserts it would have been called.
-
-- End-to-end: optional — would require a second plugin
+- Integration: optional — would require a second plugin
   installed on the int-test repo. Defer until field demand.
 
 ### `data.json` migration code (if user base grows past one person)
