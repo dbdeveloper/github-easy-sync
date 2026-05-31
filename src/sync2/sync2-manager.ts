@@ -42,6 +42,7 @@ import PendingDeletionsStore from "./pending-deletions-store";
 import {
   attemptAutoMerge,
   PluginJsContext,
+  MergeTextFn,
 } from "./conflict-detection";
 import { evaluateConflictState } from "./conflict-classifier";
 import { ConflictWatcher } from "./conflict-watcher";
@@ -487,6 +488,14 @@ export class Sync2Manager {
   private readonly onZeroByteRestored:
     | ((path: string) => void)
     | undefined;
+  // Single definition of the worker-backed 3-way merge, shared by
+  // every attemptAutoMerge call site (pull side, push-reconcile side,
+  // resolution-synthesis side). Keeping it in one place stops the
+  // three sites from drifting apart — they must all route through the
+  // same off-main-thread mergeText (SYNC2 §8). An arrow field so it's
+  // pre-bound; reads this.workerClient lazily at call time.
+  private readonly mergeViaWorker: MergeTextFn = (ours, base, theirs) =>
+    this.workerClient.mergeText(ours, base, theirs);
   // 2.0.2-beta2: accumulated through a drain cycle by maybeMarkPluginAffected.
   // Cleared at drain end after the callback fires.
   private affectedPluginIds: Set<string> = new Set();
@@ -1842,7 +1851,7 @@ export class Sync2Manager {
       theirs: theirsBytes,
       base: baseBytes,
       configDir: this.configDir,
-      mergeFn: (o, b, t) => this.workerClient.mergeText(o, b, t),
+      mergeFn: this.mergeViaWorker,
       pluginJs,
     });
 
@@ -3730,7 +3739,7 @@ export class Sync2Manager {
         theirs: theirsBytes,
         base: baseBytes,
         configDir: this.configDir,
-        mergeFn: (o, b, t) => this.workerClient.mergeText(o, b, t),
+        mergeFn: this.mergeViaWorker,
         pluginJs,
       });
 
@@ -3944,7 +3953,7 @@ export class Sync2Manager {
           theirs: newOurs,
           base: oldOurs,
           configDir: this.configDir,
-          mergeFn: (o, b, t) => this.workerClient.mergeText(o, b, t),
+          mergeFn: this.mergeViaWorker,
         });
         if (auto.type === "clean") {
           await this.queue.overwriteFile(id, path, auto.content);
