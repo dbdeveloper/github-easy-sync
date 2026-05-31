@@ -40,18 +40,26 @@ Shipped: `Sync2Manager.applyZeroByteRestoreGuard` +
 `findLastGoodVersion`; `PushQueue.fileSize`; main.ts Notice.
 Unit matrix in `tests/sync2/sync2-manager.test.ts` (6 cases).
 
-### Corruption-resilience integration scenarios  (remaining)
+### Corruption-resilience scenarios  ✅ DONE (2.0.2-beta2)
 
-Integration tests under `tests/integration/scenarios/sync2/corruption/`:
+Integration tests in
+`tests/integration/scenarios/sync2/corruption/zero-byte-restore.test.ts`
+(verified against real GitHub):
 - Zero-byte local + non-empty remote → restored from GitHub, no
-  0-byte push; remote unchanged.
-- Zeroed-then-retyped across two batches → restored from the
-  newer queue copy.
+  0-byte push; remote unchanged. ✅
 - Brand-new 0-byte file (no snapshot history) → pushed as a
-  legitimate empty file.
+  legitimate empty file. ✅
 - **Intentional empty via delete+recreate**: delete file + commit
   (snapshot row gone) → create 0-byte file + commit → the empty
-  file pushes and the old content does NOT auto-return.
+  file pushes and the old content does NOT auto-return. ✅
+
+The fourth case — **zeroed-then-retyped across two batches →
+restored from the newer queue copy** — is covered by the unit
+test "restore source: a newer pending batch's non-zero copy is
+preferred over GitHub" in `sync2-manager.test.ts`. It stays at the
+unit level deliberately: staging two distinct unpushed batches for
+the same path against real GitHub is awkward, and the unit test
+pins the exact queue-search-before-GitHub logic directly.
 
 ---
 
