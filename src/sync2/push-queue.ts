@@ -474,6 +474,19 @@ export default class PushQueue {
   // `getResourcePath`, so we drop down to `adapter.readBinary`.
   // The fallback also covers any future Obsidian build / platform
   // where `getResourcePath` becomes unavailable.
+  // 2.0.2-beta2 zero-byte restore guard (SYNC2 §2.9). Returns the
+  // byte length of the FROZEN copy of `vaultPath` inside batch `id`,
+  // or null if the batch holds no such file. Stats the staged file
+  // directly — no full read — so the zero-byte detection is cheap on
+  // every drained path. Used by Sync2Manager.applyZeroByteRestoreGuard
+  // to decide whether a committed file collapsed to 0 bytes.
+  async fileSize(id: string, vaultPath: string): Promise<number | null> {
+    const target = `${this.queueRoot}/${id}/${VAULT_SUBDIR}/${vaultPath}`;
+    if (!(await this.vault.adapter.exists(target))) return null;
+    const stat = await this.vault.adapter.stat(target);
+    return stat?.size ?? null;
+  }
+
   async readFile(id: string, vaultPath: string): Promise<ArrayBuffer> {
     const target = `${this.queueRoot}/${id}/${VAULT_SUBDIR}/${vaultPath}`;
     const getResourcePath = (

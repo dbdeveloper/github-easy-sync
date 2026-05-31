@@ -836,6 +836,19 @@ export default class GitHubSyncPlugin extends Plugin {
       onPluginsAffected: (ids: string[]) => {
         this.handlePluginsAffectedReload(ids);
       },
+      // 2.0.2-beta2 zero-byte restore guard (SYNC2 §2.9). The engine
+      // restored an accidentally-emptied file from its last good
+      // version instead of pushing the 0-byte copy. Surface it so the
+      // recovery is never silent — the user should know their vault
+      // changed and why.
+      onZeroByteRestored: (path: string) => {
+        new Notice(
+          `Restored "${path}" — the local copy was empty (likely ` +
+            `corruption). The empty version was NOT uploaded.`,
+          10000,
+        );
+        this.logger?.info("Zero-byte file restored by guard", { path });
+      },
     });
 
     // Conflict resolution events (sibling delete, edit, rename) are

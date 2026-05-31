@@ -7,33 +7,51 @@ the whole rework plan.
 
 ---
 
-## P0 — Safety guards (next focused commit batch)
+## P0 — Safety guards
 
-### Zero-byte file → conflict, not push
+### Zero-byte file → restore, not push  ✅ DONE (2.0.2-beta2)
 
-When a local file shrinks to 0 bytes but the remote SHA points at a
-non-empty blob, the engine should **register the path as a conflict
-and refuse to push**. Zero-byte files in a notes vault are almost
-always a corruption signal (Desktop incident, May 2026): a file is
-rarely intentionally truncated to empty, and the cost of a false
-positive (one extra confirmation modal) is far smaller than the
-cost of a false negative (silently overwriting useful content).
+Implemented as the zero-byte restore guard (SYNC2 §2.9). The
+design landed as **restore-from-last-good-version**, not the
+"register conflict" framing the original draft proposed — a
+0-length file is semantically indistinguishable from an
+accidental deletion, so the engine treats it as an un-delete:
+restore the last good content and drop the empty copy from the
+push so the 0-byte version never reaches GitHub. No ConflictStore
+machinery — nothing was pushed yet, so no commit is dropped.
 
-Acceptance:
-- Reconcile sees `ours.size === 0` AND `theirs.sha !== empty-blob-sha`
-  AND previous snapshot recorded non-zero size → skip push, register
-  conflict, log decision.
-- Snapshot tracks previous `size` so a brand-new 0-byte file the
-  user just created still gets through.
-- Unit test pinning the snapshot-state matrix (no snapshot / snapshot
-  with old size / snapshot with same size).
+Restore source, "last available version before it became 0":
+  1. All pending push-queue batches, newest-first (the freshest
+     non-zero frozen copy wins — covers zeroed-then-retyped).
+  2. GitHub via the snapshot's remoteSha (last-synced content).
 
+Carve-outs (the empty file goes through unchanged):
+  - no snapshot entry  → brand-new file the user just created
+  - snapshot.size === 0 → file was already empty last sync
 
-### Corruption-resilience integration scenarios
+Intentional empty file: the user deletes the file + commits
+(which removes the snapshot row), THEN creates a 0-byte file.
+With no snapshot row, the guard's "no snapshot" carve-out lets
+it through — the empty file pushes and old data does NOT return.
 
-Two integration tests under `tests/integration/scenarios/sync2/corruption/`:
-- Zero-byte local + non-empty remote → conflict registered, no push.
-- Brand-new 0-byte file (no snapshot history) → normal push allowed.
+Never silent: `onZeroByteRestored` fires a Notice + log line.
+
+Shipped: `Sync2Manager.applyZeroByteRestoreGuard` +
+`findLastGoodVersion`; `PushQueue.fileSize`; main.ts Notice.
+Unit matrix in `tests/sync2/sync2-manager.test.ts` (6 cases).
+
+### Corruption-resilience integration scenarios  (remaining)
+
+Integration tests under `tests/integration/scenarios/sync2/corruption/`:
+- Zero-byte local + non-empty remote → restored from GitHub, no
+  0-byte push; remote unchanged.
+- Zeroed-then-retyped across two batches → restored from the
+  newer queue copy.
+- Brand-new 0-byte file (no snapshot history) → pushed as a
+  legitimate empty file.
+- **Intentional empty via delete+recreate**: delete file + commit
+  (snapshot row gone) → create 0-byte file + commit → the empty
+  file pushes and the old content does NOT auto-return.
 
 ---
 

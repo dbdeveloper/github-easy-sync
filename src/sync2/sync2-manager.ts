@@ -50,7 +50,7 @@ import { buildConflictBranchName } from "./conflict-branch";
 import { newBatchId } from "./timestamp-id";
 import type { TrashHooks } from "./trash-hooks";
 import { normalizeText } from "./text-normalize";
-import { FileChange } from "./types";
+import { FileChange, QueueBatch } from "./types";
 
 // ── Skip-class taxonomy (SYNC2 §6 + §7.5) ─────────
 //
@@ -365,6 +365,11 @@ export interface Sync2ManagerDeps {
   // crash-recovery backstop for the case where the swap was left
   // mid-protocol.
   onPluginsAffected?(pluginIds: string[]): void;
+  // 2.0.2-beta2: fired when the zero-byte restore guard (SYNC2 §2.9)
+  // restores an accidentally-emptied file instead of pushing the
+  // 0-byte version. main.ts surfaces a user-visible Notice so the
+  // recovery is never silent.
+  onZeroByteRestored?(path: string): void;
   // When true, a new sync click while pending batches exist (i.e.
   // earlier push attempt failed — typically offline) folds the new
   // changes into the latest pending batch instead of stacking. The
@@ -472,6 +477,9 @@ export class Sync2Manager {
   private readonly onPluginsAffected:
     | ((pluginIds: string[]) => void)
     | undefined;
+  private readonly onZeroByteRestored:
+    | ((path: string) => void)
+    | undefined;
   // 2.0.2-beta2: accumulated through a drain cycle by maybeMarkPluginAffected.
   // Cleared at drain end after the callback fires.
   private affectedPluginIds: Set<string> = new Set();
@@ -547,6 +555,7 @@ export class Sync2Manager {
     this.onSyncCompleted = deps.onSyncCompleted;
     this.onQueueDepthChanged = deps.onQueueDepthChanged;
     this.onPluginsAffected = deps.onPluginsAffected;
+    this.onZeroByteRestored = deps.onZeroByteRestored;
     this.remoteIdentity = deps.remoteIdentity;
     this.progressBytesThreshold =
       deps.progressBytesThreshold ?? PROGRESS_BYTES_THRESHOLD;
@@ -2885,6 +2894,125 @@ export class Sync2Manager {
     }
   }
 
+  // 2.0.2-beta2 zero-byte restore guard (SYNC2 §2.9). For each
+  // add/modify path in batch `id`, detect the "accidental deletion"
+  // signature: the committed copy is 0 bytes, yet the last-synced
+  // snapshot recorded a NON-zero size. A 0-length file is
+  // indistinguishable from an accidental truncation/corruption — and
+  // semantically it looks like the file was deleted — so we treat it
+  // as an un-delete: restore the last good version and drop the empty
+  // copy from the push.
+  //
+  // Decision is ZERO-network (frozen size + snapshot.size). Only the
+  // restore ACTION fetches bytes, and only for the rare collapse.
+  //
+  // Carve-outs (let the empty file through):
+  //   - no snapshot entry  → brand-new file the user just created
+  //   - snapshot.size === 0 → file was already empty last sync
+  private async applyZeroByteRestoreGuard(id: string): Promise<void> {
+    let batch: QueueBatch;
+    try {
+      batch = await this.queue.read(id);
+    } catch {
+      return; // unreadable batch — let normal processing surface it
+    }
+    for (const path of batch.files) {
+      let oursSize: number | null;
+      try {
+        oursSize = await this.queue.fileSize(id, path);
+      } catch {
+        continue;
+      }
+      if (oursSize === null || oursSize !== 0) continue; // not zeroed
+      const snap = this.store.get(path);
+      if (!snap || snap.size === 0) continue; // brand-new OR was-empty
+      // Zero-collapse confirmed — restore from the last good version.
+      let restored: { bytes: ArrayBuffer; source: string } | null = null;
+      try {
+        restored = await this.findLastGoodVersion(path, id, snap.remoteSha);
+      } catch (err) {
+        this.logger.warn("Sync2 zero-byte restore: lookup failed", {
+          path,
+          err: `${err}`,
+        });
+      }
+      if (!restored) {
+        // Neither the queue nor GitHub yielded bytes (e.g. the blob
+        // was GC'd and no pending batch holds a copy). Leave the path
+        // in the batch — pushing the 0-byte version is the lesser
+        // evil to losing the user's deletion intent if it WAS
+        // intentional. Surface it loudly so the user can react.
+        this.logger.warn(
+          "Sync2 zero-byte restore: no good version found, leaving as-is",
+          { path, previousSize: snap.size },
+        );
+        continue;
+      }
+      try {
+        await atomicWriteFile(this.vault, path, restored.bytes);
+        await this.queue.removeFile(id, path);
+      } catch (err) {
+        this.logger.error("Sync2 zero-byte restore: apply failed", {
+          path,
+          err: `${err}`,
+        });
+        continue;
+      }
+      // No snapshot mutation: the next findChanges re-classifies the
+      // restored file. If restored === remote (GitHub source) it's a
+      // cache hit → no re-push; if restored === a newer queued good
+      // version (queue source) it re-enqueues → the good version
+      // pushes next drain. Both converge correctly.
+      this.onZeroByteRestored?.(path);
+      this.logger.info("Sync2 zero-byte restore applied", {
+        path,
+        previousSize: snap.size,
+        restoredSize: restored.bytes.byteLength,
+        source: restored.source,
+      });
+    }
+  }
+
+  // 2.0.2-beta2: find the last available NON-zero version of `path` to
+  // restore over an accidental 0-byte collapse (SYNC2 §2.9). Search
+  // order:
+  //   1. All pending push-queue batches, newest-first (excluding the
+  //      batch being drained). The freshest non-zero frozen copy wins
+  //      — if the user zeroed then re-typed in a later batch, that
+  //      later good version is the one to keep.
+  //   2. GitHub, via the snapshot's remoteSha (the last-synced
+  //      content). Fetched by SHA so it's exactly the pre-collapse
+  //      bytes regardless of where HEAD has moved.
+  // Returns null if no non-zero version exists anywhere.
+  private async findLastGoodVersion(
+    path: string,
+    excludeBatchId: string,
+    snapshotRemoteSha: string,
+  ): Promise<{ bytes: ArrayBuffer; source: string } | null> {
+    const ids = (await this.queue.list())
+      .filter((qid) => qid !== excludeBatchId)
+      .reverse(); // list() is oldest-first; newest-first here
+    for (const qid of ids) {
+      let size: number | null;
+      try {
+        size = await this.queue.fileSize(qid, path);
+      } catch {
+        continue;
+      }
+      if (size !== null && size > 0) {
+        const bytes = await this.queue.readFile(qid, path);
+        return { bytes, source: `queue:${qid}` };
+      }
+    }
+    // Fall back to GitHub by the last-synced blob SHA.
+    const blob = await this.client.getBlob({
+      sha: snapshotRemoteSha,
+      retry: true,
+    });
+    const bytes = await this.workerClient.decodeBase64(blob.content);
+    return { bytes, source: `github:${snapshotRemoteSha.slice(0, 7)}` };
+  }
+
   private async processBatch(
     id: string,
     headHint: string | null = null,
@@ -2894,6 +3022,14 @@ export class Sync2Manager {
   ): Promise<void> {
     this.logger.info(`Sync2 push batch ${id}`);
     await this.queue.markInProgress(id);
+    // 2.0.2-beta2 zero-byte restore guard (SYNC2 §2.9). BEFORE the
+    // batch's bytes reach GitHub, catch any file that collapsed to 0
+    // bytes despite having a non-empty last-synced version — almost
+    // always corruption, not intent. Restore the last good version
+    // and drop the zeroed path from this batch so the 0-byte version
+    // never lands on the server. Runs first so the reconcile + tree
+    // build below never sees the corrupted path.
+    await this.applyZeroByteRestoreGuard(id);
     // Freeze this batch against further merges. The marker survives a
     // failure (in-progress is cleared in the catch below, attempted is
     // not), so a follow-up sync click can't accumulate new changes

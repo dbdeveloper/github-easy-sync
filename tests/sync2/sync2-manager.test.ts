@@ -329,6 +329,7 @@ function fixture(opts?: {
   };
   progressBytesThreshold?: number;
   onPluginsAffected?: (ids: string[]) => void;
+  onZeroByteRestored?: (path: string) => void;
 }): {
   root: string;
   vault: Vault;
@@ -420,6 +421,7 @@ function fixture(opts?: {
         ? opts.progressBytesThreshold
         : 0,
     onPluginsAffected: opts?.onPluginsAffected,
+    onZeroByteRestored: opts?.onZeroByteRestored,
     now: () => clock.nowMs(),
   });
   return {
@@ -2725,6 +2727,231 @@ describe("Sync2Manager — onPluginsAffected (BRAT-style auto-reload trigger)", 
     );
 
     await expect(f.manager.syncAll()).resolves.toBeUndefined();
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+});
+
+describe("Sync2Manager — zero-byte restore guard (SYNC2 §2.9)", () => {
+  // The guard fires at processBatch start. We exercise it directly via
+  // the private method so the snapshot-state matrix is pinned without
+  // routing through a full syncAll. Setup per case:
+  //   - write the local vault file to 0 bytes
+  //   - enqueue a batch naming that path
+  //   - set (or omit) a snapshot entry
+  //   - register the "good" bytes on GitHub (fake getBlob resolves by
+  //     SHA) and/or in an older/newer queue batch
+  // Then assert restore-vs-passthrough + whether the path stayed in
+  // the batch.
+  const META = { parentCommitSha: null, parentTreeSha: null };
+
+  type GuardManager = {
+    applyZeroByteRestoreGuard(id: string): Promise<void>;
+  };
+  const runGuard = (m: Sync2Manager, id: string): Promise<void> =>
+    (m as unknown as GuardManager).applyZeroByteRestoreGuard(id);
+
+  it("snapshot.size != 0 + local zero → restores from GitHub, drops path from batch", async () => {
+    const f = fixture();
+    const good = "important note body\n";
+    const goodSha = await shaOf(good);
+    // GitHub holds the good blob (fake getBlob resolves by SHA).
+    f.client.setContentAtRef("ANYREF", "Notes/a.md", good);
+    // snapshot says last-synced size was non-zero.
+    f.store.set("Notes/a.md", {
+      path: "Notes/a.md",
+      remoteSha: goodSha,
+      mtime: 1,
+      size: good.length,
+    });
+    // local file is now empty; enqueue a batch naming it.
+    writeVaultFile(f.root, "Notes/a.md", "");
+    const id = await f.queue.enqueue(
+      [
+        {
+          kind: "modified",
+          path: "Notes/a.md",
+          size: 0,
+          mtime: 2,
+          previousRemoteSha: goodSha,
+        },
+      ],
+      META,
+    );
+
+    await runGuard(f.manager, id);
+
+    // restored locally
+    expect(fs.readFileSync(path.join(f.root, "Notes/a.md"), "utf8")).toBe(good);
+    // dropped from the batch → never pushed
+    const batch = await f.queue.read(id);
+    expect(batch.files).not.toContain("Notes/a.md");
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  it("no snapshot (brand-new file) + local zero → NOT restored, path stays (intentional empty file)", async () => {
+    const f = fixture();
+    // No snapshot entry for this path at all — it's brand new.
+    writeVaultFile(f.root, "Notes/new-empty.md", "");
+    const id = await f.queue.enqueue(
+      [{ kind: "added", path: "Notes/new-empty.md", size: 0, mtime: 1 }],
+      META,
+    );
+
+    await runGuard(f.manager, id);
+
+    // still empty — no restoration
+    expect(fs.readFileSync(path.join(f.root, "Notes/new-empty.md"), "utf8")).toBe("");
+    // still in the batch → will push as a legitimate empty file
+    const batch = await f.queue.read(id);
+    expect(batch.files).toContain("Notes/new-empty.md");
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  it("snapshot.size === 0 (was already empty) + local zero → NOT restored, path stays", async () => {
+    const f = fixture();
+    f.store.set("Notes/empty.md", {
+      path: "Notes/empty.md",
+      remoteSha: await shaOf(""),
+      mtime: 1,
+      size: 0,
+    });
+    writeVaultFile(f.root, "Notes/empty.md", "");
+    const id = await f.queue.enqueue(
+      [
+        {
+          kind: "modified",
+          path: "Notes/empty.md",
+          size: 0,
+          mtime: 2,
+          previousRemoteSha: await shaOf(""),
+        },
+      ],
+      META,
+    );
+
+    await runGuard(f.manager, id);
+
+    expect(fs.readFileSync(path.join(f.root, "Notes/empty.md"), "utf8")).toBe("");
+    const batch = await f.queue.read(id);
+    expect(batch.files).toContain("Notes/empty.md");
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  it("non-zero local file → guard is a no-op (path stays)", async () => {
+    const f = fixture();
+    f.store.set("Notes/ok.md", {
+      path: "Notes/ok.md",
+      remoteSha: await shaOf("old\n"),
+      mtime: 1,
+      size: 4,
+    });
+    writeVaultFile(f.root, "Notes/ok.md", "new content\n");
+    const id = await f.queue.enqueue(
+      [
+        {
+          kind: "modified",
+          path: "Notes/ok.md",
+          size: 12,
+          mtime: 2,
+          previousRemoteSha: await shaOf("old\n"),
+        },
+      ],
+      META,
+    );
+
+    await runGuard(f.manager, id);
+
+    expect(fs.readFileSync(path.join(f.root, "Notes/ok.md"), "utf8")).toBe("new content\n");
+    const batch = await f.queue.read(id);
+    expect(batch.files).toContain("Notes/ok.md");
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  it("restore source: a newer pending batch's non-zero copy is preferred over GitHub", async () => {
+    const f = fixture();
+    const stale = "old github version\n";
+    const fresh = "freshly retyped version\n";
+    const staleSha = await shaOf(stale);
+    // GitHub has the stale (last-synced) version.
+    f.client.setContentAtRef("ANYREF", "Notes/a.md", stale);
+    f.store.set("Notes/a.md", {
+      path: "Notes/a.md",
+      remoteSha: staleSha,
+      mtime: 1,
+      size: stale.length,
+    });
+    // A NEWER pending batch holds a non-zero good copy (user retyped).
+    writeVaultFile(f.root, "Notes/a.md", fresh);
+    const newerId = await f.queue.enqueue(
+      [
+        {
+          kind: "modified",
+          path: "Notes/a.md",
+          size: fresh.length,
+          mtime: 2,
+          previousRemoteSha: staleSha,
+        },
+      ],
+      META,
+    );
+    // The zero-collapse batch is created AFTER (newer id), so the
+    // good copy lives in an OLDER batch relative to it. To make the
+    // good copy "newer than the zero batch is irrelevant" — the guard
+    // searches ALL pending batches newest-first. Put the zero in its
+    // own batch and ensure the good batch is found.
+    writeVaultFile(f.root, "Notes/a.md", "");
+    const zeroId = await f.queue.enqueue(
+      [
+        {
+          kind: "modified",
+          path: "Notes/a.md",
+          size: 0,
+          mtime: 3,
+          previousRemoteSha: staleSha,
+        },
+      ],
+      META,
+    );
+
+    await runGuard(f.manager, zeroId);
+
+    // restored from the QUEUE copy (fresh), NOT GitHub (stale)
+    expect(fs.readFileSync(path.join(f.root, "Notes/a.md"), "utf8")).toBe(fresh);
+    // no getBlob call was needed — the queue copy short-circuited it
+    const blobCalls = f.client.calls.filter((c) => c.op === "getBlob");
+    expect(blobCalls.length).toBe(0);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+
+  it("fires onZeroByteRestored callback with the restored path", async () => {
+    const restored: string[] = [];
+    const f = fixture({ onZeroByteRestored: (p) => restored.push(p) });
+    const good = "content\n";
+    const goodSha = await shaOf(good);
+    f.client.setContentAtRef("ANYREF", "Notes/a.md", good);
+    f.store.set("Notes/a.md", {
+      path: "Notes/a.md",
+      remoteSha: goodSha,
+      mtime: 1,
+      size: good.length,
+    });
+    writeVaultFile(f.root, "Notes/a.md", "");
+    const id = await f.queue.enqueue(
+      [
+        {
+          kind: "modified",
+          path: "Notes/a.md",
+          size: 0,
+          mtime: 2,
+          previousRemoteSha: goodSha,
+        },
+      ],
+      META,
+    );
+
+    await runGuard(f.manager, id);
+
+    expect(restored).toEqual(["Notes/a.md"]);
     fs.rmSync(f.root, { recursive: true, force: true });
   });
 });

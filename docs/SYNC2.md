@@ -438,6 +438,106 @@ next sync click, interval tick, or onload startup pulse drains
 it. No committed work is lost — at worst it waits longer than
 intended for the next drain.
 
+### 2.9 The Zero-Byte Restore Guard
+
+Added in 2.0.2-beta2. A file that has collapsed to zero bytes is,
+in a notes vault, almost never the user's intent — it is the
+signature of a truncation or corruption (an editor crash mid-save,
+a sync race on another tool, a filesystem fault). Critically, a
+zero-length file is **indistinguishable from a deleted file**: in
+both cases the path carries no content. The guard treats an
+unexpected collapse to zero as an accidental deletion and performs
+an **un-delete** — it restores the last good version and prevents
+the empty copy from ever reaching the server.
+
+The guard runs at the very start of `processBatch`, before the
+batch's bytes are built into a tree, so the corrupted path is
+intercepted before any network write.
+
+#### Detection — zero network
+
+For each add/modify path in the batch:
+
+- **ours.size** is the size of the *frozen* copy in
+  `.push-queue/<batch>/vault/<path>` — the bytes captured at commit
+  time, not a fresh read of the (possibly changed) live file.
+  `PushQueue.fileSize` stats it directly, so the check is cheap on
+  every drained path.
+- **snapshot.size** is the size recorded for the path's
+  last-synced version. Because the snapshot's content is the same
+  as the merge base, snapshot.size doubles as the base size — there
+  is no need to fetch anything from GitHub to know whether the file
+  "used to have content."
+
+The collapse is confirmed when `ours.size === 0` **and** a snapshot
+entry exists **and** `snapshot.size !== 0`. Two carve-outs let an
+empty file through untouched:
+
+- **No snapshot entry** → the file is brand-new; the user just
+  created it (possibly deliberately empty). Nothing to restore.
+- **snapshot.size === 0** → the file was already empty at the last
+  sync; staying empty is not a collapse.
+
+#### The intentional-empty-file path
+
+A user who genuinely wants a zero-length file in the repository
+achieves it through an ordinary deletion followed by a creation:
+delete the file and commit — which removes its snapshot row — then
+create the empty file. On the next drain the guard finds **no
+snapshot entry** for the path (the deletion cleared it), so the
+"brand-new" carve-out applies: the empty file is pushed and no old
+content is resurrected. The guard therefore never fights a
+deliberate empty file; it only resists a file that *had* content
+and silently lost it.
+
+#### Restore source — last available good version
+
+When a collapse is confirmed the guard restores the *last
+available non-zero version*, searched in this order:
+
+1. **All pending push-queue batches, newest-first** (excluding the
+   batch being drained). If the user zeroed the file in one batch
+   and re-typed it in a later still-unpushed batch, that fresher
+   good copy is the correct thing to keep. The newest non-zero
+   frozen copy wins.
+2. **GitHub, by the snapshot's `remoteSha`.** Fetched by blob SHA
+   (`getBlob`) so it is exactly the pre-collapse bytes regardless
+   of where the branch HEAD has since moved.
+
+If neither source yields a non-zero version (the blob was
+GC'd and no pending batch holds a copy — an extreme edge), the
+guard leaves the path in the batch and logs a warning. Pushing the
+empty version is judged the lesser evil to silently discarding a
+possibly-intentional deletion when no recovery bytes exist.
+
+#### Apply
+
+The restore writes the recovered bytes back to the live vault file
+through `atomicWriteFile` (the same crash-safe path used for
+pull-replace; §2.3) and removes the path from the batch via
+`PushQueue.removeFile`, so the empty version is never pushed. If
+removing the path empties the batch, the existing
+`entries.length === 0` short-circuit deletes the batch and the
+drain moves on.
+
+The guard deliberately does **not** touch the snapshot. The next
+`findChanges` re-classifies the restored file: if it was restored
+from GitHub (content equals the remote), the SHA matches the
+snapshot and it is a cache hit — no re-push; if it was restored
+from a newer queued version (content differs from the remote), it
+re-enqueues and the good version pushes on the next drain. Both
+outcomes converge correctly without any snapshot bookkeeping in the
+guard itself.
+
+#### Never silent
+
+Restoration overwrites a local file, so it is surfaced: the
+`onZeroByteRestored` callback fires a user-visible Notice
+("Restored *path* — the local copy was empty…") and a log line
+records the decision (path, previous size, restored size, restore
+source). A defensible automatic recovery must still tell the user
+their vault changed and why.
+
 ---
 
 ## 3. Cross-Platform Contracts
