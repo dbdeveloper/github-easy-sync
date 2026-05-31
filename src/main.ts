@@ -49,6 +49,12 @@ import manifest from "../manifest.json";
 // short enough that consecutive Sync clicks don't stack notices.
 const BRIEF_NOTICE_MS = 700;
 
+// Delay before the startup sync fires after layout-ready. Long enough
+// for an outgoing instance's drain teardown to settle across a
+// disable+enable plugin reload; short enough to be imperceptible on a
+// cold start. See the onLayoutReady startup-sync block.
+const STARTUP_SYNC_DELAY_MS = 1500;
+
 // Internal Obsidian plugin-manager surface we touch for the
 // BRAT-style auto-reload (§20/§21). None of these are in the public
 // typings; we feature-detect each.
@@ -180,6 +186,10 @@ export default class GitHubSyncPlugin extends Plugin {
   // tick + startup logic itself lives in IntervalScheduler.
   private syncIntervalId: number | null = null;
   private intervalScheduler!: IntervalScheduler;
+  // Pending startup-sync timer (set in onLayoutReady, cleared on fire
+  // or in onunload). Delaying the startup sync avoids racing a prior
+  // instance's drain teardown across a plugin reload.
+  private startupSyncTimer: number | null = null;
 
   async onUserEnable(): Promise<void> {
     if (!this.isConfigured()) {
@@ -279,7 +289,20 @@ export default class GitHubSyncPlugin extends Plugin {
         if (this.settings.showCommitRibbonButton)
           this.showCommitRibbonIcon();
         if (this.settings.syncOnStartup && this.isConfigured()) {
-          void this.runStartupSync();
+          // 2.0.2-beta2 hardening: delay the startup sync a beat
+          // rather than firing it the instant layout is ready. On a
+          // plugin reload (disable+enable), this gives the OUTGOING
+          // instance's onunload (cancelDrain + worker terminate) time
+          // to wind its in-flight drain down before this NEW instance
+          // starts its own — closing the drain-overlap window without
+          // any marker-file bookkeeping. On a normal cold start the
+          // ~1.5s wait is imperceptible (auto-sync isn't time-
+          // critical). Tracked so onunload can cancel it if we unload
+          // again before it fires.
+          this.startupSyncTimer = window.setTimeout(() => {
+            this.startupSyncTimer = null;
+            void this.runStartupSync();
+          }, STARTUP_SYNC_DELAY_MS);
         }
       });
 
@@ -427,6 +450,12 @@ export default class GitHubSyncPlugin extends Plugin {
       this.sync2Manager?.cancelDrain();
     } catch (err) {
       this.logger?.warn("onunload: cancelDrain failed", { err: `${err}` });
+    }
+    // Cancel a still-pending startup sync so it can't fire on an
+    // unloaded instance (e.g. a reload during the startup delay).
+    if (this.startupSyncTimer !== null) {
+      window.clearTimeout(this.startupSyncTimer);
+      this.startupSyncTimer = null;
     }
     this.stopSyncInterval();
     if (this.vaultDeleteListener) {

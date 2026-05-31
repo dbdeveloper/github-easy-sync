@@ -57,7 +57,7 @@ Integration tests under `tests/integration/scenarios/sync2/corruption/`:
 
 ## P1 — Polish
 
-### Harden against drain overlap spanning a plugin reload
+### Harden against drain overlap spanning a plugin reload  ✅ DONE (2.0.2-beta2)
 
 Surfaced while fixing the ref-update 422 hang (field report
 2026-05-31). The 422 "not a fast forward" on PATCH /git/refs was
@@ -76,22 +76,36 @@ plugin reload (the BRAT-style disable+enable): the old instance's
 interval/drain overlapping the new instance's startup pulse, two
 guards, two drains.
 
-**Partly DONE (2.0.2-beta2):** `onunload` now calls
-`sync2Manager.cancelDrain()` as its first action (before
-`stopSyncInterval()` clears the timer), so the outgoing instance
-aborts its in-flight drain before the incoming instance's startup
-sync fires. cancelDrain sets `abortRequested`; the drain loop bails
-between batches/files. This closes the common overlap window.
+**DONE (2.0.2-beta2)** — two cooperating guards, no marker files:
 
-**Still open (lower priority):** cancelDrain only sets a flag — an
-HTTP call already in flight finishes, so the old drain can still
-complete its current batch before stopping. A fuller guard would be
-a cross-instance lock (a `.drain-lock` marker in `.push-queue/` with
-a timestamp + stale-timeout) so a second *instance* cannot begin a
-drain while the first is mid-flight at all. Do it if the overlap
-recurs in the field. Do NOT "fix" it by de-determinising commits —
-the deterministic SHA is load-bearing for resume/idempotency (the
-"reuse parent commit" path).
+1. `onunload` calls `sync2Manager.cancelDrain()` as its first action
+   (before `stopSyncInterval()` clears the timer): the OUTGOING
+   instance aborts its in-flight drain cleanly (abortRequested,
+   checked between batches/files) rather than crashing on the
+   worker that `onunload` also terminates.
+
+2. The startup sync is no longer fired the instant layout is ready —
+   it waits `STARTUP_SYNC_DELAY_MS` (1.5 s). Across a disable+enable
+   reload this gives the outgoing instance's drain teardown time to
+   settle before the INCOMING instance starts its own, closing the
+   overlap window. On a cold start the wait is imperceptible. The
+   timer is cleared in `onunload` so it can't fire on an unloaded
+   instance. No marker-file bookkeeping needed.
+
+Even if an overlap somehow still occurs, the ref-update 422
+fail-fast (§4.1) makes it self-heal invisibly: the loser's PATCH
+fails in one attempt, the next drain reconciles + reuses the
+already-pushed commit.
+
+**Not pursued:** a cross-instance `.drain-lock` marker with a stale-
+timeout. It would close the last theoretical sliver (an in-flight
+HTTP call completing after cancelDrain) but adds per-drain I/O and a
+fragile timeout (a long legit push vs a crashed-drain stale lock).
+The two guards above + fail-fast cover the realistic cases. Revisit
+only if field evidence shows a genuine cross-instance race. Do NOT
+"fix" it by de-determinising commits — the deterministic SHA is
+load-bearing for resume/idempotency (the "reuse parent commit"
+path).
 
 ### Token-expiry surface in Settings  ✅ DONE (2.0.2-beta2)
 
