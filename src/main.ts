@@ -191,6 +191,14 @@ export default class GitHubSyncPlugin extends Plugin {
   // instance's drain teardown across a plugin reload.
   private startupSyncTimer: number | null = null;
 
+  // 2.0.2-beta2: ribbon "syncing" affordance. A drain-status
+  // subscription toggles a CSS class on the ribbon icons while a
+  // drain runs (spin + accent tint). `drainRunning` caches the
+  // latest state so an icon created AFTER a drain starts (layout
+  // ready races, settings toggles) picks up the right look.
+  private drainStatusRibbonUnsub: (() => void) | null = null;
+  private drainRunning = false;
+
   async onUserEnable(): Promise<void> {
     if (!this.isConfigured()) {
       new Notice("Go to settings to configure syncing");
@@ -457,6 +465,9 @@ export default class GitHubSyncPlugin extends Plugin {
       window.clearTimeout(this.startupSyncTimer);
       this.startupSyncTimer = null;
     }
+    // Drop the ribbon drain-status subscription.
+    this.drainStatusRibbonUnsub?.();
+    this.drainStatusRibbonUnsub = null;
     this.stopSyncInterval();
     if (this.vaultDeleteListener) {
       this.app.vault.offref(this.vaultDeleteListener);
@@ -968,6 +979,12 @@ export default class GitHubSyncPlugin extends Plugin {
       },
     });
 
+    // 2.0.2-beta2: drive the ribbon "syncing" look from drain status.
+    // The icon (refresh-cw) spins + tints accent while a drain runs.
+    this.drainStatusRibbonUnsub = this.sync2Manager.setDrainStatusListener(
+      (s) => this.applyRibbonSyncingState(s.state === "running"),
+    );
+
     // Conflict resolution events (sibling delete, edit, rename) are
     // observed by ConflictWatcher above — no separate vault.on
     // wiring needed here.
@@ -1168,6 +1185,17 @@ export default class GitHubSyncPlugin extends Plugin {
     this.applyPendingBatchesBadge();
   }
 
+  // 2.0.2-beta2: toggle the "syncing" look (spin + accent tint, via
+  // the `github-easy-sync-ribbon-syncing` CSS class) on both ribbon
+  // icons while a drain runs. Caches the state so an icon created
+  // mid-drain picks it up (see showSyncRibbonIcon / showCommitRibbonIcon).
+  private applyRibbonSyncingState(running: boolean): void {
+    this.drainRunning = running;
+    const cls = "github-easy-sync-ribbon-syncing";
+    this.syncRibbonIcon?.toggleClass(cls, running);
+    this.commitRibbonIcon?.toggleClass(cls, running);
+  }
+
   // 2.0.2-beta2: paints the badge on whichever ribbon icon the
   // current settings + cached depth dictate. Idempotent — safe to
   // call on every settings toggle.
@@ -1314,6 +1342,13 @@ export default class GitHubSyncPlugin extends Plugin {
     // the plugin loads with pre-existing batches (offline session,
     // crash recovery, etc.).
     void this.refreshSyncRibbonInitial();
+    // Reflect an already-running drain (icon created mid-sync).
+    if (this.drainRunning) {
+      this.syncRibbonIcon.toggleClass(
+        "github-easy-sync-ribbon-syncing",
+        true,
+      );
+    }
   }
 
   private async refreshSyncRibbonInitial(): Promise<void> {
@@ -1356,6 +1391,13 @@ export default class GitHubSyncPlugin extends Plugin {
     // 2.0.2-beta2: if [Sync] is currently hidden, the depth badge
     // moves to this newly-shown [Commit] icon.
     this.applyPendingBatchesBadge();
+    // Reflect an already-running drain (icon created mid-sync).
+    if (this.drainRunning) {
+      this.commitRibbonIcon.toggleClass(
+        "github-easy-sync-ribbon-syncing",
+        true,
+      );
+    }
   }
 
   hideCommitRibbonIcon(): void {

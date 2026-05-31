@@ -251,3 +251,18 @@
 .diff2-word-changed {
     background: rgba(255, 235, 59, 0.45);
 }
+
+/* 2.0.2-beta2 — ribbon "syncing" affordance. While a drain runs, the
+ * sync (and commit) ribbon icon spins and tints to the accent color
+ * so the user sees at a glance that a sync is in progress. Targets
+ * the inner lucide SVG; the pending-batches badge sits in the corner
+ * and is unaffected. Toggled by main.ts applyRibbonSyncingState.
+ */
+.github-easy-sync-ribbon-syncing svg {
+    color: var(--interactive-accent);
+    animation: github-easy-sync-ribbon-spin 1s linear infinite;
+}
+@keyframes github-easy-sync-ribbon-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
