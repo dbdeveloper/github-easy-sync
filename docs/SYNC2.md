@@ -1577,6 +1577,60 @@ this case with crash-safe recovery from a state machine the
 plugin's own bootloader can drive — even before logger,
 settings, or snapshot are initialised.
 
+A field report (2026-05-31) surfaced the reload primitive's
+portability gap: a first implementation called
+`app.plugins.reloadPlugin(id)`, which exists on desktop but
+**not on Obsidian Mobile**, so the auto-reload silently no-op'd
+on phones (the log carried *"reloadPlugin is unavailable"*). The
+portable primitive — what BRAT itself uses — is
+`disablePlugin(id)` then `enablePlugin(id)`, available on both.
+`reloadPluginById` prefers `reloadPlugin` when present and falls
+back to disable+enable otherwise; `canReloadPlugins` gates the
+whole path.
+
+### 11.5 Drain overlap across a reload
+
+The reload is a disable-then-enable of the plugin, so for a brief
+moment the OUTGOING instance is tearing down while the INCOMING
+instance is starting. Each instance has its own `running`
+re-entrant guard, so the guard alone cannot stop the two from
+running drains concurrently. Two concurrent drains are a real
+hazard: with the deterministic commit identity (§4.4), both can
+build the *same* commit SHA for the same batch, and the second
+PATCH to move the head then fails non-fast-forward (§4.1).
+
+Three cooperating measures keep the two drains apart, with no
+marker files or cross-instance locks:
+
+1. **`onunload` cancels the outgoing drain.** The first action in
+   `onunload` is `cancelDrain()` — before the worker pool is
+   terminated — so the outgoing instance aborts its in-flight
+   drain cleanly (the loop checks `abortRequested` between
+   batches/files) rather than crashing on the worker that
+   `onunload` then tears down.
+
+2. **The incoming startup sync is delayed.** The new instance
+   does not fire its startup sync the instant layout is ready; it
+   waits ~1.5 s (`STARTUP_SYNC_DELAY_MS`). That window lets the
+   outgoing instance's teardown settle before the incoming drain
+   begins. On a normal cold start the delay is imperceptible. The
+   timer is cleared in `onunload` so a reload *during* the window
+   cannot fire a startup sync on an already-unloaded instance.
+
+3. **Fail-fast absorbs any residual overlap.** If, despite the
+   above, two drains still race to push the same batch, the
+   loser's ref-update 422 fails fast (§4.1) and the next drain
+   reconciles + reuses the already-pushed commit. The overlap
+   becomes invisible rather than a 33-second hang.
+
+A cross-instance lock (a `.drain-lock` marker in `.push-queue/`
+with a stale-timeout) would close the last theoretical sliver —
+an in-flight HTTP call completing after `cancelDrain` — but the
+per-drain I/O and the fragile timeout (a long legitimate push
+versus a crashed-drain stale lock) are not justified while
+fail-fast already makes the case self-heal. It is deferred until
+field evidence shows a genuine cross-instance race.
+
 ---
 
 ## 12. Self-Update Marker Protocol
