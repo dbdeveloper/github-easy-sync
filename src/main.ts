@@ -37,7 +37,10 @@ import { DiffEditView, DIFF2_EDIT_VIEW_TYPE } from "./diff2/diff-edit-view";
 import { TokenExpiredModal } from "./sync2/views/token-expired-modal";
 import { CancelSyncModal } from "./sync2/views/cancel-sync-modal";
 import { AuthError } from "./errors";
-import { runSelfUpdateBootloader } from "./sync2/plugin-update-bootloader";
+import {
+  runSelfUpdateBootloader,
+  extractAffectedPluginId,
+} from "./sync2/plugin-update-bootloader";
 import { calculateGitBlobSHA } from "./utils";
 import manifest from "../manifest.json";
 
@@ -679,6 +682,22 @@ export default class GitHubSyncPlugin extends Plugin {
       );
       const result = await recovery.sweep();
       this.logger.info("initSync2: AtomicWriteRecovery sweep", result);
+      // 2.0.2-beta2: if the sweep forward-completed any write that
+      // landed under <configDir>/plugins/<id>/<file>, the affected
+      // plugin's in-memory code is now older than its on-disk code
+      // (Obsidian loaded the OLD bytes before the sweep ran). Walk
+      // appliedPaths through the same plugin-id detector the
+      // drain-end reload path uses; trigger reloadPlugin for each.
+      if (result.appliedPaths.length > 0) {
+        const pluginIds = new Set<string>();
+        for (const p of result.appliedPaths) {
+          const id = extractAffectedPluginId(p, this.app.vault.configDir);
+          if (id !== null) pluginIds.add(id);
+        }
+        if (pluginIds.size > 0) {
+          this.handlePluginsAffectedReload(Array.from(pluginIds));
+        }
+      }
     } catch (err) {
       this.logger.error("Atomic-write recovery sweep failed", `${err}`);
     }

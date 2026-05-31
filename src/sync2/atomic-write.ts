@@ -408,9 +408,23 @@ export class AtomicWriteRecovery {
     private readonly conflictStore?: ConflictStoreLike,
   ) {}
 
-  async sweep(): Promise<{ cleaned: number; restored: number }> {
+  async sweep(): Promise<{
+    cleaned: number;
+    restored: number;
+    // 2.0.2-beta2: paths where NEW BYTES appeared during recovery
+    // (forward-apply cases), so the caller can trigger
+    // `app.plugins.reloadPlugin(id)` for affected plugins. Only
+    // includes:
+    //   - Path B Step 3 (ConflictStore sibling promotion)
+    //   - Modify-in-place marker forward-complete
+    // Excludes ROLLBACK cases (sync-bak restored over original)
+    // because those bring the path BACK to its pre-write state —
+    // any running plugin already matches that state.
+    appliedPaths: string[];
+  }> {
     let cleaned = 0;
     let restored = 0;
+    const appliedPaths: string[] = [];
 
     const { syncTmps, syncBaks, syncModifyMarkers } = await this.findCandidates();
 
@@ -448,6 +462,11 @@ export class AtomicWriteRecovery {
             // Resume the interrupted Step 3.
             await this.vault.adapter.rename(tmpPath, originalPath);
             restored++;
+            // 2.0.2-beta2: NEW bytes appeared at originalPath
+            // (the conflict sibling file). Surface for reload
+            // trigger — though sibling paths are usually conflict
+            // files, not plugin files, the caller filters.
+            appliedPaths.push(originalPath);
           } else {
             // SHA mismatch — disk corruption or a stale staging from
             // some unrelated path that happens to collide. Drop it;
@@ -538,6 +557,10 @@ export class AtomicWriteRecovery {
           }
           await this.vault.adapter.rename(tmpPath, finalPath);
           restored++;
+          // 2.0.2-beta2: NEW bytes appeared at finalPath via
+          // modify-in-place forward-complete. Caller filters for
+          // plugin paths and triggers reloadPlugin.
+          appliedPaths.push(finalPath);
         } else {
           cleaned++;
         }
@@ -551,7 +574,7 @@ export class AtomicWriteRecovery {
       }
     }
 
-    return { cleaned, restored };
+    return { cleaned, restored, appliedPaths };
   }
 
   // Recursively walk the vault for `.sync-tmp` / `.sync-bak` staging

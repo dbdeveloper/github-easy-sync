@@ -297,7 +297,62 @@ describe("AtomicWriteRecovery.sweep", () => {
       f.store,
     );
     const result = await recovery.sweep();
-    expect(result).toEqual({ cleaned: 0, restored: 0 });
+    expect(result).toEqual({ cleaned: 0, restored: 0, appliedPaths: [] });
+  });
+
+  it("modify-in-place forward-complete reports applied path (2.0.2-beta2)", async () => {
+    // The marker + .sync-tmp pair from Path C (modify-in-place
+    // strategy) gets forward-completed: rename sync-tmp over target,
+    // remove marker. Surface the target path in appliedPaths so the
+    // caller can trigger reloadPlugin(id) when the target is under
+    // configDir/plugins/<id>/.
+    fs.writeFileSync(path.join(f.root, "x.md"), "old-bytes");
+    fs.writeFileSync(path.join(f.root, "x.sync-tmp.md"), "new-bytes");
+    fs.writeFileSync(path.join(f.root, ".x.md.sync-tmp."), "");
+    const recovery = new AtomicWriteRecovery(
+      f.vault as unknown as import("obsidian").Vault,
+      f.store,
+    );
+    const result = await recovery.sweep();
+    expect(result.cleaned).toBe(0);
+    expect(result.restored).toBe(1);
+    expect(result.appliedPaths).toEqual(["x.md"]);
+    expect(readText(f.root, "x.md")).toBe("new-bytes");
+    expect(fs.existsSync(path.join(f.root, "x.sync-tmp.md"))).toBe(false);
+    expect(fs.existsSync(path.join(f.root, ".x.md.sync-tmp."))).toBe(false);
+  });
+
+  it("modify-in-place marker without sync-tmp: cleaned only, no applied path (2.0.2-beta2)", async () => {
+    // Marker without tmp = the modify completed and the cleanup
+    // crashed mid-way. No new bytes appear; just remove the marker.
+    // appliedPaths stays empty.
+    fs.writeFileSync(path.join(f.root, "x.md"), "old-bytes");
+    fs.writeFileSync(path.join(f.root, ".x.md.sync-tmp."), "");
+    const recovery = new AtomicWriteRecovery(
+      f.vault as unknown as import("obsidian").Vault,
+      f.store,
+    );
+    const result = await recovery.sweep();
+    expect(result.cleaned).toBe(1);
+    expect(result.restored).toBe(0);
+    expect(result.appliedPaths).toEqual([]);
+    expect(fs.existsSync(path.join(f.root, ".x.md.sync-tmp."))).toBe(false);
+  });
+
+  it("sync-bak rollback: NOT reported in appliedPaths (rollback is not 'new bytes')", async () => {
+    // Crash between rename(live → bak) and rename(tmp → live):
+    // sweep restores bak → live. This is ROLLBACK to old bytes —
+    // any running plugin already matches. Don't surface in
+    // appliedPaths.
+    fs.writeFileSync(path.join(f.root, "y.sync-bak.md"), "old-bytes");
+    const recovery = new AtomicWriteRecovery(
+      f.vault as unknown as import("obsidian").Vault,
+      f.store,
+    );
+    const result = await recovery.sweep();
+    expect(result.restored).toBe(1);
+    expect(result.appliedPaths).toEqual([]);
+    expect(readText(f.root, "y.md")).toBe("old-bytes");
   });
 
   it("constants exported: SYNC_TMP_SUFFIX / SYNC_BAK_SUFFIX match the file suffixes", () => {

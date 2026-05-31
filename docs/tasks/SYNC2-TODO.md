@@ -195,37 +195,36 @@ This 9-step bootloader is the additional layer that handles the
 "running code IS the code being swapped" recursion specifically
 for github-easy-sync's own main.js.
 
-#### What we DELIBERATELY don't implement
+#### Status
 
-- Multi-slot rollback (`main.old.js` + `main.new.js`). One
-  rollback slot via the existing `.sync-bak` only, and only
-  until the next plugin enable cycle clears it.
-- "Boot previous version" Settings toggle. If the user wants
-  to roll back, they reinstall via BRAT / Community Plugins.
-- Build-time SHA embedding for integrity verification. The
-  runtime SHA check in step 3/4 of the bootloader is enough.
-- Two-file architecture (`bootloader.js` + `main.body.js`).
-  The whole bootloader is ~30 lines at the top of main(); no
-  build-pipeline split needed.
-- Multi-version history. The existing 1-rollback slot is fine
-  for the field demand we have today.
+Landed in 2.0.2-beta2 (commit `bcc2cbe` for the BRAT-style auto-
+reload protocol, commit for sweep-triggered reload + sweep
+appliedPaths). Tests: 942/942 unit pass.
 
-If field experience surfaces a real need for any of these, the
-spec above (paranoid bootloader, multi-slot rollback, build-
-time SHA) is captured in the git history of this file (look for
-the "paranoid bootloader pattern" commit) and can be revived.
+The five enhancements brainstormed during design (multi-slot
+rollback `.old`/`.new`, "Boot previous version" toggle, build-
+time SHA embedding, two-file architecture, multi-version
+history) were CONSIDERED AND REJECTED — not because they're
+"deferred to later" but because they're not load-bearing for
+our threat model:
 
-#### Tests
+- Multi-slot rollback / "Boot previous version": user cancelled
+  during design ("відміняємо"). If a new plugin version is
+  broken, the user reinstalls via BRAT / Community Plugins.
+- Build-time SHA: the bootloader's runtime SHA comparison
+  between `main.js` and `main.sync-tmp.js` covers the integrity
+  case adequately. Build-time SHA would only protect against
+  bit rot when no sync-tmp is present, which is vanishingly
+  rare on modern filesystems with built-in checksums.
+- Two-file architecture: our bootloader region (~30 lines at
+  the top of `main()`) is rewritten in full whenever the file
+  changes — atomic rename replaces the WHOLE file, not just a
+  body region. The "preserve bootloader region across updates"
+  property that splits would provide isn't load-bearing here.
 
-- Unit (mock-obsidian): test the trigger-detection logic
-  (pulled-path walk + ID extraction + enabledPlugins gate)
-  against a fake app object. The 9-step bootloader's
-  decision-tree is enumerable (presence/absence of sync-tmp,
-  sync-bak; SHA equal/differ; FS atomic-rename support) —
-  each cell of the matrix becomes one unit test.
-
-- Integration: optional — would require a second plugin
-  installed on the int-test repo. Defer until field demand.
+The previous "Paranoid bootloader pattern (FSM with mess-state
+recovery)" spec exploration is preserved in commit `9840383`
+(SYNC2-TODO docs commit before simplification) for archeology.
 
 ### `data.json` migration code (if user base grows past one person)
 
