@@ -4,7 +4,7 @@
 //   - Section heading.
 //   - Group-by-path expandable rows (one row per base file; nested
 //     list of sibling versions for multi-sibling case — Scenario C
-//     of PSEUDO-MERGE-MODE §10).
+//     of PSEUDO-MERGE-MODE §8).
 //   - Per-sibling row: device label, timestamp, tracked/synthetic
 //     badge, click handler.
 //

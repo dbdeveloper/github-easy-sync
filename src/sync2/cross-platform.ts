@@ -6,7 +6,7 @@
 // invariant "any new cross-platform quirk goes here first" is
 // enforceable by code review.
 //
-// Three concerns currently centralised (PSEUDO-MERGE-MODE §11):
+// Three concerns currently centralised (SYNC2 §3):
 //
 //   1. Filename character constraints (Obsidian Android rejects
 //      `< > : " | ? * \` because of Windows FAT/NTFS compatibility;
@@ -104,12 +104,12 @@ export function needsSanitization(path: string): boolean {
 // path at the first syntax char and returns 404. `/` is the path
 // separator and must NOT be encoded — encode per-segment and rejoin.
 //
-// Field bug reference (2026-05-25 — see PSEUDO-MERGE-MODE §16.3): a
+// Field bug reference (2026-05-25 — see SYNC2 §7.3): a
 // file named `[1] File ^ opa?.md` pushed via GitHub Web UI was
 // unreachable by pull because the raw `?` ended the URL path. The
 // initial inline fix lived in `src/github/client.ts`; this module
 // became its canonical home as part of the cross-platform contracts
-// consolidation (PSEUDO-MERGE-MODE §11).
+// consolidation (SYNC2 §3).
 //
 // `encodeURIComponent` handles all the Family-1 and Family-2
 // forbidden chars correctly. The chars it leaves un-encoded
@@ -134,7 +134,7 @@ export function encodePathForGithub(path: string): string {
 // canonical implementation to share):
 //
 //   - atomic-write.ts — promotes `.sync-tmp` staging file to its
-//     final name during Pull-Replace (PSEUDO-MERGE-MODE §9.3, Step 3).
+//     final name during Pull-Replace (SYNC2 §2.3, Step 3).
 //   - conflict-store.ts — persistRecord renames `meta.json.tmp` to
 //     `meta.json` after every store mutation.
 //   - pending-deletions-store.ts — same persistRecord pattern.

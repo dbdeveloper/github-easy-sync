@@ -52,7 +52,7 @@ import type { TrashHooks } from "./trash-hooks";
 import { normalizeText } from "./text-normalize";
 import { FileChange } from "./types";
 
-// ── Skip-class taxonomy (PSEUDO-MERGE-MODE §14 + §7.5) ─────────
+// ── Skip-class taxonomy (SYNC2 §6 + §7.5) ─────────
 //
 // Every `continue` / `return` inside the loops in `pullIfNeeded`,
 // `applyRemoteAddOrModify`, `applyRemoteDeletion`, `processBatch`,
@@ -278,7 +278,7 @@ export interface Sync2ManagerDeps {
   // that don't exercise the conflict path can omit it (the manager
   // throws if a conflict tries to register and the store is missing).
   conflictStore?: ConflictStore;
-  // Pending-deletions queue (PSEUDO-MERGE-MODE §12.2). Receives an
+  // Pending-deletions queue (SYNC2 §4.2). Receives an
   // entry whenever pull-side sanitize observes a forbidden GitHub
   // path and writes its canonical form locally — the entry drives a
   // future push to delete the forbidden path from GitHub. Optional:
@@ -348,7 +348,7 @@ export interface Sync2ManagerDeps {
   // to .push-queue/ — enqueueOrMerge writes a new batch (depth +1)
   // or folds into existing (depth +0); processBatch deletes a
   // successfully-pushed batch (depth -1). Subscriber pattern for
-  // PSEUDO-MERGE-MODE §12.3: ribbon sync-icon badge displays this
+  // SYNC2 §4.3: ribbon sync-icon badge displays this
   // number so the user sees push-queue state directly rather than
   // the indirect conflict-count proxy. `depth` is the count AFTER
   // the mutation that triggered the callback. No-op in unit tests
@@ -560,7 +560,7 @@ export class Sync2Manager {
   // Fire onQueueDepthChanged with the CURRENT push-queue depth. Used
   // at every persistent queue mutation (enqueue success, processBatch
   // delete, reset, etc.) so the ribbon sync-icon badge
-  // (PSEUDO-MERGE-MODE §12.3) reflects on-disk state without
+  // (SYNC2 §4.3) reflects on-disk state without
   // polling. No-op when the
   // callback is not wired (most unit tests).
   private async fireQueueDepth(): Promise<void> {
@@ -633,7 +633,7 @@ export class Sync2Manager {
       }
       const enqueued = await this.enqueueOrMerge(changes, this.fullSyncMeta());
       syncedFiles = enqueued;
-      // PSEUDO-MERGE-MODE §12.3: queue depth changes after enqueue (whether a
+      // SYNC2 §4.3: queue depth changes after enqueue (whether a
       // new batch was persisted or an existing one folded into).
       // Ribbon badge refreshes on this signal.
       await this.fireQueueDepth();
@@ -845,7 +845,7 @@ export class Sync2Manager {
         parentTreeSha: this.store.getLastSyncTreeSha(),
       });
       syncedFiles = enqueued;
-      // PSEUDO-MERGE-MODE §12.3 — same depth-changed signal as syncAll.
+      // SYNC2 §4.3 — same depth-changed signal as syncAll.
       await this.fireQueueDepth();
       if (enqueued > 0) {
         this.onLocalCommitted?.(enqueued);
@@ -1075,7 +1075,7 @@ export class Sync2Manager {
                   await this.writeBinaryRemote(canonical, blob.content);
                 }
                 // Record the intent to delete the forbidden GitHub
-                // path on the next push. PSEUDO-MERGE-MODE §12.2:
+                // path on the next push. SYNC2 §4.2:
                 // pre-2.0.1-beta4 this was a phantom snapshot entry
                 // (mtime=0/size=0). beta4 moves the intent to the
                 // explicit pending-deletions queue — same observable
@@ -1299,7 +1299,7 @@ export class Sync2Manager {
   }
 
   // Pre-flight validation of deletion entries in a tree-create payload
-  // (PSEUDO-MERGE-MODE §12.1). For each entry with `sha: null` (a
+  // (SYNC2 §4.1). For each entry with `sha: null` (a
   // deletion), confirm the path still exists at `currentHead`. Drop
   // any whose path is already absent — sending them as a deletion in
   // a `createTree` request triggers a 422 `GitRPC::BadObjectState`
@@ -1311,7 +1311,7 @@ export class Sync2Manager {
   // the same stale deletion, creating a re-validate-and-drop loop
   // that wastes one round-trip per sync forever.
   //
-  // Validator failure policy (PSEUDO-MERGE-MODE §12.1): if
+  // Validator failure policy (SYNC2 §4.1): if
   // `getContentsAtRef` itself errors (network, GitHub 5xx, rate
   // limit), throw. The caller's catch in `processBatch` aborts the
   // push; the queued batch survives; the next drain retries. Better
@@ -1556,7 +1556,7 @@ export class Sync2Manager {
               await this.ensureParentDir(canonical);
               await this.vault.adapter.writeBinary(canonical, bytes);
             }
-            // Pending-deletion intent (PSEUDO-MERGE-MODE §12.2;
+            // Pending-deletion intent (SYNC2 §4.2;
             // see pullIfNeeded sanitize site for full rationale).
             // Bootstrap's currentHead is the freshly-fetched branch
             // head; the entry observes the forbidden path at that
@@ -1871,14 +1871,14 @@ export class Sync2Manager {
   // can fire `onPluginsAffected` once at the end and the main
   // thread can call `reloadPlugin(id)`. Subdirectory files and
   // anything outside plugins/ are ignored.
-  // PSEUDO-MERGE-MODE §20 Plugin Reload After Pull.
+  // SYNC2 §11 Plugin Reload After Pull.
   private maybeMarkPluginAffected(path: string): void {
     const id = extractAffectedPluginId(path, this.configDir);
     if (id !== null) this.affectedPluginIds.add(id);
   }
 
   // 2.0.2-beta2 marker-based self-update protocol for OUR plugin's
-  // main.js / manifest.json / styles.css. PSEUDO-MERGE-MODE §21
+  // main.js / manifest.json / styles.css. SYNC2 §12
   // Self-Update Marker Protocol — full spec including crash-window
   // matrix, bootloader 4-case decision table, and design rationale
   // for using marker presence instead of SHA verification.
@@ -2715,7 +2715,7 @@ export class Sync2Manager {
       let pushedAnyBatch = false;
       let finalizeAttempted = false;
       // 2.0.2-beta2 outer loop: tail re-check window.
-      // PSEUDO-MERGE-MODE §9.8 Tail Re-Check Window — full spec
+      // SYNC2 §2.8 Tail Re-Check Window — full spec
       // including the cooperating 300ms commit-to-drain delay
       // inside syncAll() and the "every committed batch is
       // eventually drained" invariant.
@@ -3032,7 +3032,7 @@ export class Sync2Manager {
         });
 
       // Inject pending-deletions queue contents as additional deletion
-      // entries (PSEUDO-MERGE-MODE §12.2). Each queue entry was added
+      // entries (SYNC2 §4.2). Each queue entry was added
       // by pull-side sanitize to record the intent "delete this
       // forbidden GitHub path on the next push." Injection happens at
       // push-time (not enqueue-time) so the queue can accept new
@@ -3069,7 +3069,7 @@ export class Sync2Manager {
       }
 
       // Pre-flight validation of deletion entries
-      // (PSEUDO-MERGE-MODE §12.1). For each entry with `sha: null` (a
+      // (SYNC2 §4.1). For each entry with `sha: null` (a
       // deletion), confirm the path still exists at currentHead. If
       // it doesn't, the deletion is stale (another device or a manual
       // GitHub Web action removed it between when our batch was
@@ -3192,7 +3192,7 @@ export class Sync2Manager {
       for (const path of batch.deletions) {
         this.detector.recordDeletion(path);
       }
-      // Pending-deletions queue cleanup (PSEUDO-MERGE-MODE §12.2):
+      // Pending-deletions queue cleanup (SYNC2 §4.2):
       // every queue entry whose path was just successfully deleted on
       // GitHub (or was injected from the queue into this batch and
       // didn't survive pre-flight validation) is no longer needed.
@@ -3214,7 +3214,7 @@ export class Sync2Manager {
       await this.store.save();
 
       await this.queue.delete(id);
-      // PSEUDO-MERGE-MODE §12.3: queue depth dropped after successful push.
+      // SYNC2 §4.3: queue depth dropped after successful push.
       await this.fireQueueDepth();
       // R3.5 layers 1a + 1b — trash cleanup confirmation. Best-effort:
       // hook failure is logged and swallowed; the push itself already

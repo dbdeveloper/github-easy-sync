@@ -99,7 +99,7 @@ produced it:
   (rollback direction). It is the file that *was* there before the
   protocol started.
 
-This naming-to-meaning correspondence is the property §9 walks through.
+This naming-to-meaning correspondence is the property §2 walks through.
 It is what lets a reader look at any staging file on disk and know
 immediately what it represents, regardless of which protocol produced
 it. The recovery sweep on the plugin load uses the same correspondence as
@@ -116,7 +116,7 @@ The asymmetry is unavoidable: a brand-new sibling file has no prior
 version to preserve, so there is nothing for `.sync-bak` to hold. Both
 callsites therefore use `.sync-tmp` whenever new bytes are in flight,
 but only `atomicWriteFile` ever produces a `.sync-bak`. This is the
-property that makes the unified recovery sweep tractable (§9.5).
+property that makes the unified recovery sweep tractable (§2.5).
 
 ### 2.2 The Staging-Path Naming Convention
 
@@ -366,7 +366,7 @@ this placement:
    for staging files. Routing Path B through the same primitive
    removes a class of bespoke recovery code and ensures that any
    change to atomic-write semantics propagates to the conflict-store
-   path automatically. The single unified sweep described in §9.5
+   path automatically. The single unified sweep described in §2.5
    is the direct dividend.
 2. **The staging file is recoverable in place.** If the rename in
    Path B's Step 3 fails (the OS reports an I/O error, the destination
@@ -379,7 +379,7 @@ this placement:
 The conflict store's `load()` does **not** check the vault for
 sibling files. It reads `meta.json` files from the conflict-records
 directory and builds its in-memory index purely from that. The
-recovery sweep described in §9.5 runs separately, and the
+recovery sweep described in §2.5 runs separately, and the
 *resolution* of conflicts based on what is or is not in the vault
 happens only at the next `drain()`.
 
@@ -442,7 +442,7 @@ intended for the next drain.
 
 ## 3. Cross-Platform Contracts
 
-The conflict-resolution layer of §4–§10 works because the underlying
+The conflict-resolution layer of PSEUDO-MERGE-MODE.md §4–§8 works because the underlying
 file primitives behave the same way on every platform the plugin
 ships to. They do not — Obsidian Mobile (Android + iOS, Capacitor)
 and Obsidian Desktop (Electron) diverge in three places that matter
@@ -485,7 +485,7 @@ name follow the file), and only then does change-detection see the
 canonical form. The pull side runs them over the incoming GitHub
 paths: any forbidden-named GitHub file is materialised under its
 canonical local name, and the forbidden remote path is recorded in
-the pending-deletions queue (§12.2) so the next push cleans GitHub.
+the pending-deletions queue (§4.2) so the next push cleans GitHub.
 A multi-device vault that started with a forbidden-named file ends
 up — after one round-trip of sync from any device — with that file
 present under its canonical name on every device and on GitHub.
@@ -509,8 +509,8 @@ destination is occupied. POSIX `rename` (Desktop's path) silently
 overwrites. The portable pattern — `if (exists(dst)) remove(dst);
 rename(src, dst)` — is wrapped as `safeRename(adapter, src, dst)`.
 Every protocol step that ends in a rename — the staging-file
-promotion of §9.3 Step 3; the conflict-store `meta.json.tmp` rename
-in §9.4; the pending-deletions store's persistRecord; the atomic-
+promotion of §2.3 Step 3; the conflict-store `meta.json.tmp` rename
+in §2.4; the pending-deletions store's persistRecord; the atomic-
 write rollback path — calls this helper rather than inlining the
 dance. A future contributor who introduces a new write-then-rename
 step gets the cross-platform behaviour for free, and the rationale
@@ -531,7 +531,7 @@ the call sites do not see the difference."
 
 ## 4. The Push Pipeline
 
-The conflict-resolution layer of §4–§10 describes WHEN a path goes
+The conflict-resolution layer of PSEUDO-MERGE-MODE.md §4–§8 describes WHEN a path goes
 to the conflict branch and HOW its sibling is constructed. The push
 pipeline of this section describes WHAT happens when a
 non-conflicting batch reaches GitHub. The path is simple at the top
@@ -586,7 +586,7 @@ The discipline is targeted at the one entry shape that turns
 
 ### 4.2 Pending-deletions queue
 
-Pull-side sanitize (§11) materialises a forbidden-named GitHub file
+Pull-side sanitize (§3) materialises a forbidden-named GitHub file
 under its canonical local name and needs a way to record "delete
 this forbidden path on the next push." The naïve approach — write a
 `SnapshotStore` entry at the forbidden path so the next change-
@@ -603,7 +603,7 @@ entry, each containing a `meta.json` with the path, the source
 GitHub commit SHA at which the path was last observed present, and
 the blob SHA at that commit. The `processBatch` consumer injects
 every queue entry as an additional deletion in the tree-create
-request; pre-flight validation (§12.1) covers it just like a
+request; pre-flight validation (§4.1) covers it just like a
 change-detector-emitted deletion; a successful push clears the
 matching queue entry; a failed push leaves the entry untouched for
 the next drain.
@@ -649,7 +649,7 @@ the badge decrementing in lock-step. The user has direct visibility
 into the engine's state without needing to open the activity log.
 
 The badge does not show the unresolved-conflict count. That signal
-lives on the status-bar `🔀 N` indicator (§5), which is the
+lives on the status-bar `🔀 N` indicator (§1), which is the
 canonical home for the conflict layer's state. The two surfaces are
 deliberately distinct: the sync icon reflects pipeline state (do I
 have outbound work pending?), the status-bar reflects collaboration
@@ -720,7 +720,7 @@ log snippet into an issue carry the class name with it.
 
 The 422 case deserves a note. GitHub returns 422 for two distinct
 sub-causes — malformed payload, and `GitRPC::BadObjectState` from
-remote state drift (§12.1) — and the type system models both as
+remote state drift (§4.1) — and the type system models both as
 `ValidationError`. Catch sites that need the distinction read
 `error.body?.message` directly. The choice was pragmatic: the
 second sub-cause is rare once pre-flight validation runs, and
@@ -805,7 +805,7 @@ a `throw`, not a `continue`.
 
 ## 7. Field Postmortems
 
-The design as described in §1–§15 reads as a single coherent
+The design as described across PSEUDO-MERGE-MODE.md and §1–§12 here reads as a single coherent
 protocol, but the path to that protocol passed through specific
 field incidents that surfaced specific structural gaps. The five
 postmortems below preserve the historical record: each one captures
@@ -832,7 +832,7 @@ happily creates such names because the underlying POSIX filesystem
 allows them, and the asymmetry was invisible until the file crossed
 platforms.
 
-**Now-covered-by:** §11 *Cross-Platform Contracts* (the
+**Now-covered-by:** §3 *Cross-Platform Contracts* (the
 `sanitizeFilename` / `needsSanitization` discipline rewrites the
 12-character forbidden set to canonical Unicode replacements on
 both push and pull sides; multi-device vaults converge on the
@@ -863,7 +863,7 @@ fields via direct property access that survives prototype-only
 definitions. `src/logger.ts::safeStringify` mirrors the same
 extraction so any `logger.error(msg, { err })` site benefits
 automatically. The two click handlers log before showing a Notice.
-The typed-error hierarchy of §13 makes the resulting log entries
+The typed-error hierarchy of §5 makes the resulting log entries
 classifiable by `name` for filtering.
 
 ### 7.3 `404` on GitHub Contents URLs containing `?`, `#`, etc. (2026-05-25)
@@ -878,7 +878,7 @@ string interpolation of the path. URL-syntax characters (`?`, `#`,
 saw the path as `[1] File ^ opa` with `md` as a query parameter —
 no such file at that path → 404.
 
-**Now-covered-by:** §11 *Cross-Platform Contracts*
+**Now-covered-by:** §3 *Cross-Platform Contracts*
 (`encodePathForGithub` percent-encodes per segment; every Contents-
 API URL construction routes through it; raw path interpolation is
 forbidden by convention and missing from the GitHub client code).
@@ -899,7 +899,7 @@ branch head. From the next sync forward, the compare diff between
 change — it was present at both ends with the same SHA — and the
 file became invisible to incremental sync.
 
-**Now-covered-by:** §14 *Skip-Class Discipline*. The compare-listed-
+**Now-covered-by:** §6 *Skip-Class Discipline*. The compare-listed-
 but-fetch-null case is now `unexpected` and throws
 `StaleStateError`. The per-file catch in `pullIfNeeded` logs the
 exact path; the loop aborts; `lastSync` stays at the prior
@@ -928,10 +928,10 @@ afterward (any forbidden path migrated by Device A produced a
 phantom on Device B that became stale as soon as Device B pulled
 post-migration).
 
-**Now-covered-by:** §12.1 *Pre-flight validation* (the validator
+**Now-covered-by:** §4.1 *Pre-flight validation* (the validator
 drops stale deletions before `createTree`; the matching snapshot
 row is removed so ChangeDetector does not re-emit the same stale
-deletion next sync) and §12.2 *Pending-deletions queue* (sanitize
+deletion next sync) and §4.2 *Pending-deletions queue* (sanitize
 intent is recorded in an explicit store, not as a phantom snapshot
 entry; the snapshot invariant "every row is an observation, not a
 delete-intent" is restored).
@@ -972,7 +972,7 @@ oursBytes:47 theirsBytes:0` for each file, then silently chose
    ~1 MB on remote, and the push committed cleanly because GitHub
    itself does not care about size delta.
 
-**Now-covered-by:** §11 *Cross-Platform Contracts* extended with
+**Now-covered-by:** §3 *Cross-Platform Contracts* extended with
 the Contents-API size discipline.
 `GithubClient.getContentsAtRef` now inspects `size` and `encoding`
 on the response: when `size > 0` and `content === ""` (the
@@ -1084,7 +1084,7 @@ If `new Worker()` throws at startup (very old Capacitor versions,
 strict CSP, etc.), `WorkerClient` flips into fallback mode and
 every op runs synchronously on the main thread using the same
 algorithm. Decided once at construction, cached on `isFallback`.
-The size guard (§17.6) remains the safety net for the
+The size guard (§8.6) remains the safety net for the
 fallback-mode CPU operations.
 
 ### 8.6 Size guard (`maxAutoMergeSizeBytes`)
@@ -1160,7 +1160,7 @@ Empirically ~75 % of reconcile paths resolve from SHAs alone (no
 remote change OR ours wins OR theirs wins atomic). Net effect:
 multiple MB of unnecessary downloads avoided per typical
 multi-device sync. The single-MB merge cliff still bites for the
-remaining ~25 %, but the size guard (§17.6) covers the worst
+remaining ~25 %, but the size guard (§8.6) covers the worst
 cases.
 
 `getContentsMetadataAtRef` is a new method on `GithubClient`. It
@@ -1333,7 +1333,7 @@ handler:
    multiple) so the user has a visible signal.
 
 The 500 ms delay is the same value across both trigger surfaces
-and the bootloader (§22). Treat it as the "drain-stack-unwind
+and the bootloader (§12). Treat it as the "drain-stack-unwind
 budget" — long enough for any in-flight `await` to return,
 short enough that the reload feels immediate to the user.
 
@@ -1352,7 +1352,7 @@ The complication is the **crash window**: if the engine crashes
 between writing the new `main.js` and scheduling the reload,
 the next plugin launch finds new code on disk but inconsistent
 ancillary state (snapshot may be old, sync-tmp/sync-bak may
-linger, etc.). The self-update marker protocol in §22 handles
+linger, etc.). The self-update marker protocol in §12 handles
 this case with crash-safe recovery from a state machine the
 plugin's own bootloader can drive — even before logger,
 settings, or snapshot are initialised.
@@ -1420,7 +1420,7 @@ running instance.
 
 The shape (leading dot, trailing dot, `.sync-tmp.` in the
 middle) is byte-identical to the modify-in-place marker
-convention in §19.1. This is intentional: the existing
+convention in §10.1. This is intentional: the existing
 `AtomicWriteRecovery.sweep` already handles markers via its
 modify-in-place recovery branch, so even if the bootloader is
 somehow bypassed (a code bug at the top of `main()`), the sweep
@@ -1650,7 +1650,7 @@ bytes of a file moved aside before an overwriting (rollback
 direction; only Path A produces these). Both use pre-suffix form
 (e.g., `note.sync-tmp.md`, `note.sync-bak.md`) so that the file
 extension is preserved and gitignore's `*.sync-tmp*` / `*.sync-bak*`
-patterns catch them. See §9.
+patterns catch them. See §2.
 
 **Tree** — A directory listing in git's object storage: an ordered
 collection of `(name, mode, sha)` entries where each `sha` points
@@ -1670,28 +1670,28 @@ the cached `(siblingMtime, siblingSize, siblingSha)` triple.
 Y" that the protocol normalises in one place. The three current
 contracts (forbidden-character set, GitHub Contents URL encoding,
 Capacitor-rename-doesn't-overwrite) live in
-`src/sync2/cross-platform.ts`; see §11.
+`src/sync2/cross-platform.ts`; see §3.
 
 **Forbidden character (filename)** — One of the 12 ASCII characters
 rejected either by the host platform (Family 1: `< > : " | ? *
 \` — Obsidian Android only) or by Obsidian itself (Family 2: `# ^
 [ ]` — both platforms, because of wiki-link grammar). Replaced by
 `sanitizeFilename()` with visually-faithful Unicode counterparts;
-see §11.
+see §3.
 
 **Pending-deletions queue** — Explicit on-disk store at
 `<configDir>/plugins/<self>/.pending-deletions/` recording paths
 the engine must delete from GitHub on the next push. Used by pull-
-side sanitize (§11) when a forbidden-named GitHub file is
+side sanitize (§3) when a forbidden-named GitHub file is
 materialised locally under its canonical name and the forbidden
 path itself needs cleanup. Replaces the older phantom-snapshot
-mechanism; see §12.2.
+mechanism; see §4.2.
 
 **Pre-flight validation** — A check performed on a push-side
 operation (every `createTree` request that carries deletion
 entries) *before* the request is sent, against current GitHub
 state, to verify the operation's assumptions still hold. The
-opposite of optimistic write-and-retry; see §12.1.
+opposite of optimistic write-and-retry; see §4.1.
 
 **Stale-state error** (`StaleStateError`) — Typed error raised when
 two pieces of remote state observed within one sync click no
@@ -1699,16 +1699,16 @@ longer agree. Causes include client URL-encoding bugs, token
 permission drift, replica eventual consistency, and concurrent
 force-push that rewrote currentHead. Always non-retriable on its
 own surface: the per-file catch aborts the loop, the cursor stays
-put, the next drain retries. See §13.
+put, the next drain retries. See §5.
 
 **Skip-class** — One of four labels (`applied`, `deferred`,
 `already-correct`, `unexpected`) annotated as a source-code
 comment on every `continue` / `return` inside the seven core loop
 bodies of the sync engine. The `unexpected` class is never a
-`continue` — it is `throw new StaleStateError(...)`. See §14.
+`continue` — it is `throw new StaleStateError(...)`. See §6.
 
 **Push-queue depth** — Count of batches currently on disk under
 `.push-queue/`, waiting to be drained. Surfaced as a numeric badge
 on the `[Sync with GitHub]` ribbon icon: depth 0 hides the badge,
 depth ≥ 1 shows `(N)` in a green pill. The signal updates after
-every persistent queue mutation; see §12.3.
+every persistent queue mutation; see §4.3.

@@ -30,6 +30,20 @@ and who can read a file path; it does not assume kernel-level
 familiarity with version-control internals. Where git terminology
 appears, a one-paragraph refresher is provided before it is used.
 
+This document is the **algorithm specification**. It describes
+*what* pseudo-merge mode does and *why*, independently of how the
+engine that implements it is structured. The companion document
+[SYNC2.md](./SYNC2.md) is the **engine specification**: it
+describes how the algorithm is realised on top of the GitHub REST
+API — the architectural layers, the on-disk state, the
+crash-recovery protocols, the cross-platform contracts, the push
+pipeline, and the Web Worker orchestra. Where this document refers
+to an engine mechanism (a staging-file protocol, a recovery sweep,
+a cross-platform contract), it cites the relevant SYNC2.md section
+as `SYNC2 §N`. A reader who wants only the conceptual model can
+stop at the end of this document; a reader who needs to maintain
+or reproduce the implementation should read both.
+
 ---
 
 ## 1. The Problem: Vault Synchronization Without git

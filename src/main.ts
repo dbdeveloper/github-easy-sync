@@ -102,7 +102,7 @@ export default class GitHubSyncPlugin extends Plugin {
   // Status-bar indicator and ribbon-icon badge are created when the
   // user's settings turn the corresponding bar/ribbon on.
   conflictStatusIndicator: ConflictStatusIndicator | null = null;
-  // PSEUDO-MERGE-MODE §12.3: the ribbon sync-icon's badge now shows
+  // SYNC2 §4.3: the ribbon sync-icon's badge now shows
   // push-queue depth (count of pending batches in .push-queue/),
   // not the unresolved-conflict count. Fed by Sync2Manager's
   // onQueueDepthChanged callback.
@@ -494,7 +494,7 @@ export default class GitHubSyncPlugin extends Plugin {
       await this.conflictStore.clearAll();
     }
     if (this.pendingDeletions) {
-      // PSEUDO-MERGE-MODE §12.2 Reset semantics — pending-deletions
+      // SYNC2 §4.2 Reset semantics — pending-deletions
       // queue is plugin-managed state and gets wiped along with the
       // snapshot, conflict store, and push queue. No user data is
       // lost (the queue records intents to delete remote paths; on
@@ -513,7 +513,7 @@ export default class GitHubSyncPlugin extends Plugin {
   }
 
   // One-pass migration from 2.0.1-beta2/beta3 phantom-snapshot entries
-  // into the new pending-deletions queue (PSEUDO-MERGE-MODE §12.2).
+  // into the new pending-deletions queue (SYNC2 §4.2).
   // A phantom entry is a SnapshotStore row with mtime === 0 AND
   // size === 0 — the signature pull-side sanitize wrote when
   // recording "delete this forbidden GitHub path on next push"
@@ -631,7 +631,7 @@ export default class GitHubSyncPlugin extends Plugin {
     await conflictStore.load();
     this.conflictStore = conflictStore;
 
-    // Pending-deletions queue (PSEUDO-MERGE-MODE §12.2). Replaces
+    // Pending-deletions queue (SYNC2 §4.2). Replaces
     // the 2.0.1-beta2 phantom-snapshot trick: pull-side sanitize
     // records "delete this forbidden GitHub path on next push"
     // intent in this queue rather than as a phantom SnapshotStore
@@ -818,7 +818,7 @@ export default class GitHubSyncPlugin extends Plugin {
       // Left as a no-op so tests + future wiring can still depend on
       // the callback existing in the deps surface.
       onSyncCompleted: () => {},
-      // PSEUDO-MERGE-MODE §12.3: push-queue depth changes drive the ribbon
+      // SYNC2 §4.3: push-queue depth changes drive the ribbon
       // sync-icon's badge. Fired by Sync2Manager after every
       // persistent .push-queue/ mutation (enqueueOrMerge add,
       // processBatch delete, etc).
@@ -1011,7 +1011,7 @@ export default class GitHubSyncPlugin extends Plugin {
   refreshConflictUI(): void {
     const count = this.conflictCounter?.getValue() ?? 0;
     this.conflictStatusIndicator?.refresh(count);
-    // PSEUDO-MERGE-MODE §12.3: the ribbon sync-icon's badge is NO LONGER
+    // SYNC2 §4.3: the ribbon sync-icon's badge is NO LONGER
     // driven by conflict-count — it shows push-queue depth instead
     // (see refreshRibbonPendingBatchesBadge, fed by Sync2Manager's
     // onQueueDepthChanged callback). Conflict-count is still
@@ -1220,7 +1220,7 @@ export default class GitHubSyncPlugin extends Plugin {
     if (this.commitRibbonIcon) return;
     this.commitRibbonIcon = this.addRibbonIcon(
       "git-commit",
-      "Commit local changes (no upload)",
+      "Commit local changes",
       this.commit.bind(this),
     );
     // 2.0.2-beta2: if [Sync] is currently hidden, the depth badge

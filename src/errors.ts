@@ -1,4 +1,4 @@
-// Typed error classes — PSEUDO-MERGE-MODE §13.
+// Typed error classes — SYNC2 §5.
 //
 // Catch sites in the sync engine previously duck-typed on
 // `(err as { status?: number }).status` and ad-hoc message-string
@@ -17,7 +17,7 @@
 //   │   ├── ConflictError      (409 — bare repo, ref mismatch)
 //   │   ├── ValidationError    (422 — malformed request OR stale
 //   │   │                        state per body.message; see
-//   │   │                        PSEUDO-MERGE-MODE §13 — both go here)
+//   │   │                        SYNC2 §5 — both go here)
 //   │   ├── AuthError          (401, 403)
 //   │   └── RateLimitError     (429)
 //   ├── PlatformError          (Capacitor / WebView; user-visible,
@@ -29,9 +29,9 @@
 //                                returns null; covers 1.4 + the
 //                                422 BadObjectState sub-case from
 //                                1.5 when the catch site wants to
-//                                distinguish — see PSEUDO-MERGE-MODE §13)
+//                                distinguish — see SYNC2 §5)
 //
-// Migration policy (PSEUDO-MERGE-MODE §11): zero-cycle. New code throws
+// Migration policy (SYNC2 §3): zero-cycle. New code throws
 // typed errors immediately; old code paths migrate as bugs touch
 // them. The hierarchy can absorb new subclasses without breaking
 // existing `instanceof` checks at parent classes.
@@ -116,7 +116,7 @@ export class ConflictError extends GithubAPIError {
 // 422 — semantic validation failure. Two sub-causes in practice:
 // (a) client sent malformed payload; (b) request was well-formed but
 // remote state drifted (`GitRPC::BadObjectState`, the 1.5 sub-case).
-// PSEUDO-MERGE-MODE §13 decided to model both as one class; catch sites
+// SYNC2 §5 decided to model both as one class; catch sites
 // that need the distinction inspect `body.message` directly.
 //
 // Retriable=false at this level — Phase 1's pre-flight validation
