@@ -182,15 +182,17 @@ export default class GitHubSyncPlugin extends Plugin {
       //                 in .gitignore, surface a Notice so the user
       //                 understands the no-op (single-file action
       //                 deserves explicit feedback, unlike bulk).
-      //   sync        : drain only; silent no-op if drain already
+      //   pull-push   : drain only — pulls remote changes AND
+      //                 pushes pending batches, but never adds a
+      //                 new commit. Silent no-op if drain already
       //                 running (the existing drain's tail re-check
-      //                 will catch any in-flight batch).
-      //   sync-all    : same as the [Sync with GitHub] ribbon button —
-      //                 master-toggle aware (commit + drain when
-      //                 syncStartsWithCommit is true; drain only when
-      //                 false). The ribbon variant adds a
-      //                 confirmation modal on second click during an
-      //                 in-flight sync.
+      //                 catches any in-flight batch).
+      //   sync        : same as the [Sync with GitHub] ribbon button.
+      //                 Master-toggle aware: "commit + pull-push"
+      //                 when syncStartsWithCommit is true,
+      //                 "pull-push" only when false. The ribbon
+      //                 variant adds a confirmation modal on second
+      //                 click during an in-flight sync.
       //   cancel-sync : abort the currently-running drain; silent
       //                 no-op if nothing is running.
       this.addCommand({
@@ -206,13 +208,13 @@ export default class GitHubSyncPlugin extends Plugin {
         callback: this.commitFile.bind(this),
       });
       this.addCommand({
-        id: "sync",
-        name: "Sync with GitHub (upload only)",
-        icon: "upload-cloud",
+        id: "pull-push",
+        name: "Pull and push (no new commit)",
+        icon: "arrow-down-up",
         callback: this.uploadOnly.bind(this),
       });
       this.addCommand({
-        id: "sync-all",
+        id: "sync",
         name: "Sync with GitHub",
         icon: "refresh-cw",
         callback: this.sync.bind(this),
