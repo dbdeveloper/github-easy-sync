@@ -1871,13 +1871,19 @@ export class Sync2Manager {
   // can fire `onPluginsAffected` once at the end and the main
   // thread can call `reloadPlugin(id)`. Subdirectory files and
   // anything outside plugins/ are ignored.
+  // PSEUDO-MERGE-MODE §20 Plugin Reload After Pull.
   private maybeMarkPluginAffected(path: string): void {
     const id = extractAffectedPluginId(path, this.configDir);
     if (id !== null) this.affectedPluginIds.add(id);
   }
 
   // 2.0.2-beta2 marker-based self-update protocol for OUR plugin's
-  // main.js / manifest.json / styles.css. The bootloader (which
+  // main.js / manifest.json / styles.css. PSEUDO-MERGE-MODE §21
+  // Self-Update Marker Protocol — full spec including crash-window
+  // matrix, bootloader 4-case decision table, and design rationale
+  // for using marker presence instead of SHA verification.
+  //
+  // The bootloader (which
   // runs at the very top of our onload() before logger/snapshot
   // init) needs an integrity signal it can verify WITHOUT access
   // to ground-truth SHAs from the snapshot store. The marker file
@@ -2708,17 +2714,23 @@ export class Sync2Manager {
       await this.bootstrapIfNeeded(progress);
       let pushedAnyBatch = false;
       let finalizeAttempted = false;
-      // 2.0.2-beta2 outer loop: tail re-check window. After the
-      // inner per-batch loop exits (queue empty), wait ~50 ms and
-      // re-list. A late-arriving batch (e.g., a `commit` triggered
-      // 300 ms before the syncAll dispatch, or a different drain
-      // entry point landing a batch as we were finishing) may have
-      // been written to disk after our last `queue.list()` inside
-      // the inner loop. The 50 ms wait is enough for any in-flight
-      // FS write to be observable. If new batches show up, the
-      // outer loop runs again and the inner loop drains them. The
-      // explicit log line is intentional — it makes "we caught a
-      // late arrival" greppable from the field.
+      // 2.0.2-beta2 outer loop: tail re-check window.
+      // PSEUDO-MERGE-MODE §9.8 Tail Re-Check Window — full spec
+      // including the cooperating 300ms commit-to-drain delay
+      // inside syncAll() and the "every committed batch is
+      // eventually drained" invariant.
+      //
+      // After the inner per-batch loop exits (queue empty), wait
+      // ~50 ms and re-list. A late-arriving batch (e.g., a
+      // `commit` triggered 300 ms before the syncAll dispatch, or
+      // a different drain entry point landing a batch as we were
+      // finishing) may have been written to disk after our last
+      // `queue.list()` inside the inner loop. The 50 ms wait is
+      // enough for any in-flight FS write to be observable. If
+      // new batches show up, the outer loop runs again and the
+      // inner loop drains them. The explicit log line is
+      // intentional — it makes "we caught a late arrival"
+      // greppable from the field.
       while (true) {
         while (true) {
           const headHint = await this.pullIfNeeded(progress);

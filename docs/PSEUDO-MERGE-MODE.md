@@ -960,6 +960,53 @@ durable backup — would silently undo the user's intentional deletes
 across a plugin restart, which is exactly the failure mode the
 "trust the filesystem" rule prevents.
 
+### 9.8 Tail Re-Check Window
+
+A subtle invariant the drain protects: **every committed batch will
+eventually be drained by some drain cycle.** Without explicit care,
+the following race could lose work:
+
+1. A drain is running. Its inner loop reads `queue.list()` and
+   processes the returned IDs.
+2. A `commit` operation lands a new batch on disk.
+3. The drain's inner loop, which has already moved past the
+   `queue.list()` snapshot, finishes processing the batches it
+   knew about and exits.
+4. The new batch sits in `.push-queue/` waiting for someone to
+   come back for it.
+
+Two mechanisms close this race in tandem:
+
+**Tail re-check inside `drain()`.** The inner per-batch loop runs
+inside an outer loop that, after the inner loop exits, waits ~50 ms
+and re-lists the queue. If any new batches appeared in that window,
+the outer loop runs the inner loop again. The 50 ms is enough for
+any in-flight filesystem write (a `commit` that ran while we were
+draining) to become observable to `list()`. The log line
+`"Sync drain tail re-check found new batches; restarting"` makes
+"we caught a late arrival" greppable from the field.
+
+**300 ms wait inside `syncAll()` between enqueue and drain.** When
+`syncAll` adds a batch and then dispatches the drain, it pauses
+300 ms first. The wait guarantees one of two outcomes:
+
+- If a different drain was already running, it has ~300 ms to
+  enter its own tail re-check window and pick up our new batch.
+- If no drain was running, the 300 ms is negligible and our drain
+  call starts cleanly with the new batch visible.
+
+Either way, the new batch gets processed by exactly one drain
+cycle. The combined invariant is stronger than either mechanism
+alone: even if the tail re-check window misses (50 ms slip), the
+300 ms commit-to-drain delay ensures a fresh drain will see the
+batch and pick it up.
+
+Durability does the rest. Even if BOTH mechanisms fail in some
+adversarial scenario, the batch is on disk in `.push-queue/`. The
+next sync click, interval tick, or onload startup pulse drains
+it. No committed work is lost — at worst it waits longer than
+intended for the next drain.
+
 ---
 
 ## 10. Scenarios
@@ -2199,7 +2246,276 @@ ONLY signal. That's why it's essential there.
 
 ---
 
-## 20. Glossary
+## 20. Plugin Reload After Pull
+
+Added in 2.0.2-beta2. When a Sync delivers updated files to some
+plugin's directory under `<configDir>/plugins/<id>/`, Obsidian
+keeps running the OLD code in memory until the user manually
+disables + re-enables the plugin. The fix is to call Obsidian's
+internal `app.plugins.reloadPlugin(id)` at the end of any drain
+or recovery sweep that touched a plugin file.
+
+This is BRAT's pattern (the Beta Reviewers Auto-update Tool
+calls `reloadPlugin` after each install) applied to the sync
+flow. The API is documented but not in Obsidian's public
+typings; we access it via `(this.app as any).plugins.reloadPlugin`.
+
+### 20.1 Which paths trigger reload
+
+A path under `<configDir>/plugins/<id>/<file>` triggers reload
+for `<id>` if and only if `<file>` is one of:
+
+- `main.js` — the plugin's executable code
+- `manifest.json` — version, declared permissions
+- `styles.css` — CSS Obsidian applies on enable
+- `data.json` — the plugin's persisted settings
+
+Subdirectory files (e.g. `<plugin>/<id>/data/notes.json`) do NOT
+trigger reload. Obsidian reads them on demand at runtime, not at
+plugin enable time. The helper `extractAffectedPluginId(path,
+configDir)` in `plugin-update-bootloader.ts` is the canonical
+discriminator; any code that needs to ask "does this path
+require a plugin reload?" goes through it.
+
+### 20.2 Two trigger surfaces
+
+The drain has two places where a plugin file might land on disk:
+
+**Normal flow — drain-end reload.** During `pullIfNeeded`, the
+engine writes plugin files via `writeBinaryRemote` and
+`writeRemoteText`. Each successful write calls
+`maybeMarkPluginAffected(path)`, which adds `<id>` to the
+drain-scoped `affectedPluginIds` Set. At drain end (on full
+success), `drain.finally` fires `onPluginsAffected(ids[])` to the
+main thread. main.ts schedules `reloadPlugin(id)` for each
+affected plugin via `setTimeout(..., 500)` — the 500 ms unwinds
+the in-flight drain stack frame before Obsidian's plugin
+lifecycle tears the old instance down.
+
+**Crash recovery — sweep-end reload.** When `AtomicWriteRecovery
+.sweep` forward-applies a write that landed under a plugin path,
+it returns the recovered path in its `appliedPaths` array.
+main.ts walks `appliedPaths` through `extractAffectedPluginId`;
+any plugin whose file was applied forward gets a `reloadPlugin`
+schedule alongside the drain-end path. The sweep's ROLLBACK
+cases (`.sync-bak` restored over original) are NOT surfaced —
+rollback brings the path back to its pre-write state, which any
+already-running plugin already matches, so no reload is needed.
+
+### 20.3 Schedule semantics
+
+For every drain (or sweep) that fires `onPluginsAffected`, the
+handler:
+
+1. Reads `app.plugins.enabledPlugins` (a `Set<string>`).
+2. Filters affected IDs to those currently enabled (disabled
+   plugins don't need a reload they'd ignore).
+3. For each surviving ID, schedules
+   `setTimeout(() => app.plugins.reloadPlugin(id), 500)`.
+4. Surfaces ONE aggregate Notice (`"Plugin <id> updated —
+   reloading…"` for one, `"N plugins updated — reloading…"` for
+   multiple) so the user has a visible signal.
+
+The 500 ms delay is the same value across both trigger surfaces
+and the bootloader (§22). Treat it as the "drain-stack-unwind
+budget" — long enough for any in-flight `await` to return,
+short enough that the reload feels immediate to the user.
+
+### 20.4 Self-reload — the special case
+
+Updating OUR OWN plugin (`github-easy-sync`) is recursive: the
+file being swapped is the file the running code came from.
+On POSIX (macOS, Linux, Capacitor Android-on-Chromium), atomic
+rename of an open file works at the filesystem layer — the V8
+in-memory image is independent of the file's inode, so renaming
+`main.js` doesn't affect the currently-running code. Obsidian's
+subsequent `reloadPlugin` call disables the old instance and
+loads `main.js` fresh, picking up the new bytes.
+
+The complication is the **crash window**: if the engine crashes
+between writing the new `main.js` and scheduling the reload,
+the next plugin launch finds new code on disk but inconsistent
+ancillary state (snapshot may be old, sync-tmp/sync-bak may
+linger, etc.). The self-update marker protocol in §22 handles
+this case with crash-safe recovery from a state machine the
+plugin's own bootloader can drive — even before logger,
+settings, or snapshot are initialised.
+
+---
+
+## 21. Self-Update Marker Protocol
+
+Added in 2.0.2-beta2. Updating our own plugin's main.js (and
+the other recoverable files in our directory) has stricter
+crash-safety requirements than other plugins' files: the engine
+that performs the write IS the running code, the bootloader
+that handles recovery on next launch runs BEFORE the snapshot
+store is loaded, and the user can't easily intervene if main.js
+ends up corrupted (Obsidian won't load the plugin to even run
+recovery code).
+
+The protocol uses a **marker file** as the integrity signal.
+This section explains why marker presence is the right signal,
+how the write side produces it, and how the bootloader consumes
+it.
+
+### 21.1 Why not SHA verification
+
+A previous design used `SHA(main.js) ≠ SHA(main.sync-tmp.js)`
+as the "pending update" signal: if the two files differed on
+disk, the bootloader applied sync-tmp via atomic rename. This
+turned out to be a correctness bug.
+
+`SHA(sync-tmp)` computed at bootloader time is just the hash of
+whatever bytes happen to be on disk. If the previous engine
+process was killed mid-`writeBinary`, sync-tmp has partial bytes
+and SHA(partial) ≠ SHA(main.js). The bootloader would happily
+apply those partial bytes, corrupting main.js. The next launch
+would then fail to load the plugin at all, requiring the user
+to reinstall via BRAT or the Community Plugins store.
+
+The classic `AtomicWriteRecovery.sweep` avoids this trap by
+comparing SHA(sync-tmp) to a TRUSTED expected SHA — either the
+`theirsBlobSha` on a ConflictStore record (Path B) or the
+`remoteSha` on a SnapshotStore entry (rename-strategy bak
+recovery). The bootloader can't use either: it runs at the very
+top of `onload()`, BEFORE settings load, BEFORE logger init,
+BEFORE the snapshot store opens. There is no trusted source of
+"what the sync-tmp SHOULD hash to."
+
+The fix is to substitute a separate signal entirely — a marker
+file the engine drops AFTER the sync-tmp write completes. The
+marker's mere presence certifies that the write reached
+completion; bytes on disk are then known to be valid even
+without any SHA comparison.
+
+### 21.2 The marker file
+
+For each recoverable file in our plugin directory, the marker
+filename is `.<basename>.<ext>.sync-tmp.`:
+
+- `main.js` → `.main.js.sync-tmp.`
+- `manifest.json` → `.manifest.json.sync-tmp.`
+- `styles.css` → `.styles.css.sync-tmp.`
+
+`data.json` is **excluded** from the protocol because we never
+pull it from remote — it's per-device state owned by the
+running instance.
+
+The shape (leading dot, trailing dot, `.sync-tmp.` in the
+middle) is byte-identical to the modify-in-place marker
+convention in §19.1. This is intentional: the existing
+`AtomicWriteRecovery.sweep` already handles markers via its
+modify-in-place recovery branch, so even if the bootloader is
+somehow bypassed (a code bug at the top of `main()`), the sweep
+catches the same case at `initSync2` time. Defense in depth at
+zero additional implementation cost.
+
+The marker is a zero-byte file. Its presence is the entire
+signal — no content needed.
+
+### 21.3 Write protocol
+
+In `Sync2Manager.applySelfUpdateOwnFile(path, bytes, afterCommit)`:
+
+```
+Step 1: writeBinary(<basename>.sync-tmp.<ext>, bytes)   — full write commit
+Step 2: write(.<basename>.<ext>.sync-tmp., "")          — marker drop
+Step 3: rename(<basename>.<ext> → <basename>.sync-bak.<ext>)
+                                                         — Capacitor-safe
+                                                           backup
+Step 4: rename(<basename>.sync-tmp.<ext> → <basename>.<ext>)
+                                                         — atomic swap
+Step 5: afterCommit()                                    — snapshot update
+Step 6: remove(.<basename>.<ext>.sync-tmp.)              — marker cleanup
+Step 7: remove(<basename>.sync-bak.<ext>)                — backup cleanup
+        affectedPluginIds.add(selfPluginId)              — drain-end reload
+```
+
+The protocol runs in the current drain process; it does NOT
+defer the swap to a deferred plugin start. POSIX atomic-rename
+of a running plugin's main.js is safe (the V8 image is
+inode-independent), and applying the swap inline gives the
+drain a single `reloadPlugin` call to schedule — no second
+reload cycle through a deferred bootloader path.
+
+### 21.4 Bootloader recovery decision matrix
+
+At the top of our `onload()` (before anything else, including
+logger init), `runSelfUpdateBootloader` iterates over the three
+recoverable files. For each, it probes the presence/absence of
+both the marker and the sync-tmp file:
+
+| marker | sync-tmp | Case   | Action |
+|--------|----------|--------|--------|
+| ✓      | ✓        | **A**  | apply forward (rename swap), schedule reload |
+| ✓      | ✗        | **B**  | cleanup orphan marker (swap already completed) |
+| ✗      | ✓        | **C**  | drop sync-tmp (write was incomplete) |
+| ✗      | ✗        | **D**  | nothing pending, normal load |
+
+Cases B and C are SILENT — no reload is needed because the
+running code already matches the on-disk state (B: post-apply,
+C: pre-apply with sync-tmp dropped as it would have been by
+Path A sweep). Case A schedules ONE `reloadPlugin` regardless of
+how many of the three files were applied, since Obsidian
+re-reads everything on enable. Case D returns immediately and
+the rest of onload runs as usual.
+
+### 21.5 Crash-window matrix
+
+Every step in the write protocol has a deterministic recovery
+case at next launch:
+
+| Crash before step | State on disk                          | Bootloader case | Outcome |
+|-------------------|----------------------------------------|------------------|---------|
+| 2 (marker drop)   | sync-tmp only                          | C                | drop sync-tmp; next sync retries |
+| 3 (file → bak)    | sync-tmp + marker + original           | A                | apply forward |
+| 4 (sync-tmp → file)| sync-tmp + marker + bak (no original) | A                | apply forward (file appears) |
+| 5 (afterCommit)   | new original + marker + bak            | A finishes       | rename(sync-tmp absent → noop); cleanup marker + bak |
+| 6 (remove marker) | new original + marker (no sync-tmp)    | B                | cleanup marker |
+| 7 (remove bak)    | new original + bak (no marker)         | normal load + standard sweep handles bak |
+| after step 7      | new original                           | D                | normal load |
+
+Note that the step-5 crash window collapses to Case A whose
+sub-paths handle the absent sync-tmp gracefully (the rename
+sync-tmp → original is skipped if sync-tmp doesn't exist; marker
+and bak cleanup proceed as in steps 6-7).
+
+The protocol is forward-complete in every crash window: the
+bootloader always brings the directory to a consistent state
+where the new code is loaded on the NEXT plugin enable (which
+happens automatically when the bootloader schedules
+`reloadPlugin`).
+
+### 21.6 What the protocol does NOT cover
+
+- **The user reinstalls via BRAT or Community Plugins while
+  sync-tmp + marker are pending.** BRAT overwrites main.js
+  directly; our bootloader on next launch sees marker +
+  sync-tmp + the new main.js from BRAT, applies sync-tmp,
+  effectively reverting BRAT's install. The user must clean up
+  the staging files manually or run a second BRAT install. Rare
+  edge case; not mitigated.
+
+- **Power loss between `writeBinary(sync-tmp)` await completing
+  and bytes being flushed to durable storage.** On modern
+  filesystems with built-in page-cache → disk write-back, this
+  is vanishingly rare. The marker would then be present
+  alongside a sync-tmp that the OS has dropped from page cache
+  — equivalent to Case C if marker was also lost, Case A if
+  marker survived. The Case-A apply might succeed (bytes were
+  actually written) or fail (rename succeeds but corrupted
+  bytes are now main.js). Not mitigated.
+
+- **Cross-platform atomic rename semantics.** The protocol
+  assumes `adapter.rename` is atomic at the OS level. POSIX
+  guarantees this. Capacitor on iOS uses underlying APFS,
+  which also does. Windows is not a target platform for the
+  bootloader path (Obsidian Mobile doesn't run on Windows).
+
+---
+
+## 22. Glossary
 
 The following terms appear repeatedly in the article. Definitions are
 intentionally concise; consult the relevant section for context.
