@@ -629,6 +629,15 @@ export class Sync2Manager {
         progress?.update(
           enqueued === 1 ? "Commit 1 file" : `Commit ${enqueued} files`,
         );
+        // 2.0.2-beta2: if a batch was just enqueued, wait ~300 ms
+        // before dispatching drain. Race-free composition with
+        // ANY concurrent drain entry point: an in-flight drain
+        // gets time to enter its tail re-check window and pick
+        // up the new batch; if no drain is running, the 300 ms is
+        // negligible and our drain call below starts cleanly.
+        // The new commits are durable on disk in .push-queue/
+        // regardless — worst-case they wait for the next drain.
+        await new Promise<void>((resolve) => setTimeout(resolve, 300));
       }
       await this.drain(progress);
     } finally {
@@ -697,6 +706,54 @@ export class Sync2Manager {
   private emitDrainStatus(patch: Partial<DrainStatus>): void {
     this.drainStatus = { ...this.drainStatus, ...patch };
     for (const l of this.drainStatusListeners) l(this.drainStatus);
+  }
+
+  // 2.0.2-beta2 commit-file action. Commits ONE path (the file in
+  // the active tab, typically) without draining. Returns a tagged
+  // outcome so the plugin layer can pick the right Notice:
+  //   { kind: "ignored" } → path is in .gitignore OR hardcoded
+  //     blocklist. The plugin surfaces "File is in ignore list"
+  //     so the user understands why their explicit commit was a
+  //     no-op.
+  //   { kind: "no-change" } → checkSyncable passed but
+  //     findChangeForPath returned null (file matches snapshot,
+  //     not modified since last sync). Plugin shows "Nothing to
+  //     commit for this file".
+  //   { kind: "committed", count: 1 } → path enqueued into a new
+  //     or merged batch.
+  async commitFile(path: string): Promise<
+    | { kind: "ignored" }
+    | { kind: "no-change" }
+    | { kind: "committed"; count: number }
+  > {
+    this.logger.info("Sync2 commitFile start", { path });
+    await this.reconcileRemoteIdentity();
+    if (this.invariants) await this.invariants.enforce();
+    if (!(await this.detector.checkSyncable(path))) {
+      this.logger.info("Sync2 commitFile: path is ignored", { path });
+      return { kind: "ignored" };
+    }
+    const change = await this.detector.findChangeForPath(path);
+    if (change === null) {
+      await this.store.save();
+      this.logger.info("Sync2 commitFile: nothing to commit for path", {
+        path,
+      });
+      return { kind: "no-change" };
+    }
+    const enqueued = await this.enqueueOrMerge(
+      [change],
+      this.fullSyncMeta(),
+    );
+    await this.fireQueueDepth();
+    if (enqueued > 0) {
+      this.onLocalCommitted?.(enqueued);
+      this.logger.info("Sync2 commitFile committed", {
+        path,
+        change: `${change.kind} ${change.path}`,
+      });
+    }
+    return { kind: "committed", count: enqueued };
   }
 
   async commitOnly(): Promise<void> {
@@ -793,6 +850,15 @@ export class Sync2Manager {
   // a previous session crashed mid-push) and from the watchdog tick
   // when interval-strategy is "manually" but the queue has work.
   async resumeQueue(): Promise<void> {
+    // 2.0.2-beta2 BUG FIX. The pulled-files counter must reset
+    // here too — resumeQueue is the entry point used by the
+    // background drain (interval watchdog + onload pulse) AND by
+    // the new `sync` command (split-mode upload-only). Without
+    // this reset the counter stayed at whatever the previous full
+    // syncAll left it, so the "Sync done (N files updated from
+    // GitHub)" notice kept showing the same N on every
+    // subsequent click even when nothing actually changed.
+    this.pulledFilesThisSync = 0;
     await this.drain();
   }
 
@@ -2433,6 +2499,14 @@ export class Sync2Manager {
       totalFiles: 0,
       currentFile: 0,
     });
+    // 2.0.2-beta2 log marker — bookends the entire drain cycle so a
+    // reader can grep `"Sync started"` and `"Sync done"` to see
+    // exactly when the cycle began and ended. The HTTP-level lines
+    // alone left the cycle boundary implicit; the user had no
+    // accurate "is it safe to click again?" signal from the log.
+    this.logger.info("Sync started", {
+      startedAt: drainStartedAt,
+    });
     const ownProgress = sharedProgress === null;
     let progress: ProgressHandle | null = sharedProgress;
     let commitNum = 0;
@@ -2495,35 +2569,56 @@ export class Sync2Manager {
       await this.bootstrapIfNeeded(progress);
       let pushedAnyBatch = false;
       let finalizeAttempted = false;
+      // 2.0.2-beta2 outer loop: tail re-check window. After the
+      // inner per-batch loop exits (queue empty), wait ~50 ms and
+      // re-list. A late-arriving batch (e.g., a `commit` triggered
+      // 300 ms before the syncAll dispatch, or a different drain
+      // entry point landing a batch as we were finishing) may have
+      // been written to disk after our last `queue.list()` inside
+      // the inner loop. The 50 ms wait is enough for any in-flight
+      // FS write to be observable. If new batches show up, the
+      // outer loop runs again and the inner loop drains them. The
+      // explicit log line is intentional — it makes "we caught a
+      // late arrival" greppable from the field.
       while (true) {
-        const headHint = await this.pullIfNeeded(progress);
-        const ids = await this.queue.list();
-        if (ids.length === 0) break;
-        commitNum += 1;
-        // Lazy-open a long-lived progress notice only when this
-        // batch's push would actually be heavy. The notice goes
-        // straight into "Push 0/N files to GitHub" — no separate
-        // "starting" pre-message, no batch-number indicator. Each
-        // batch's per-file ticks become the user's only visible
-        // signal during heavy push; light batches stay silent here
-        // and the drain-level "Sync done" finale below shows the
-        // success signal once the whole queue drains.
-        const batchBytes = await this.estimateBatchBytes(ids[0]);
-        const isHeavyPush = batchBytes > this.progressBytesThreshold;
-        if (isHeavyPush && progress === null && this.onProgress) {
-          const peek = await this.queue.read(ids[0]);
-          progress = this.onProgress(
-            `Push 0/${peek.files.length} files to GitHub`,
+        while (true) {
+          const headHint = await this.pullIfNeeded(progress);
+          const ids = await this.queue.list();
+          if (ids.length === 0) break;
+          commitNum += 1;
+          // Lazy-open a long-lived progress notice only when this
+          // batch's push would actually be heavy. The notice goes
+          // straight into "Push 0/N files to GitHub" — no separate
+          // "starting" pre-message, no batch-number indicator. Each
+          // batch's per-file ticks become the user's only visible
+          // signal during heavy push; light batches stay silent here
+          // and the drain-level "Sync done" finale below shows the
+          // success signal once the whole queue drains.
+          const batchBytes = await this.estimateBatchBytes(ids[0]);
+          const isHeavyPush = batchBytes > this.progressBytesThreshold;
+          if (isHeavyPush && progress === null && this.onProgress) {
+            const peek = await this.queue.read(ids[0]);
+            progress = this.onProgress(
+              `Push 0/${peek.files.length} files to GitHub`,
+            );
+          }
+          await this.processBatch(
+            ids[0],
+            headHint,
+            progress,
+            commitNum,
+            commitNum + ids.length - 1,
           );
+          pushedAnyBatch = true;
         }
-        await this.processBatch(
-          ids[0],
-          headHint,
-          progress,
-          commitNum,
-          commitNum + ids.length - 1,
+        // 2.0.2-beta2 tail re-check. See outer-loop comment above.
+        await new Promise<void>((resolve) => setTimeout(resolve, 50));
+        const tailCheckIds = await this.queue.list();
+        if (tailCheckIds.length === 0) break;
+        this.logger.info(
+          "Sync drain tail re-check found new batches; restarting",
+          { newBatchCount: tailCheckIds.length },
         );
-        pushedAnyBatch = true;
       }
       // No drain-end sweep. Listeners are read-only, so state that
       // changed DURING drain (sibling writes from our own conflict
@@ -2553,9 +2648,16 @@ export class Sync2Manager {
       // their vault changed. Push-only syncs use the plain "Sync done"
       // — the user already saw "Commit N files" at click time and
       // their vault didn't get modified by sync. Counter resets at the
-      // start of every syncAll/syncFile (pulledFilesThisSync).
-      const drainDidWork =
-        pushedAnyBatch || this.pulledFilesThisSync > 0;
+      // start of EVERY drain (pulledFilesThisSync; 2.0.2-beta2 bug
+      // fix) so the count is always for THIS drain cycle.
+      //
+      // 2.0.2-beta2: "Sync done" ALWAYS shows now, regardless of
+      // whether the drain pushed or pulled. The previous rule
+      // ("suppress on no-op") was confusing — the user lost the
+      // explicit signal that "it's safe to click again." The suffix
+      // "(N files updated from GitHub)" is still gated on actually
+      // having pulled at least one file — and pulledFilesThisSync
+      // counts only confirmed writes to disk, not paths "considered".
       const doneMessage =
         this.pulledFilesThisSync > 0
           ? this.pulledFilesThisSync === 1
@@ -2566,10 +2668,23 @@ export class Sync2Manager {
         progress.update(doneMessage);
         const handle = progress;
         setTimeout(() => handle.hide(), 1000);
-      } else if (ownProgress && drainDidWork && this.onProgress) {
+      } else if (ownProgress && this.onProgress) {
+        // 2.0.2-beta2: drainDidWork gate removed — always emit
+        // "Sync done" so the user has an unambiguous signal.
         const handle = this.onProgress(doneMessage);
         setTimeout(() => handle.hide(), 1000);
       }
+      // 2.0.2-beta2 log marker — counterpart of the "Sync started"
+      // line at the top of drain. Note the timestamp: this fires
+      // AFTER processBatch + trash-sweep, so a reader can trust
+      // "Sync done" to mark when ALL drain side-effects are
+      // observable on disk + remote. (The setTimeout above only
+      // hides the toast; the actual work is complete here.)
+      this.logger.info("Sync done", {
+        startedAt: drainStartedAt,
+        pulledFiles: this.pulledFilesThisSync,
+        pushedAnyBatch,
+      });
       // Drain reached the end of the try block without throwing — queue
       // is empty, finalize ran. Anything reachable here is a success.
       drainSucceeded = true;

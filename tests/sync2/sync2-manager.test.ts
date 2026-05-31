@@ -2328,12 +2328,14 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 
-    it("idle syncAll stays silent (no notice opened)", async () => {
-      // With the lazy-open contract there's no eager click-time notice
-      // anymore. Trivially idle syncs run completely silent — neither
-      // pull nor push opens the long-lived progress handle. The
-      // onNoLocalChanges callback handles the brief "Nothing to commit" flash
-      // separately.
+    it("idle syncAll fires the unconditional 'Sync done' notice (2.0.2-beta2)", async () => {
+      // 2.0.2-beta2 changed the lazy-open rule. The old contract
+      // ("idle drain stays silent") was confusing in the field —
+      // users had no explicit "it's safe to click again" signal.
+      // Now drain always emits a brief "Sync done" toast at the end
+      // (no suffix when nothing was pulled). The onNoLocalChanges
+      // callback still handles the separate "Nothing to commit"
+      // pre-flash.
       const messages: string[] = [];
       const f2 = fixture({
         onProgress: (initial) => {
@@ -2347,7 +2349,7 @@ describe("Sync2Manager.syncAll — basic flow", () => {
       });
       f2.store.setLastSync("BRANCH_HEAD_INIT", "INITIAL_TREE");
       await f2.manager.syncAll();
-      expect(messages).toEqual([]);
+      expect(messages).toEqual(["Sync done"]);
       fs.rmSync(f2.root, { recursive: true, force: true });
     });
 

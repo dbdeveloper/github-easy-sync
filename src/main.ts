@@ -35,6 +35,7 @@ import { TrashWatcher } from "./diff2/trash-watcher";
 import { sweepOnload as trashSweepOnload } from "./diff2/trash-recovery";
 import { DiffEditView, DIFF2_EDIT_VIEW_TYPE } from "./diff2/diff-edit-view";
 import { TokenExpiredModal } from "./sync2/views/token-expired-modal";
+import { CancelSyncModal } from "./sync2/views/cancel-sync-modal";
 import { AuthError } from "./errors";
 import manifest from "../manifest.json";
 
@@ -173,37 +174,54 @@ export default class GitHubSyncPlugin extends Plugin {
         }
       });
 
-      // Stage 7: a separate command for the [Commit] action so users
-      // can map a keyboard shortcut even without the ribbon icon.
+      // 2.0.2-beta2 command surface — 5 actions, each hotkey-bindable.
+      //
+      //   commit-all  : commit every modified non-ignored file
+      //                 (the ribbon [Commit] button calls this too).
+      //   commit-file : commit the file in the active tab; if
+      //                 in .gitignore, surface a Notice so the user
+      //                 understands the no-op (single-file action
+      //                 deserves explicit feedback, unlike bulk).
+      //   sync        : drain only; silent no-op if drain already
+      //                 running (the existing drain's tail re-check
+      //                 will catch any in-flight batch).
+      //   sync-all    : same as the [Sync with GitHub] ribbon button —
+      //                 master-toggle aware (commit + drain when
+      //                 syncStartsWithCommit is true; drain only when
+      //                 false). The ribbon variant adds a
+      //                 confirmation modal on second click during an
+      //                 in-flight sync.
+      //   cancel-sync : abort the currently-running drain; silent
+      //                 no-op if nothing is running.
       this.addCommand({
-        id: "commit-local",
-        name: "Commit local changes (no upload)",
+        id: "commit-all",
+        name: "Commit all changed files",
         icon: "git-commit",
         callback: this.commit.bind(this),
       });
-
       this.addCommand({
-        id: "sync-files",
-        name: "Sync with GitHub",
-        icon: "refresh-cw",
-        callback: this.sync.bind(this),
+        id: "commit-file",
+        name: "Commit active file",
+        icon: "file-plus",
+        callback: this.commitFile.bind(this),
       });
-      // Stage 7: pure drain hotkey. Lets a user who hides all
-      // ribbon icons still trigger an upload-only run from the
-      // keyboard, regardless of the syncStartsWithCommit master
-      // toggle setting. ("Sync with GitHub" above depends on
-      // the master toggle; this command does NOT.)
       this.addCommand({
-        id: "upload-to-github",
-        name: "Upload pending commits to GitHub (no new commit)",
+        id: "sync",
+        name: "Sync with GitHub (upload only)",
         icon: "upload-cloud",
         callback: this.uploadOnly.bind(this),
       });
       this.addCommand({
-        id: "sync-current-file",
-        name: "Sync current file with GitHub",
-        icon: "file-up",
-        callback: this.syncCurrentFile.bind(this),
+        id: "sync-all",
+        name: "Sync with GitHub",
+        icon: "refresh-cw",
+        callback: this.sync.bind(this),
+      });
+      this.addCommand({
+        id: "cancel-sync",
+        name: "Cancel sync",
+        icon: "x-circle",
+        callback: this.cancelSync.bind(this),
       });
 
       // Diff-Edit widget — Phase 1 (conflicts list + sub-tabs + stub
@@ -784,6 +802,22 @@ export default class GitHubSyncPlugin extends Plugin {
       new Notice("Sync plugin not configured");
       return;
     }
+    // 2.0.2-beta2: second click during in-flight drain opens the
+    // CancelSyncModal. The previous behaviour ("silently ignore
+    // the click") was confusing in field testing — users couldn't
+    // tell whether the click registered, and the only path to
+    // stop a stuck sync was Settings → [Stop sync]. The modal
+    // gives an in-place [Cancel sync] / [Keep going] choice.
+    // The `sync` command (vs the ribbon button) still silently
+    // ignores — keystroke shortcuts shouldn't open modals.
+    if (this.sync2Manager.getDrainStatus().state === "running") {
+      const modal = new CancelSyncModal(this.app, () => {
+        this.sync2Manager.cancelDrain();
+        new Notice("Sync cancellation requested.", 4000);
+      });
+      modal.open();
+      return;
+    }
     if (!(await this.confirmPendingConflictsBeforeSync())) return;
     try {
       // Stage 7: master toggle controls semantic
@@ -1079,6 +1113,18 @@ export default class GitHubSyncPlugin extends Plugin {
       new Notice("Sync plugin not configured");
       return;
     }
+    // 2.0.2-beta2: silently ignore if a drain is already running.
+    // The existing drain's tail re-check loop will catch any
+    // batches that landed since it started; we don't need to
+    // queue another drain attempt. The Settings drain-status
+    // section + the [Cancel sync] command remain available for
+    // direct control.
+    if (this.sync2Manager.getDrainStatus().state === "running") {
+      this.logger?.info(
+        "uploadOnly command: drain already running, ignoring",
+      );
+      return;
+    }
     if (!(await this.confirmPendingConflictsBeforeSync())) return;
     try {
       await this.sync2Manager.resumeQueue();
@@ -1091,6 +1137,49 @@ export default class GitHubSyncPlugin extends Plugin {
       new Notice(`Upload failed: ${err}`, 10000);
     }
     this.conflictCounter?.markDirty();
+  }
+
+  // 2.0.2-beta2: commit a single file (typically the file in the
+  // active tab). Surfaces an explicit Notice when the path is in
+  // .gitignore so the user understands why their explicit commit
+  // was a no-op.
+  async commitFile(): Promise<void> {
+    if (!this.isConfigured()) {
+      new Notice("Sync plugin not configured");
+      return;
+    }
+    const path = this.activeFilePath();
+    if (path === null) {
+      new Notice("No active file to commit", 5000);
+      return;
+    }
+    try {
+      const outcome = await this.sync2Manager.commitFile(path);
+      if (outcome.kind === "ignored") {
+        new Notice(`File is in ignore list — not committed:\n${path}`, 6000);
+      } else if (outcome.kind === "no-change") {
+        new Notice(`Nothing to commit for:\n${path}`, 3000);
+      } else if (outcome.kind === "committed") {
+        new Notice(`Committed:\n${path}`, BRIEF_NOTICE_MS);
+      }
+    } catch (err) {
+      this.logger?.error("commit-file command failed", {
+        err: describeError(err),
+        path,
+      });
+      new Notice(`Commit failed: ${err}`, 10000);
+    }
+  }
+
+  // 2.0.2-beta2: cancel the currently-running drain. Silently
+  // no-ops if nothing is running — a single keystroke shouldn't
+  // surface a toast for the "nothing to cancel" case.
+  async cancelSync(): Promise<void> {
+    if (this.sync2Manager.getDrainStatus().state !== "running") {
+      return;
+    }
+    this.sync2Manager.cancelDrain();
+    new Notice("Sync cancellation requested.", 4000);
   }
 
   // Detects AuthError (401 / 403) — typically an expired
