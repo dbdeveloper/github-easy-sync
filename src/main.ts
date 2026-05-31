@@ -9,6 +9,7 @@ import {
   Plugin,
   WorkspaceLeaf,
   Notice,
+  setIcon,
 } from "obsidian";
 import { GitHubSyncSettings, DEFAULT_SETTINGS } from "./settings/settings";
 import GitHubSyncSettingsTab from "./settings/tab";
@@ -1185,15 +1186,19 @@ export default class GitHubSyncPlugin extends Plugin {
     this.applyPendingBatchesBadge();
   }
 
-  // 2.0.2-beta2: toggle the "syncing" look (spin + accent tint, via
-  // the `github-easy-sync-ribbon-syncing` CSS class) on both ribbon
-  // icons while a drain runs. Caches the state so an icon created
-  // mid-drain picks it up (see showSyncRibbonIcon / showCommitRibbonIcon).
+  // 2.0.2-beta2: reflect drain activity in the UI while a drain runs.
+  // The [Sync] ribbon icon spins + tints accent (network activity is a
+  // Sync concept — the [Commit] icon does NOT spin, it never touches
+  // the network). The status-bar "GitHub" label also flips to a
+  // syncing look. Caches the state so an icon created mid-drain picks
+  // it up (see showSyncRibbonIcon).
   private applyRibbonSyncingState(running: boolean): void {
     this.drainRunning = running;
-    const cls = "github-easy-sync-ribbon-syncing";
-    this.syncRibbonIcon?.toggleClass(cls, running);
-    this.commitRibbonIcon?.toggleClass(cls, running);
+    this.syncRibbonIcon?.toggleClass(
+      "github-easy-sync-ribbon-syncing",
+      running,
+    );
+    this.updateStatusBarItem();
   }
 
   // 2.0.2-beta2: paints the badge on whichever ribbon icon the
@@ -1322,10 +1327,24 @@ export default class GitHubSyncPlugin extends Plugin {
   }
 
   updateStatusBarItem(): void {
-    // Static label after cutover. Future: surface
-    // sync2Manager pending-batch count via PushQueue.list().length so
-    // the user sees `GitHub: N pending` when offline-accumulate fires.
-    if (this.statusBarItem) this.statusBarItem.setText("GitHub");
+    const el = this.statusBarItem;
+    if (!el) return;
+    // 2.0.2-beta2: the status-bar item reflects drain activity instead
+    // of sitting on a static "GitHub". While a drain runs it shows a
+    // spinning sync icon + "Syncing…" tinted accent; idle it's a plain
+    // "GitHub". Rebuild the element each call (cheap) so the icon child
+    // appears/disappears cleanly.
+    el.empty();
+    el.toggleClass("github-easy-sync-statusbar-syncing", this.drainRunning);
+    if (this.drainRunning) {
+      const icon = el.createSpan({
+        cls: "github-easy-sync-statusbar-icon",
+      });
+      setIcon(icon, "refresh-cw");
+      el.createSpan({ text: " Syncing…" });
+    } else {
+      el.setText("GitHub");
+    }
   }
 
   // ── sync ribbon ─────────────────────────────────────────────────────
@@ -1391,13 +1410,6 @@ export default class GitHubSyncPlugin extends Plugin {
     // 2.0.2-beta2: if [Sync] is currently hidden, the depth badge
     // moves to this newly-shown [Commit] icon.
     this.applyPendingBatchesBadge();
-    // Reflect an already-running drain (icon created mid-sync).
-    if (this.drainRunning) {
-      this.commitRibbonIcon.toggleClass(
-        "github-easy-sync-ribbon-syncing",
-        true,
-      );
-    }
   }
 
   hideCommitRibbonIcon(): void {

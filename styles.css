@@ -266,3 +266,21 @@
     from { transform: rotate(0deg); }
     to { transform: rotate(360deg); }
 }
+
+/* 2.0.2-beta2 — status-bar "Syncing…" affordance. While a drain runs,
+ * the GitHub status-bar item turns accent-green and its leading
+ * refresh icon spins (reusing the ribbon spin keyframe). Idle, it's a
+ * plain "GitHub". Toggled by main.ts updateStatusBarItem.
+ */
+.github-easy-sync-statusbar-syncing {
+    color: var(--interactive-accent);
+}
+.github-easy-sync-statusbar-icon {
+    display: inline-flex;
+    vertical-align: middle;
+}
+.github-easy-sync-statusbar-icon svg {
+    width: 0.9em;
+    height: 0.9em;
+    animation: github-easy-sync-ribbon-spin 1s linear infinite;
+}
