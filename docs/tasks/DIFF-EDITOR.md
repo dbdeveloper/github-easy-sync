@@ -27,6 +27,39 @@
 
 ---
 
+## Стан імплементації (оновлено 2026-06-02)
+
+Ретрофіт на гілці `diff2`, **§1-model-first** (порядок виправлено: модель §1 —
+**передумова** 7-step commit, бо shipped `diff-chunks` side-field десинхронізувався
+на вільних edit'ах і `split(editorDoc)` був несоундним).
+
+**Etap 1 — модель §1:**
+- ✅ **1a** — `src/diff2/joined-doc.ts`: `build`/`split` (`\0`-термінатор, `\1`-роздільник),
+  collision fail-closed (§1.3). Round-trip byte-exact (§1.5).
+- ✅ **1b.0** — `src/diff2/editor-model.ts`: чистий CM6-doc + впорядкований `Segment[]`,
+  що мапиться через **кожну** транзакцію (`mapStructure`, assoc-правило §1.8.a). Шов
+  `toEditorModel`/`fromEditorModel` поверх 1a.
+- ✅ **1b.1** — `diff-pane.ts` на новій моделі: structure-based рендер (маркери/фарбування/
+  word-diff), sibling-wins gutter (`line-numbers.ts`, §1.10), chunk-actions як doc-edit'и,
+  sentinel `transactionFilter` (§1.3 edit-time), collision-check у в'ю. `getResolvedBase()`
+  = `split(...).base`. Мертву `diff-chunks`-модель видалено.
+- ⏳ **1b.3** selection rules §1.7 · **1b.4** caret nav + активація порожніх ver §1.8/§1.8.a ·
+  **1b.5** auto-collapse §1.6 · **1b.6** гліф `↵` + focus-leave normalization §1.6.a ·
+  **1b.7** hotkeys §1.9. *(До 1b.3 редагування live, але необмежене — виділення може
+  перетнути межу ver1/ver2.)*
+
+**Etap 2 (далі):** `[←]` 7-step pair-atomic commit (§5.0) + `done.json` barrier +
+11-станова recovery-матриця (§5.0.b) + TOCTOU (§5.0.e) + `deriveAutosaveId` (§2.4.1).
+Поточний `exit-protocol.ts` — ще наївний 2-call.
+
+**Etap 3 (далі):** Phase 5 — persistent autosave (§2–§4).
+
+**Ратифіковані рішення:** `diff` лишається v9 (у `meta.json` пишемо ФАКТИЧНУ версію,
+не 5.2.0; DEFAULT `diffLines`, не `newlineIsToken` — інакше ламає §1.2); line-wrap
+завжди ON ⇒ `↵` скрізь (§1.6.a); sibling-wins нумерація (§1.10).
+
+---
+
 ## §1. Документ-модель і поведінка редактора (R7.7 core)
 
 ### §1.1 Що це і чому це можна зробити просто
