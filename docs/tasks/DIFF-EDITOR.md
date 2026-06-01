@@ -141,6 +141,23 @@ if base.includes("") || sibling.includes(""):
 діагностувати. `` у markdown-vault'і — або corrupt file, або binary
 mis-detection; в обох випадках "не відкривати diff" — правильна відповідь.
 
+**Колізія може виникнути НЕ лише на старті сесії, а й під час редагування.**
+Session-start check (вище) ловить сентинели у вхідних `base`/`sibling`. Але
+`split(currentEditorDoc)` на Step 2 7-step commit (§5.0) парсить **відредагований**
+буфер: якщо під час редагування у документ потрапить `\0`/`\1` (paste binary-ish
+контенту, IME, clipboard round-trip, decoration leak), `split` тихо мис-парсить
+(другий `\1` у рядку зливається у sibling), і corrupt-байти запишуться у vault.
+Round-trip-тест цього не ловить — `build` такого ніколи не продукує; виникає лише
+при ручному edit. **Локус мітигації (обидва шари, defense-in-depth):**
+
+- **Phase 1b** — CM6 `transactionFilter`, що **відхиляє** будь-яку зміну, яка
+  вносить `\0` або `\1` у документ (sentinel ніколи не з'являється у буфері).
+- **Етап 2** — на commit-time повторно прогнати `findSentinelCollision` на
+  **виході** `split()`; при колізії — abort + Notice, а не запис corrupt-байтів.
+
+(Реалізація — у відповідних фазах; `joined-doc.ts` Етапу 1a лише фіксує контракт:
+`split` бере *перший* `\1`, тож > 1 сентинеля на рядок = недетермінований парс.)
+
 ### §1.4 Побудова joined-документу: `jsdiff` (`diff` npm package)
 
 **Бібліотека:** `diff` v5.x (npm package, **не** `diff3`). Та сама, що кандидат
@@ -320,29 +337,60 @@ edit — це одна transaction, undo повертає до стану ДО e
 бачить різниці між "рядок з контентом без `\n`" і "порожній рядок". Аналогічно
 не видно, що рядок повністю порожній (нуль символів).
 
-#### §1.6.a.1 Візуалізація `\n` у фокусному ver-блоці
+#### §1.6.a.0 Line-wrapping — завжди ввімкнено (load-bearing для §1.6.a.1)
 
-**Тільки** коли курсор всередині ver-блока (focus active), CM6 decoration
-рендерить кожен `\n` як видимий **glyph** після контенту рядка:
+**Diff-editor рендериться з `EditorView.lineWrapping` завжди ввімкненим.**
+Не toggle, не setting — hardcoded (так само, як у поточному `diff-pane.ts`).
+Довгі рядки (markdown-абзаци, рядки коду, base64-вставки) «загортаються» на
+кілька візуальних рядків, без горизонтального скролу. Резолюція конфлікту —
+це порівняння двох версій рядок-у-рядок; горизонтальний скрол ховав би
+праву частину diff'у і робив порівняння неможливим на mobile.
 
-- Рекомендований символ: **`↵`** (U+21B5 DOWNWARDS ARROW WITH CORNER LEFTWARDS)
-  — стандартна editor-конвенція для line break.
-- Альтернатива (за UX-вибором імплементатора): **`·`** після контенту або
-  **lighter-shade** background overlay для `\n`-байту.
+**Прямий наслідок для `↵` (§1.6.a.1):** коли wrap увімкнено, один реальний
+`\n` і soft-wrap (візуальне загортання довгого рядка) **виглядають однаково**
+— обидва починають новий візуальний рядок. Користувач не може відрізнити
+«тут закінчився рядок» від «тут просто загорнулось». Єдиний спосіб зняти цю
+двозначність — позначати **кожен реальний `\n` гліфом `↵`**, і то по **всьому**
+документу (а не лише у фокусному ver-блоці), бо читання/порівняння охоплює
+весь конфлікт. Тому правило §1.6.a.1 нижче — «гліф скрізь», а не «гліф у
+фокусі». `↵`-скрізь — це **функція від** wrap-on; вони зчеплені.
+
+**Наслідок для навігації (§1.8) і виділення (§1.7):** обидва визначені на
+**документ-моделі** (document lines + сегменти normal/ver1/ver2), НЕ на
+візуальних wrap-рядках. Soft-wrap додає лише візуальні рядки всередині одного
+document-line; перетин межі ver-блока (entry/exit, §1.8) тригериться на
+document-line-межі, що збігається з межею сегмента, а не на кожному
+візуальному переносі. `[down]` усередині загорнутого довгого рядка просто
+переходить на наступний візуальний фрагмент того ж document-line — без
+ver-block-переходу. (Стандартна CM6-поведінка `moveVertically`.)
+
+#### §1.6.a.1 Візуалізація `\n` — гліф `↵` у ВСІХ рядках
+
+Оскільки wrap завжди ввімкнено (§1.6.a.0), CM6 decoration рендерить кожен
+реальний `\n` як видимий **glyph** після контенту рядка — у **всіх** рядках
+DiffPane (normal-рядки + ver1 + ver2), незалежно від focus:
+
+- Символ: **`↵`** (U+21B5 DOWNWARDS ARROW WITH CORNER LEFTWARDS) — стандартна
+  editor-конвенція для line break.
 - Glyph рендериться як ghost-character (не входить у документ-модель, не
-  селектується, не копіюється у clipboard). Mark-decoration з `class:
-  "diff2-newline-glyph"` + CSS `::after` чи widget-decoration.
+  селектується, не копіюється у clipboard). Mark-decoration з
+  `class:"diff2-newline-glyph"` + CSS `::after` чи widget-decoration.
+- **Останній рядок файлу без trailing `\n`** гліфа НЕ отримує — *відсутність*
+  `↵` на останньому рядку сигналізує «немає trailing newline» (консистентно
+  з §1.2: останній рядок може бути без `\n`).
+- Decorations viewport-only (CM6 декорує лише видимі рядки) → рендер `↵` по
+  всьому документу не має perf-вартості навіть на великих файлах.
 
-При втраті focus ver-блоком (focus переходить на normal-рядок, інший
-ver-блок, чи поза DiffPane) — glyphs зникають. Це уникає візуального шуму у
-read-only ділянках.
+**Чому скрізь, а не лише у фокусному ver-блоці (зміна від попереднього
+дизайну):** з wrap-on двозначність `\n`-vs-soft-wrap існує **скрізь**, де є
+довгий рядок — і в read-only ver-блоках, і в normal-рядках, не лише там, де
+курсор. Старе правило «гліф лише у фокусі» (для зменшення візуального шуму)
+залишало решту документа двозначною. Користувач, що *порівнює* дві сторони,
+має бачити точні межі рядків обох версій одночасно.
 
-**Чому тільки у focus-aктивному ver-блоці:**
-
-- Користувач бачить точний стан рядків саме там, де редагує.
-- Решта DiffPane (read-only ver-блоки, normal-рядки) лишається чистою.
-- Перехід glyph-on/glyph-off — це decoration-update, без CM6 transaction
-  (документ не модифікується).
+**Optional refinement (не обов'язково для v1):** фокусний ver-блок може
+підсвічувати свої `↵` яскравіше (окремий CSS-клас), бо саме там редагуються
+trailing-`\n` рішення (§1.6.a.2). Базова вимога — uniform ghost-`↵` скрізь.
 
 #### §1.6.a.2 Diff-editor-specific normalization rule — ONE uniform rule
 
@@ -374,8 +422,9 @@ read-only ділянках.
 **Коли тригериться:**
 
 1. **На focus-leave ver-блока** (caret рухається у normal-рядок, інший
-   ver-блок, чи поза DiffPane). Поки користувач у ver-блоці, він бачить
-   `↵` glyph (§1.6.a.1) і може свідомо experiment-ити з trailing `\n`.
+   ver-блок, чи поза DiffPane). `↵` glyph (§1.6.a.1) видимий скрізь, тож
+   користувач свідомо бачить trailing-`\n` стан і може experiment-ити з ним
+   до того, як normalization спрацює на focus-leave.
 2. **При `[apply]` operation** (§1.6 op 1/2): якщо resolved virtual line
    `<ver>` не закінчується на `\n` і resolved diff-рядок НЕ останній у
    документі, те ж саме правило додає `\n`.
@@ -1943,7 +1992,8 @@ background, CM6 буфер у пам'яті переживає, coalesce-flush +
 | `caret-navigation.test.ts`            | §1.8 plain navigation enter/exit ver-blocks; empty ver-block proactively "appears".         |
 | `marker-click-activates-empty-ver.test.ts` | §1.8.a state-dependent: empty ver1 + click `<<<<<` → focus expand; non-empty ver1 + click `<<<<<` → no-op (data-action="none"); симетрично `>>>>>` для ver2; `=====` завжди neutral; кнопки завжди dispatch chunk-action (не focus). |
 | `diff-line-auto-collapse-on-ver-equal.test.ts` | §1.6 invariant: коли byte-equality `ver1 == ver2` досягається будь-яким edit'ом — empty+empty → програмно `[remove both]` (diff-рядок зникає); non-empty+однакові → програмно `[apply ↓]` верхнього marker (зливаються у normal-рядки). Тест-кейси: (a) edit ver1 → empty при empty ver2; (b) edit ver2 → empty при empty ver1; (c) edit ver1 з "ver 1" → "ver" при ver2 = "ver" (already non-empty same); (d) edit ver2 → "ver" з "ver" у ver1; (e) **single Ctrl+Z reverts both edit AND collapse atomically**; (f) UX escape — undo + reorder edits avoids collapse trigger. |
-| `newline-glyph-visualization.test.ts` | §1.6.a.1 `↵` glyph рендериться як CM6 decoration **тільки** коли курсор у ver-блоці; glyph НЕ селектується/НЕ копіюється; на focus loss glyphs зникають. Перевіряємо `class:"diff2-newline-glyph"` присутній/відсутній. |
+| `newline-glyph-visualization.test.ts` | §1.6.a.1 `↵` glyph рендериться як CM6 decoration на **кожному** реальному `\n` у **ВСІХ** рядках (normal + ver1 + ver2), незалежно від focus; glyph НЕ селектується/НЕ копіюється; останній рядок файлу без trailing `\n` гліфа НЕ має. Перевіряємо `class:"diff2-newline-glyph"` count == кількість `\n` у doc. |
+| `line-wrapping-always-on.test.ts` | §1.6.a.0 DiffPane вмикає `EditorView.lineWrapping` завжди (присутній у extensions); навігація/виділення визначені на document-model, не на wrap-рядках — `[down]` усередині загорнутого довгого рядка не тригерить ver-block перехід (§1.8 спрацьовує лише на document-line межі). |
 | `auto-add-newline-on-focus-leave.test.ts` | §1.6.a.2 uniform rule: (a) last line "abc" (no `\n`) + diff-line followed by normal-line → "abc\n"; (b) ver = "" (0 chars, collapsed) + focus traversal → ver stays "" (rule НЕ fire); (c) ver = "\n" + focus traversal → stays "\n" (already terminated); (d) діф-рядок — last in document → no `\n` add (last-line-of-file valid); (e) single Ctrl+Z reverts edits + normalization atomically. |
 | `apply-triggers-same-newline-rule.test.ts` | `[apply]` коли `<ver>` без trailing `\n` І resolved diff-рядок НЕ останній → §1.6.a.2 правило додає `\n` до generated last normal-рядка. Last-line-of-document edge case — НЕ додаємо. Жодного окремого apply-specific logic. |
 | `empty-ver-block-collapses-visually.test.ts` | §1.6.a.2 + §1.8: ver = "" → ver-блок візуально колапсується (height 0); focus enter via [down] → temporary 1-line container проявляється; user не введе ніяких chars → focus leave → ver stays "" → container collapses. User вводить 1 char → ver > 0 → container стає permanent. |
