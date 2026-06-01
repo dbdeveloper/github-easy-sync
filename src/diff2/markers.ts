@@ -32,10 +32,9 @@ export type MarkerKind = "top" | "middle" | "bottom";
 // marker widget. Phase 3 wires these via Compartment-reconfigure
 // hooks on the DiffPane; Phase 4+ extends with R7.11 exit-protocol.
 export interface MarkerWidgetCallbacks {
-  // Fired with the chosen resolution for THIS chunk. The DiffPane
-  // dispatches the text replacement + chunks-list mutation +
-  // decoration recompute.
-  onAction: (chunkIndex: number, choice: ChunkChoice) => void;
+  // Fired with the chosen resolution for THIS diff group. The DiffPane
+  // dispatches the doc replacement + recomputed structure (effect).
+  onAction: (group: number, choice: ChunkChoice) => void;
 }
 
 // One widget instance per marker line. Equality based on
@@ -49,9 +48,9 @@ export class ConflictMarkerWidget extends WidgetType {
     // Device label shown alongside top/bottom markers (R7.2). Empty
     // string for the middle marker (no label per R7.2).
     readonly label: string,
-    // Index into the original chunks list. The chunk-action handler
-    // uses this to know which chunk to resolve.
-    readonly chunkIndex: number,
+    // Diff-group id. The chunk-action handler uses this to know which
+    // group to resolve.
+    readonly group: number,
     // Whether the base file is markdown — controls [join] button
     // visibility on the middle marker per R7.5 + R7.9a.
     readonly isMarkdown: boolean,
@@ -66,7 +65,7 @@ export class ConflictMarkerWidget extends WidgetType {
     return (
       other.kind === this.kind &&
       other.label === this.label &&
-      other.chunkIndex === this.chunkIndex &&
+      other.group === this.group &&
       other.isMarkdown === this.isMarkdown
     );
   }
@@ -142,7 +141,7 @@ export class ConflictMarkerWidget extends WidgetType {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       e.preventDefault();
-      this.callbacks.onAction(this.chunkIndex, choice);
+      this.callbacks.onAction(this.group, choice);
     });
     parent.appendChild(btn);
   }

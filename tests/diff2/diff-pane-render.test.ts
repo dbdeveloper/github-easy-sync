@@ -109,13 +109,19 @@ describe("DiffPane render", () => {
     expect(container.querySelectorAll(".diff2-marker").length).toBe(0);
   });
 
-  it("getDocText returns the merged document content", () => {
+  it("getResolvedBase returns the BASE side (not the merged doc)", () => {
     pane = new DiffPane(container, "ours-only\n", "theirs-only\n");
     pane.getView().requestMeasure();
 
-    // Doc text = ours lines + theirs lines (per chunksToText). No
-    // markers in the text — they're block-widgets, not chars.
-    expect(pane.getDocText()).toBe("ours-only\ntheirs-only");
+    // Unresolved → base is unchanged ours; sibling is theirs. The
+    // merged doc would be "ours-only\ntheirs-only" — getResolvedBase
+    // must NOT return that (Trap 2: writing merged text as base
+    // corrupts the file on a partial [← back]).
+    expect(pane.getResolvedBase()).toBe("ours-only\n");
+    expect(pane.getResolved()).toEqual({
+      base: "ours-only\n",
+      sibling: "theirs-only\n",
+    });
   });
 
   it("destroy() removes the CM6 DOM from the parent", () => {
@@ -131,10 +137,14 @@ describe("DiffPane render", () => {
     const view = pane.getView();
     view.requestMeasure();
 
-    // Dispatch a typed insert at the start of the doc.
+    // Dispatch a typed insert at the start of the doc (inside ver1).
     view.dispatch({ changes: { from: 0, insert: "PREFIX " } });
     view.requestMeasure();
 
-    expect(pane.getDocText()).toContain("PREFIX");
+    // Live doc reflects the edit, and split() stays sound: the prefix
+    // lands on the base side (structure mapped through the transaction).
+    expect(view.state.doc.toString()).toContain("PREFIX");
+    expect(pane.getResolved().base).toBe("PREFIX a\n");
+    expect(pane.getResolved().sibling).toBe("b\n");
   });
 });

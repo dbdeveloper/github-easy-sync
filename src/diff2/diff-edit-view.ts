@@ -41,6 +41,7 @@ import {
   DiffEditViewState,
 } from "./events";
 import { executeExitProtocol } from "./exit-protocol";
+import { findSentinelCollision } from "./joined-doc";
 import { findAllConflicts, type ConflictEntry } from "./synthetic-detector";
 import { renderConflictsToolbar } from "./toolbar-conflicts";
 
@@ -289,6 +290,26 @@ export class DiffEditView extends ItemView {
         return;
       }
 
+      // §1.3 fail-closed: a \0/\1 sentinel in either side is
+      // incompatible with the internal joined-doc model. Don't open the
+      // DiffPane; point the user at an alternative.
+      const collision = findSentinelCollision(ours, theirs);
+      if (collision) {
+        new Notice(
+          "This file contains a control character (SOH/NUL) incompatible " +
+            "with the internal diff editor. Open it in your external diff " +
+            "tool or the default Obsidian editor.",
+        );
+        body.createEl("p", {
+          cls: "diff2-detail-error",
+          text:
+            `Cannot open diff: ${collision.side} contains a ` +
+            `${collision.char === "VER_SEPARATOR" ? "SOH (U+0001)" : "NUL (U+0000)"} ` +
+            "control character (§1.3 fail-closed).",
+        });
+        return;
+      }
+
       this.activeDiffPane = new DiffPane(body, ours, theirs, {
         oursLabel: this.deps.localDeviceLabel?.() ?? "local",
         theirsLabel: entry.deviceLabel,
@@ -323,7 +344,7 @@ export class DiffEditView extends ItemView {
       return;
     }
 
-    const newOursText = pane.getDocText();
+    const newOursText = pane.getResolvedBase();
     try {
       const result = await executeExitProtocol(
         { vault: this.deps.vault },

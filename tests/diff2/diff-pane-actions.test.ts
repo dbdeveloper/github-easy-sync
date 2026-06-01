@@ -1,13 +1,20 @@
 // @vitest-environment happy-dom
 //
-// DiffPane Phase 3 action-handling tests. Verifies that chunk-level
-// apply/remove/etc, plus bulk resolveAll, mutate the doc + the
-// decoration state correctly so the post-action view is consistent.
+// DiffPane action-handling tests (Etap 1b.1 model). Chunk-level
+// apply/remove/both/neither/join + bulk resolveAll operate on the
+// editor-model structure and dispatch a recomputed structure (effect).
+// Assertions read getResolved() (the split base/sibling) rather than the
+// merged doc — a resolved group is a normal segment, so a fully-resolved
+// doc has base === sibling.
+//
+// `applyToChunk(group, ...)` takes a diff-GROUP id (0-based per group),
+// NOT a chunks-array index. "both" = ver1+ver2 with no inserted blank
+// line (canonical §1.6 op3).
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DiffPane } from "../../src/diff2/diff-pane";
 
-describe("DiffPane Phase 3 actions", () => {
+describe("DiffPane actions (1b.1 model)", () => {
   let container: HTMLElement;
   let pane: DiffPane | null = null;
 
@@ -25,84 +32,87 @@ describe("DiffPane Phase 3 actions", () => {
   });
 
   describe("applyToChunk", () => {
-    it("ours: replaces chunk range with ours-lines, drops markers", () => {
+    it("ours: resolves the group to ver1, drops markers", () => {
       pane = new DiffPane(
         container,
         "common1\nours-line\ncommon2\n",
         "common1\ntheirs-line\ncommon2\n",
       );
       pane.getView().requestMeasure();
-      // Pre-state: 1 diff chunk → 3 markers (top, middle, bottom).
       expect(container.querySelectorAll(".diff2-marker").length).toBe(3);
       expect(pane.remainingDiffChunkCount()).toBe(1);
 
-      pane.applyToChunk(1, "ours");
+      pane.applyToChunk(0, "ours");
       pane.getView().requestMeasure();
 
-      expect(pane.getDocText()).toBe("common1\nours-line\ncommon2");
+      expect(pane.getResolved().base).toBe("common1\nours-line\ncommon2\n");
+      expect(pane.getResolved().sibling).toBe("common1\nours-line\ncommon2\n");
       expect(pane.remainingDiffChunkCount()).toBe(0);
-      // Markers gone — the resolved chunk is now a common chunk.
       expect(container.querySelectorAll(".diff2-marker").length).toBe(0);
     });
 
-    it("theirs: replaces chunk range with theirs-lines", () => {
-      pane = new DiffPane(container, "common\nours\ncommon2\n", "common\ntheirs\ncommon2\n");
-      pane.applyToChunk(1, "theirs");
-      expect(pane.getDocText()).toBe("common\ntheirs\ncommon2");
+    it("theirs: resolves the group to ver2", () => {
+      pane = new DiffPane(
+        container,
+        "common\nours\ncommon2\n",
+        "common\ntheirs\ncommon2\n",
+      );
+      pane.applyToChunk(0, "theirs");
+      expect(pane.getResolved().base).toBe("common\ntheirs\ncommon2\n");
     });
 
-    it("both: emits ours + blank + theirs", () => {
+    it("both: ver1 + ver2, no inserted blank (§1.6 op3)", () => {
       pane = new DiffPane(container, "x\nours\ny\n", "x\ntheirs\ny\n");
-      pane.applyToChunk(1, "both");
-      expect(pane.getDocText()).toBe("x\nours\n\ntheirs\ny");
+      pane.applyToChunk(0, "both");
+      expect(pane.getResolved().base).toBe("x\nours\ntheirs\ny\n");
     });
 
-    it("neither: chunk collapses to empty", () => {
+    it("neither: group collapses, surrounding lines abut", () => {
       pane = new DiffPane(container, "x\nours\ny\n", "x\ntheirs\ny\n");
-      pane.applyToChunk(1, "neither");
-      // Common-x + empty resolved + common-y → "x\n\ny" because
-      // the resolved chunk is a zero-line common entry; join("\n")
-      // between two common runs (x and y) still inserts one "\n".
-      // Resolved-empty chunk contributes nothing → "x\ny" expected.
-      expect(pane.getDocText()).toBe("x\ny");
+      pane.applyToChunk(0, "neither");
+      expect(pane.getResolved().base).toBe("x\ny\n");
     });
 
-    it("ignores out-of-range chunk indexes silently", () => {
+    it("ignores out-of-range group ids silently", () => {
       pane = new DiffPane(container, "a\n", "b\n");
-      const before = pane.getDocText();
+      const before = pane.getResolved();
       pane.applyToChunk(99, "ours");
-      expect(pane.getDocText()).toBe(before);
+      expect(pane.getResolved()).toEqual(before);
     });
 
-    it("ignores actions on already-resolved (common) chunks", () => {
+    it("ignores actions when there is no diff group", () => {
       pane = new DiffPane(container, "common\n", "common\n");
-      // Only common chunk, no diffs.
       pane.applyToChunk(0, "ours");
-      expect(pane.getDocText()).toBe("common");
+      expect(pane.getResolved().base).toBe("common\n");
     });
   });
 
   describe("join action (markdown)", () => {
     it("inserts blockquote callout from joinContext", () => {
-      pane = new DiffPane(container, "x\nours-line\ny\n", "x\ntheirs-line\ny\n", {
-        isMarkdown: true,
-        joinContext: {
-          remoteDeviceLabel: "Phone",
-          timestamp: "2026-05-26T10-30-00Z",
+      pane = new DiffPane(
+        container,
+        "x\nours-line\ny\n",
+        "x\ntheirs-line\ny\n",
+        {
+          isMarkdown: true,
+          joinContext: {
+            remoteDeviceLabel: "Phone",
+            timestamp: "2026-05-26T10-30-00Z",
+          },
         },
-      });
-      pane.applyToChunk(1, "join");
-      const text = pane.getDocText();
-      expect(text).toContain("ours-line");
-      expect(text).toContain(
+      );
+      pane.applyToChunk(0, "join");
+      const base = pane.getResolved().base;
+      expect(base).toContain("ours-line");
+      expect(base).toContain(
         "> Changes from `Phone` at `2026-05-26T10-30-00Z`:",
       );
-      expect(text).toContain("> theirs-line");
+      expect(base).toContain("> theirs-line");
     });
   });
 
   describe("resolveAll (bulk)", () => {
-    it("ours: every diff chunk becomes ours-lines in one dispatch", () => {
+    it("ours: every group becomes ver1 in one dispatch", () => {
       pane = new DiffPane(
         container,
         "c1\noA\nc2\noB\nc3\n",
@@ -110,101 +120,95 @@ describe("DiffPane Phase 3 actions", () => {
       );
       expect(pane.remainingDiffChunkCount()).toBe(2);
       pane.resolveAll("ours");
-      expect(pane.getDocText()).toBe("c1\noA\nc2\noB\nc3");
+      expect(pane.getResolved().base).toBe("c1\noA\nc2\noB\nc3\n");
       expect(pane.remainingDiffChunkCount()).toBe(0);
     });
 
-    it("theirs: every diff chunk becomes theirs-lines", () => {
+    it("theirs: every group becomes ver2", () => {
       pane = new DiffPane(
         container,
         "c1\noA\nc2\noB\nc3\n",
         "c1\ntA\nc2\ntB\nc3\n",
       );
       pane.resolveAll("theirs");
-      expect(pane.getDocText()).toBe("c1\ntA\nc2\ntB\nc3");
+      expect(pane.getResolved().base).toBe("c1\ntA\nc2\ntB\nc3\n");
     });
   });
 
   describe("marker action buttons", () => {
-    it("top apply button dispatches 'ours' to applyToChunk", () => {
+    it("top apply button → ver1", () => {
       pane = new DiffPane(container, "x\nours\ny\n", "x\ntheirs\ny\n");
       pane.getView().requestMeasure();
-      const topBtn = container.querySelector(
+      const btn = container.querySelector(
         ".diff2-marker-top .diff2-marker-btn-ours",
       ) as HTMLButtonElement;
-      expect(topBtn).toBeTruthy();
-      topBtn.click();
-      expect(pane.getDocText()).toBe("x\nours\ny");
+      expect(btn).toBeTruthy();
+      btn.click();
+      expect(pane.getResolved().base).toBe("x\nours\ny\n");
     });
 
-    it("bottom apply button dispatches 'theirs'", () => {
+    it("bottom apply button → ver2", () => {
       pane = new DiffPane(container, "x\nours\ny\n", "x\ntheirs\ny\n");
       pane.getView().requestMeasure();
-      const bottomBtn = container.querySelector(
+      const btn = container.querySelector(
         ".diff2-marker-bottom .diff2-marker-btn-theirs",
       ) as HTMLButtonElement;
-      expect(bottomBtn).toBeTruthy();
-      bottomBtn.click();
-      expect(pane.getDocText()).toBe("x\ntheirs\ny");
+      expect(btn).toBeTruthy();
+      btn.click();
+      expect(pane.getResolved().base).toBe("x\ntheirs\ny\n");
     });
 
-    it("middle [apply both] button merges ours + theirs", () => {
+    it("middle [apply both] → ver1 + ver2", () => {
       pane = new DiffPane(container, "x\nours\ny\n", "x\ntheirs\ny\n");
       pane.getView().requestMeasure();
-      const bothBtn = container.querySelector(
+      const btn = container.querySelector(
         ".diff2-marker-middle .diff2-marker-btn-both",
       ) as HTMLButtonElement;
-      expect(bothBtn).toBeTruthy();
-      bothBtn.click();
-      expect(pane.getDocText()).toBe("x\nours\n\ntheirs\ny");
+      expect(btn).toBeTruthy();
+      btn.click();
+      expect(pane.getResolved().base).toBe("x\nours\ntheirs\ny\n");
     });
 
-    it("middle [remove both] button drops both sides", () => {
+    it("middle [remove both] → drops the group", () => {
       pane = new DiffPane(container, "x\nours\ny\n", "x\ntheirs\ny\n");
       pane.getView().requestMeasure();
-      const neitherBtn = container.querySelector(
+      const btn = container.querySelector(
         ".diff2-marker-middle .diff2-marker-btn-neither",
       ) as HTMLButtonElement;
-      neitherBtn.click();
-      expect(pane.getDocText()).toBe("x\ny");
+      btn.click();
+      expect(pane.getResolved().base).toBe("x\ny\n");
     });
 
-    it("[join] button is hidden for non-markdown files", () => {
+    it("[join] button hidden for non-markdown", () => {
       pane = new DiffPane(container, "a\n", "b\n", { isMarkdown: false });
       pane.getView().requestMeasure();
-      const joinBtn = container.querySelector(
-        ".diff2-marker-middle .diff2-marker-btn-join",
-      );
-      expect(joinBtn).toBeNull();
+      expect(
+        container.querySelector(".diff2-marker-middle .diff2-marker-btn-join"),
+      ).toBeNull();
     });
 
-    it("[join] button is present for markdown files", () => {
+    it("[join] button present for markdown", () => {
       pane = new DiffPane(container, "a\n", "b\n", {
         isMarkdown: true,
         joinContext: { remoteDeviceLabel: "X", timestamp: "T" },
       });
       pane.getView().requestMeasure();
-      const joinBtn = container.querySelector(
-        ".diff2-marker-middle .diff2-marker-btn-join",
-      );
-      expect(joinBtn).not.toBeNull();
+      expect(
+        container.querySelector(".diff2-marker-middle .diff2-marker-btn-join"),
+      ).not.toBeNull();
     });
   });
 
-  describe("multi-chunk resolution", () => {
-    it("indexes remain valid as earlier chunks are resolved", () => {
-      // Two diff chunks. Resolve the first via applyToChunk(1, "ours").
-      // The remaining diff chunk should now be at index 3 (after
-      // common-c1, resolved-as-common, common-c2). Resolve it via
-      // applyToChunk(3, "theirs"). Doc should reflect both choices.
+  describe("multi-group resolution", () => {
+    it("group ids stay valid as earlier groups resolve", () => {
       pane = new DiffPane(
         container,
         "c1\noA\nc2\noB\nc3\n",
         "c1\ntA\nc2\ntB\nc3\n",
       );
-      pane.applyToChunk(1, "ours"); // first diff → ours
-      pane.applyToChunk(3, "theirs"); // second diff → theirs
-      expect(pane.getDocText()).toBe("c1\noA\nc2\ntB\nc3");
+      pane.applyToChunk(0, "ours"); // first group → ver1
+      pane.applyToChunk(1, "theirs"); // second group → ver2
+      expect(pane.getResolved().base).toBe("c1\noA\nc2\ntB\nc3\n");
       expect(pane.remainingDiffChunkCount()).toBe(0);
     });
   });
