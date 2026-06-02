@@ -17,7 +17,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as crypto from "crypto";
-import { Vault as MockVault } from "../../../mock-obsidian";
+import { Vault as MockVault, setMockPlatform } from "../../../mock-obsidian";
 import type { Vault } from "obsidian";
 import { calculateGitBlobSHA } from "../../../src/utils";
 import { stagingPathFor } from "../../../src/sync2/atomic-write";
@@ -218,6 +218,48 @@ describe("recoverCommit — fallback, 6.5-in-recovery, no-commit", () => {
     expect(res).toEqual({ kind: "no-commit" });
     expect(await fx.vault.adapter.read(BASE)).toBe(OLD_BASE);
     expect(await fx.vault.adapter.exists(`${autosaveDir(ID)}/meta.json`)).toBe(true);
+  });
+});
+
+describe("recoverCommit under MOCK_PLATFORM=mobile (Capacitor rename)", () => {
+  // roll-forward does safeRename(tmp → final) OVER an existing old final
+  // (row D) — a rename-over-occupied path, exactly what the CLAUDE.md mobile
+  // rule guards. Confirm it (and the foreign fallback) under strict semantics.
+  let fx: ReturnType<typeof fixture>;
+  beforeEach(() => {
+    setMockPlatform("mobile");
+    fx = fixture();
+  });
+  afterEach(() => {
+    setMockPlatform("desktop");
+    fs.rmSync(fx.root, { recursive: true, force: true });
+  });
+
+  it("row D (rename over occupied final) rolls forward", async () => {
+    await craft(
+      fx.vault,
+      { final: "old", tmp: "tmpNew", bak: false },
+      { final: "old", tmp: "tmpNew", bak: false },
+    );
+    expect(await recoverCommit(fx.vault, ID)).toEqual({
+      kind: "rolled-forward",
+      siblingRemoved: false,
+    });
+    await assertCommitted(fx.vault);
+  });
+
+  it("foreign final → fallback, foreign content intact", async () => {
+    await craft(
+      fx.vault,
+      { final: "foreign", tmp: "tmpNew", bak: false },
+      { final: "old", tmp: "tmpNew", bak: false },
+    );
+    expect(await recoverCommit(fx.vault, ID)).toEqual({
+      kind: "fallback",
+      reason: "external-modification",
+    });
+    expect(await fx.vault.adapter.read(BASE)).toBe(FOREIGN);
+    expect(await fx.vault.adapter.exists(autosaveDir(ID))).toBe(false);
   });
 });
 

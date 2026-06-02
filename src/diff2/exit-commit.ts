@@ -279,6 +279,14 @@ export async function recoverCommit(
   // final paths (.sync-bak only ever appears once both tmp✓, i.e. in the
   // forward states). Drop the partial staging + done.json; the autosave
   // session survives so the user can re-resolve.
+  //
+  // CLOSURE: this branch is provably correct only over crash-REACHABLE states
+  // — for every real crash, a .sync-bak implies both tmps completed ⇒ both
+  // hasNew ⇒ forward, so a rollback state can never carry a bak. We therefore
+  // leave any bak untouched (it still holds the original — no data loss even
+  // in an externally-corrupted, unreachable shape; the file is just at .bak).
+  // We do NOT attempt restore-from-bak for such shapes (speculative; would add
+  // code for a state no crash produces).
   await removeIfExists(vault, base.tmpPath);
   await removeIfExists(vault, sibling.tmpPath);
   await removeIfExists(vault, donePath(autosaveId));
