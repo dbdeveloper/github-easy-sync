@@ -172,34 +172,35 @@ export function fromEditorModel(model: EditorModel): string {
   return joined;
 }
 
-// Verify the structure tiles [0, docLength] with no gap or overlap.
-function assertTiling(structure: Segment[], docLength: number): void {
+// Verify the structure tiles [0, docLength] with no gap or overlap. Exported so
+// the collapseGuard internal path (mapStructure → currentItems) can fail-closed
+// too — a mis-tile there silently dropped user text (§1.7.a (0)) instead of
+// throwing. `context` names the caller in the error.
+export function assertTiling(
+  structure: Segment[],
+  docLength: number,
+  context = "fromEditorModel",
+): void {
   if (structure.length === 0) {
     if (docLength !== 0) {
-      throw new Error(
-        `editor-model.fromEditorModel: empty structure but doc length ${docLength}`,
-      );
+      throw new Error(`editor-model.${context}: empty structure but doc length ${docLength}`);
     }
     return;
   }
   if (structure[0].from !== 0) {
-    throw new Error(
-      `editor-model.fromEditorModel: structure starts at ${structure[0].from}, not 0`,
-    );
+    throw new Error(`editor-model.${context}: structure starts at ${structure[0].from}, not 0`);
   }
   for (let i = 1; i < structure.length; i++) {
     if (structure[i].from !== structure[i - 1].to) {
       throw new Error(
-        `editor-model.fromEditorModel: gap/overlap before segment ${i} ` +
+        `editor-model.${context}: gap/overlap before segment ${i} ` +
           `(prev.to=${structure[i - 1].to}, from=${structure[i].from})`,
       );
     }
   }
   const end = structure[structure.length - 1].to;
   if (end !== docLength) {
-    throw new Error(
-      `editor-model.fromEditorModel: structure ends at ${end}, doc length ${docLength}`,
-    );
+    throw new Error(`editor-model.${context}: structure ends at ${end}, doc length ${docLength}`);
   }
 }
 

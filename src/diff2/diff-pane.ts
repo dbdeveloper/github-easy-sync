@@ -49,6 +49,7 @@ import {
   setDiffPaneState,
 } from "./decorations";
 import {
+  assertTiling,
   baseSiblingToModel,
   type EditorModel,
   fromEditorModel,
@@ -511,6 +512,75 @@ function findCollapsibleGroups(
   return out;
 }
 
+// §1.7.a (0) — detect a Variant-3 free-edit RESOLUTION: a SINGLE change whose
+// replaced range [fromA,toA] has BOTH ends in normal-space (edges count as
+// normal — legalizeRange's rule) and fully covers ≥1 non-empty diff group. Per
+// the spec this is a banal text replace: the covered region (normals + spanned
+// groups) collapses to ONE normal segment carrying the inserted text → the
+// conflict is resolved to normal text in both files. mapStructure maps each
+// segment independently and CANNOT express this (it mis-tiles, dropping the
+// insert into a gap — §1.7.a (0) root cause), so we rebuild the structure.
+function detectSpanningResolve(
+  structure: Segment[],
+  changes: ChangeSet,
+): { fromA: number; toA: number; delta: number } | null {
+  const ranges: Array<{ fromA: number; toA: number; ins: number }> = [];
+  changes.iterChanges((fa, ta, _fb, tb) => ranges.push({ fromA: fa, toA: ta, ins: tb - _fb }));
+  if (ranges.length !== 1) return null; // only the single-selection-replace shape
+  const { fromA, toA, ins } = ranges[0];
+  // both ends normal-space (NOT strictly inside a ver)
+  if (strictVerBlockAt(structure, fromA) || strictVerBlockAt(structure, toA)) return null;
+  // must fully cover ≥1 non-empty ver
+  const coversVer = structure.some(
+    (s) => s.role !== "normal" && s.to > s.from && s.from >= fromA && s.to <= toA,
+  );
+  if (!coversVer) return null;
+  return { fromA, toA, delta: ins - (toA - fromA) };
+}
+
+// Rebuild the structure for a spanning resolve: segments fully before the start
+// normal stay; the [i..j] run (start-normal … spanned groups … end-normal)
+// becomes ONE normal segment; segments after the end normal shift by delta. i
+// via first-match (left normal at a boundary — keeps the prefix), j via
+// last-match (right normal — keeps the suffix); correct even with an empty ver
+// sitting exactly on the boundary.
+function rebuildSpanningResolve(
+  structure: Segment[],
+  fromA: number,
+  toA: number,
+  delta: number,
+): Segment[] | null {
+  let i = -1;
+  for (let k = 0; k < structure.length; k++) {
+    const s = structure[k];
+    if (s.role === "normal" && fromA >= s.from && fromA <= s.to) {
+      i = k;
+      break;
+    }
+  }
+  let j = -1;
+  for (let k = structure.length - 1; k >= 0; k--) {
+    const s = structure[k];
+    if (s.role === "normal" && toA >= s.from && toA <= s.to) {
+      j = k;
+      break;
+    }
+  }
+  if (i < 0 || j < 0 || i > j) return null;
+  const merged: Segment = {
+    role: "normal",
+    group: -1,
+    from: structure[i].from,
+    to: structure[j].to + delta,
+  };
+  const out: Segment[] = structure.slice(0, i);
+  out.push(merged);
+  for (let k = j + 1; k < structure.length; k++) {
+    out.push({ ...structure[k], from: structure[k].from + delta, to: structure[k].to + delta });
+  }
+  return out;
+}
+
 // Auto-collapse (§1.6): after a free edit makes a diff group's ver1 ===
 // ver2 byte-exact, append the collapse INTO THE SAME transaction (combined
 // spec) so a single Ctrl+Z reverts both the edit and the collapse
@@ -524,6 +594,27 @@ const collapseGuard = EditorState.transactionFilter.of(
     if (!tr.docChanged) return tr;
     const field = tr.startState.field(diffPaneStateField, false);
     if (!field) return tr;
+
+    // §1.7.a (0) — Variant-3 spanning RESOLVE handled BEFORE the generic
+    // mapStructure path (which mis-tiles a whole-segment-spanning change).
+    // Rebuild the structure directly and hand it to the field via
+    // setDiffPaneState (so the field skips mapStructure for this tx).
+    const span = detectSpanningResolve(field.structure, tr.changes);
+    if (span) {
+      const rebuilt = rebuildSpanningResolve(field.structure, span.fromA, span.toA, span.delta);
+      if (rebuilt) {
+        assertTiling(rebuilt, tr.newDoc.length, "spanningResolve");
+        return {
+          changes: tr.changes,
+          effects: [
+            setDiffPaneState.of({ structure: rebuilt, opts: field.opts, activeEmptyVer: null }),
+            ...tr.effects,
+          ],
+          selection: tr.newSelection,
+          scrollIntoView: true,
+        };
+      }
+    }
 
     // Recompute the post-edit structure EXACTLY as the field will (same
     // grow target via the shared growIndexFor), then look for byte-equal
@@ -539,6 +630,10 @@ const collapseGuard = EditorState.transactionFilter.of(
       growIdx,
     );
     const postDoc = tr.newDoc.toString();
+    // Fail-closed: if mapStructure mis-tiled (e.g. a change spanning whole
+    // segments — §1.7.a (0)), currentItems would slice by structure and
+    // silently drop text in the gap. Throw loudly instead.
+    assertTiling(postStructure, postDoc.length, "collapseGuard");
     const collapsible = findCollapsibleGroups(postDoc, postStructure);
     if (collapsible.length === 0) return tr;
 

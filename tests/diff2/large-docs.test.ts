@@ -163,5 +163,5 @@ describe("large docs — editing inside a long ver-block stays sound (live)", ()
         structure: view.state.field(diffPaneStateField, false)!.structure,
       })).not.toThrow();
     }
-  });
+  }, 30_000); // 250 edits × per-edit structure scans; >5 s under full-suite load
 });
