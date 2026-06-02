@@ -820,6 +820,14 @@ ver — цілий блок, може містити кілька `\n`):
     ["normal line2\n"]
 ] }
 ```
+**Обов'язковий тест (коли реалізуємо copy з diff-string):** **вирізати** один
+конфлікт (cut — delete регіону з diff-групою) і **вставити** його в інше місце
+(paste нашого internal-payload → відтворення ver1/ver2 на новій позиції). Обидві
+операції мають потрапити в **REDO (`history.jsonl`)** і ТОЧНО відновитись на
+replay. Лягає на **format B**: paste-tx-блок зберігає post-paste structure з
+новою групою → `replayHistory` її відновлює; cut-tx-блок — structure без неї.
+(Увага: cut diff-групи — це по суті той самий spanning-delete, що й §1.7.a(0);
+тож (0) має бути пофікшено ПЕРШИМ, інакше cut втрачатиме/плутатиме structure.)
 **Опційне desktop-покращення — другий clipboard-тип (progressive enhancement).**
 `navigator.clipboard.write([new ClipboardItem({...})])` на desktop (Electron/
 Chromium) дозволяє КІЛЬКА типів одразу: `text/plain` + «наш» (`text/html` зі
