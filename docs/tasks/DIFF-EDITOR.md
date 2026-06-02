@@ -63,12 +63,16 @@
   `\n`, коли каретка покидає непорожній ver-блок без trailing `\n`, що не останній у документі
   (combined-transaction); + apply-time нормалізація в `relayout` (`normalizeItems`). Останній
   елемент документа лишається EOL-less. Запобігає злиттю контенту при split (correctness).
-- ⏳ **1b.7** hotkeys §1.9 *(останній крок 1b)*.
+- ✅ **1b.7** — hotkeys §1.9 (`diff-pane.ts` `hotkeys()` + `hotkeyTarget`): `Ctrl+Enter` apply,
+  `Ctrl+Backspace` remove, `Ctrl+Shift+Enter` both, `Ctrl+Shift+Backspace` neither,
+  `Ctrl+Shift+.` join (md-only). Активні лише коли каретка у ver-блоці (інакше inert).
 
-*Поточний стан редагування:* live + безпечне + повна §1.6.a модель (selection §1.7, sentinel,
-auto-collapse §1.6, гліф `↵`, normalization §1.6.a). Лишилось: hotkeys (§1.9), keyboard-стоп
-на порожніх ver (1b.4b, deferred). DiffPane ще НЕ вбудований у бандл (`main.js` не змінюється;
-Phase 6 entry-points).
+    **✅ Stage 1 ЗАВЕРШЕНО** (модель §1 + уся поведінка редактора). Єдиний відкладений пункт —
+    **1b.4b** (keyboard-стоп на порожніх ver, UX-only, не блокує).
+
+*Поточний стан редагування:* live + безпечне + повна §1 модель (selection §1.7, sentinel §1.3,
+auto-collapse §1.6, гліф `↵` §1.6.a.1, normalization §1.6.a.2, hotkeys §1.9). DiffPane ще НЕ
+вбудований у бандл (`main.js` не змінюється; Phase 6 entry-points).
 
 **Stage 2 (далі):** `[←]` 7-step pair-atomic commit (§5.0) + `done.json` barrier +
 11-станова recovery-матриця (§5.0.b) + TOCTOU (§5.0.e) + `deriveAutosaveId` (§2.4.1).

@@ -27,10 +27,12 @@ import {
   ChangeDesc,
   EditorSelection,
   EditorState,
+  Extension,
+  Prec,
   Transaction,
   TransactionSpec,
 } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { EditorView, keymap } from "@codemirror/view";
 import type { ChunkChoice, JoinContext } from "./chunk-actions";
 import {
   activeBlockAt,
@@ -97,6 +99,7 @@ export class DiffPane {
           collapseGuard,
           selectionRules(),
           normalizeGuard,
+          this.hotkeys(),
           EditorView.lineWrapping,
         ],
       }),
@@ -189,6 +192,37 @@ export class DiffPane {
       effects: setActiveEmptyVer.of({ group, role }),
     });
     this.view.focus();
+  }
+
+  // §1.9 hotkeys — active only when the caret sits in a ver-block. Ctrl
+  // (not Cmd) on every platform, per spec (Cmd-Backspace is OS-reserved).
+  // Each returns false when the caret is outside a ver-block so other
+  // handlers still see the key.
+  private hotkeys(): Extension {
+    const handle =
+      (action: HotkeyAction, mdOnly = false) =>
+      (view: EditorView): boolean => {
+        if (mdOnly && !this.opts.isMarkdown) return false;
+        const field = view.state.field(diffPaneStateField, false);
+        if (!field) return false;
+        const target = hotkeyTarget(
+          field.structure,
+          view.state.selection.main.head,
+          action,
+        );
+        if (!target) return false;
+        this.applyToChunk(target.group, target.choice);
+        return true;
+      };
+    return Prec.high(
+      keymap.of([
+        { key: "Ctrl-Enter", run: handle("apply") },
+        { key: "Ctrl-Backspace", run: handle("remove") },
+        { key: "Ctrl-Shift-Enter", run: handle("both") },
+        { key: "Ctrl-Shift-Backspace", run: handle("neither") },
+        { key: "Ctrl-Shift-.", run: handle("join", true) },
+      ]),
+    );
   }
 
   // Current model read from the live EditorState (source of truth).
@@ -317,6 +351,29 @@ function splitLinesNoTrailing(text: string): string[] {
   const parts = text.split("\n");
   if (parts[parts.length - 1] === "") parts.pop();
   return parts;
+}
+
+// §1.9 hotkey → (group, choice) for the ver-block the caret sits in, or
+// null when the caret is outside any ver-block. apply/remove are relative
+// to which side the caret is in: apply ver1→ours, ver2→theirs; remove is
+// the opposite (drop the caret's side, keep the other).
+export type HotkeyAction = "apply" | "remove" | "both" | "neither" | "join";
+export function hotkeyTarget(
+  structure: Segment[],
+  head: number,
+  action: HotkeyAction,
+): { group: number; choice: ChunkChoice } | null {
+  const b = strictVerBlockAt(structure, head);
+  if (!b) return null;
+  let choice: ChunkChoice;
+  if (action === "apply") {
+    choice = b.role === "ver1" ? "ours" : "theirs";
+  } else if (action === "remove") {
+    choice = b.role === "ver1" ? "theirs" : "ours";
+  } else {
+    choice = action; // "both" | "neither" | "join"
+  }
+  return { group: b.group, choice };
 }
 
 // Re-lay-out a flat item list into (doc, structure): assign contiguous
