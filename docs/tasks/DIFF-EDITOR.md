@@ -1271,15 +1271,23 @@ Step  3. siblingBytes = await vault.adapter.readBinary(siblingPath)
 Step  4. baseShaAtStart    = sha(baseBytes)     // in-memory hash
 Step  5. siblingShaAtStart = sha(siblingBytes)
 
-Step  5.5 (PLANNED §2.5 joinedDocSha). joined = build(baseStr, siblingStr)
+Step  5.5 (PLANNED §2.5 joinedDocSha). joined = build(decode(baseBytes), decode(siblingBytes))
           joinedDocSha = sha(utf8(joined))
           // ВСЕ in-memory, ДО будь-якого disk-write. meta.json write-once
           // immutable і несе joinedDocSha → build + hash МУСЯТЬ передувати
-          // step 10. Mount-шлях усе одно будує joined для рендера редактора
-          // (baseSiblingToModel → build → toEditorModel), тож НЕ рахуємо двічі:
-          // прокинути joined (або joinedDocSha) з mount-шляху у startSession.
-          // build() кидає на \0/\1 collision — collision-free гарантує
+          // step 10. build() кидає на \0/\1 collision — collision-free гарантує
           // findSentinelCollision у mount-шляху (§1.3), який біжить ПЕРЕД цим.
+          //
+          // SINGLE-READ INVARIANT (TOCTOU): baseShaAtStart, siblingShaAtStart,
+          // joinedDocSha І обидва snapshot'и МУСЯТЬ бути похідними від ОДНОГО
+          // читання вхідних файлів (тих самих буферів baseBytes/siblingBytes зі
+          // step 2-3). Перечитування vault між ними → файл міг змінитись →
+          // SHA-и розсинхронізуються і meta стає внутрішньо суперечливим. Тому
+          // build бере decode(baseBytes), а НЕ окремий adapter.read.
+          // Оптимізація «не білдити двічі» (mount уже будує joined для рендера)
+          // допустима ЛИШЕ якщо mount передасть startSession І байти, І joined з
+          // того САМОГО read; інакше — startSession читає раз і білдить сам
+          // (подвійний build — дешева перф-дрібниця проти ризику десинхрону).
 
 Step  6. atomicWriteFile(.diff2-autosave/<conflictId>/base.snapshot,    baseBytes)
 Step  7. atomicWriteFile(.diff2-autosave/<conflictId>/sibling.snapshot, siblingBytes)
