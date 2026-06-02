@@ -75,7 +75,9 @@ describe("§1.8.a empty-ver activation", () => {
     pane.getView().dispatch({ changes: { from: v1from, insert: "Q" } });
 
     expect(pane.getResolved()).toEqual({
-      base: "a\nQc\n", // ver1 grew → base side
+      // ver1 grew to "Q"; §1.6.a.2 commit normalization gives it a \n (group
+      // not last), so "Q" is its own base line, not merged into "c".
+      base: "a\nQ\nc\n",
       sibling: "a\nb\nc\n", // ver2 untouched
     });
     // activation cleared once ver1 gained content.

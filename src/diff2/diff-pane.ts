@@ -25,6 +25,7 @@
 
 import {
   ChangeDesc,
+  ChangeSet,
   EditorSelection,
   EditorState,
   Extension,
@@ -317,8 +318,13 @@ function resolveText(
       return v1;
     case "theirs":
       return v2;
-    case "both":
-      return v1 + v2;
+    case "both": {
+      // §1.6 op3: ver1 then ver2. Guard the junction — if ver1 lacks a
+      // trailing \n its last line would merge with ver2's first line
+      // (review finding D), mirroring joinBlockquoteText's guard.
+      const head = v1.length > 0 && !v1.endsWith("\n") ? v1 + "\n" : v1;
+      return head + v2;
+    }
     case "neither":
       return "";
     case "join": {
@@ -495,17 +501,30 @@ const collapseGuard = EditorState.transactionFilter.of(
     }
     const collapsed = relayout(items);
 
-    return [
-      tr,
-      {
-        changes: { from: 0, to: postDoc.length, insert: collapsed.doc },
-        effects: setDiffPaneState.of({
+    // Return ONE composed spec, not `[tr, spec]`. A transactionFilter array
+    // is merged with sequential=false, which resolves the appended changes
+    // against the ORIGINAL doc — but `collapsed.doc` is in POST-tr space, so
+    // the array form threw "Invalid change range" on a length-changing edit
+    // and desynced on deletes (review finding A). Composing tr.changes with
+    // the collapse (over postDoc) yields a single ChangeSet over startState,
+    // interpreted correctly.
+    const collapseCS = ChangeSet.of(
+      { from: 0, to: postDoc.length, insert: collapsed.doc },
+      postDoc.length,
+    );
+    return {
+      changes: tr.changes.compose(collapseCS),
+      effects: [
+        setDiffPaneState.of({
           structure: collapsed.structure,
           opts: field.opts,
           activeEmptyVer: null,
         }),
-      },
-    ];
+        ...tr.effects,
+      ],
+      selection: tr.newSelection.map(collapseCS),
+      scrollIntoView: true,
+    };
   },
 );
 

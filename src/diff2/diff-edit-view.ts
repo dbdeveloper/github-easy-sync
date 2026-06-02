@@ -344,8 +344,12 @@ export class DiffEditView extends ItemView {
       return;
     }
 
-    const newOursText = pane.getResolvedBase();
     try {
+      // getResolvedBase() runs the commit-boundary fail-closed checks
+      // (tiling assertion); keep it INSIDE the try so a thrown corruption
+      // guard means "save failed, stay in the editor" rather than an
+      // unhandled crash.
+      const newOursText = pane.getResolvedBase();
       const result = await executeExitProtocol(
         { vault: this.deps.vault },
         entry.basePath,

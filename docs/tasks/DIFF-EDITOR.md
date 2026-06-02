@@ -73,9 +73,26 @@
     **✅ Stage 1 ЗАВЕРШЕНО ПОВНІСТЮ** — модель §1 + уся поведінка редактора, **без відкладань**
     (1b.4b теж зроблено). Усі §1.1–§1.10 реалізовані.
 
+**Stage 1.h — review hardening** (deep multi-agent review + TDD): кожна знахідка спершу стала
+тестом (`tests/diff2/stage1-review-findings.test.ts`), тоді фікс:
+- **(A)** auto-collapse `collapseGuard` — `[tr,spec]` резолвив у original-coords (CM6
+  `mergeTransaction(sequential=false)`) → **RangeError на grow-collapse / desync на delete**.
+  Фікс: один spec через `tr.changes.compose(collapseCS)`.
+- **(B)** commit-boundary **fail-closed**: `fromEditorModel` асертить, що structure тайлить
+  `[0,doc.length]` (gap/overlap → throw), `getResolvedBase()` всередині try/catch у в'ю →
+  весь клас silent-corruption (multi-cursor, boundary-edits) стає гучною помилкою.
+- **(E)** commit-boundary **нормалізація** §1.6.a.2 у `fromEditorModel` (не лише focus-leave) →
+  `[← Back]` без виходу каретки більше не зливає контент; focus-leave-guard демоутнуто до
+  візуальної зручності.
+- **(D)** `resolveText` "both" — guard `v1.endsWith("\n")` (як `joinBlockquoteText`) → EOL-less
+  ver1 не зливається з ver2.
+- **(C)** `buildDecorationSet` `pushBlock` — block-widget'и лише на межі рядка → EOL-less
+  same-line ver1/ver2 не дає mid-line widget.
+
 *Поточний стан редагування:* live + безпечне + повна §1 модель (selection §1.7, sentinel §1.3,
-auto-collapse §1.6, гліф `↵` §1.6.a.1, normalization §1.6.a.2, hotkeys §1.9). DiffPane ще НЕ
-вбудований у бандл (`main.js` не змінюється; Phase 6 entry-points).
+auto-collapse §1.6, гліф `↵` §1.6.a.1, normalization §1.6.a.2 + **commit-boundary** §1.6.a.2,
+hotkeys §1.9), **fail-closed на коміті**. DiffPane ще НЕ вбудований у бандл (`main.js` не
+змінюється; Phase 6 entry-points).
 
 **Stage 2 (далі):** `[←]` 7-step pair-atomic commit (§5.0) + `done.json` barrier +
 11-станова recovery-матриця (§5.0.b) + TOCTOU (§5.0.e) + `deriveAutosaveId` (§2.4.1).

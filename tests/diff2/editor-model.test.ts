@@ -131,8 +131,11 @@ describe("editor-model — split stays sound after free edits", () => {
     const v1 = seg(m, "ver1", 0);
     expect(v1.from).toBe(v1.to);
     m = edit(m, { from: v1.from, insert: "Q" }, { role: "ver1", group: 0 });
+    // §1.6.a.2 commit-boundary normalization: ver1 "Q" is non-empty, lacks a
+    // trailing \n, and its group is not the document's last element → "Q\n",
+    // so it does not merge with the following normal line.
     expect(modelToBaseSibling(m)).toEqual({
-      base: "a\nQc\n",
+      base: "a\nQ\nc\n",
       sibling: "a\nb\nc\n",
     });
     assertTiles(m);
@@ -143,7 +146,10 @@ describe("editor-model — split stays sound after free edits", () => {
     const v1 = seg(m, "ver1", 0);
     m = edit(m, { from: v1.to, insert: "Z" }, { role: "ver1", group: 0 });
     const out = modelToBaseSibling(m);
-    expect(out.base).toBe("a\nold\nZc\n");
+    // ver1 becomes "old\nZ"; §1.6.a.2 commit normalization gives the last
+    // line a \n (group is not the document's last element), so "Z" stays a
+    // separate line rather than merging with "c".
+    expect(out.base).toBe("a\nold\nZ\nc\n");
     expect(out.sibling).toBe("a\nnew\nc\n");
     assertTiles(m);
   });

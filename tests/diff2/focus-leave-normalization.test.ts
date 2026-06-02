@@ -42,13 +42,18 @@ describe("§1.6.a.2 focus-leave normalization", () => {
       changes: { from: v1.to - 1, to: v1.to, insert: "" },
       selection: { anchor: v1.from + 1 },
     });
-    // base side: ver1 "abc" lost its \n → merges with the next NORMAL "c\n".
-    expect(pane.getResolved().base).toBe("a\nabcc\n");
+    // LIVE doc now shows the merged line (ver1 lost its \n)…
+    expect(view.state.doc.toString()).toBe("a\nabcXYZ\nc\n");
+    // …but getResolved() is ALREADY correct — commit-boundary normalization
+    // (§1.6.a.2 in fromEditorModel) restores the \n regardless of focus.
+    expect(pane.getResolved().base).toBe("a\nabc\nc\n");
 
-    // Move the caret OUT of ver1 → focus-leave normalization fires.
+    // focus-leave normalization is now a VISUAL nicety: it restores the \n
+    // in the LIVE doc too when the caret leaves ver1.
     view.dispatch({ selection: { anchor: 0 } });
+    expect(view.state.doc.toString()).toBe("a\nabc\nXYZ\nc\n");
     expect(pane.getResolved()).toEqual({
-      base: "a\nabc\nc\n", // \n restored
+      base: "a\nabc\nc\n",
       sibling: "a\nXYZ\nc\n",
     });
   });

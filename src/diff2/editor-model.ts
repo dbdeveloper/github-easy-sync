@@ -117,11 +117,31 @@ export function toEditorModel(joined: string): EditorModel {
 // inverts it to (base, sibling) at commit time.
 export function fromEditorModel(model: EditorModel): string {
   const { doc, structure } = model;
+  // Commit-boundary fail-closed (Stage 1.h / review finding B): the
+  // structure MUST tile [0, doc.length] contiguously. Any gap / overlap
+  // means a desync somewhere upstream would silently drop or mis-attribute
+  // bytes at split(); throw loudly instead of corrupting the vault (§1.3
+  // fail-closed philosophy, applied at the write boundary).
+  assertTiling(structure, doc.length);
+
+  // §1.6.a.2 normalization, enforced at the commit boundary (review
+  // findings E + the focus-leave rule) so it holds however the commit was
+  // reached. A content-bearing segment whose last line lacks a trailing \n
+  // gets one UNLESS its diff-line / line is the document's LAST element —
+  // an EOL-less tail is only valid at end-of-file. The test is POSITIONAL,
+  // not content-based: ver1 and ver2 live on different sides, so "is there
+  // a later element in the document?" (not "a later non-empty segment") is
+  // what decides whether each side's tail would merge into a following one.
+  const lastIdx = structure.length - 1;
+  const needsNl = (s: string): boolean => s.length > 0 && !s.endsWith("\n");
+
   let joined = "";
   for (let i = 0; i < structure.length; i++) {
     const s = structure[i];
     if (s.role === "normal") {
-      joined += emitNormalLines(doc.slice(s.from, s.to));
+      let content = doc.slice(s.from, s.to);
+      if (i < lastIdx && needsNl(content)) content += "\n";
+      joined += emitNormalLines(content);
       continue;
     }
     if (s.role === "ver1") {
@@ -132,8 +152,13 @@ export function fromEditorModel(model: EditorModel): string {
             `followed by its ver2 — structure corrupt`,
         );
       }
-      const v1 = doc.slice(s.from, s.to);
-      const v2 = doc.slice(next.from, next.to);
+      // The group's last segment is ver2 (index i+1). Normalize both sides
+      // only when the group is NOT the document's final element.
+      const groupNotLast = i + 1 < lastIdx;
+      let v1 = doc.slice(s.from, s.to);
+      let v2 = doc.slice(next.from, next.to);
+      if (groupNotLast && needsNl(v1)) v1 += "\n";
+      if (groupNotLast && needsNl(v2)) v2 += "\n";
       joined += v1 + VER_SEPARATOR + v2 + LINE_TERMINATOR;
       i++; // consume the paired ver2
       continue;
@@ -144,6 +169,37 @@ export function fromEditorModel(model: EditorModel): string {
     );
   }
   return joined;
+}
+
+// Verify the structure tiles [0, docLength] with no gap or overlap.
+function assertTiling(structure: Segment[], docLength: number): void {
+  if (structure.length === 0) {
+    if (docLength !== 0) {
+      throw new Error(
+        `editor-model.fromEditorModel: empty structure but doc length ${docLength}`,
+      );
+    }
+    return;
+  }
+  if (structure[0].from !== 0) {
+    throw new Error(
+      `editor-model.fromEditorModel: structure starts at ${structure[0].from}, not 0`,
+    );
+  }
+  for (let i = 1; i < structure.length; i++) {
+    if (structure[i].from !== structure[i - 1].to) {
+      throw new Error(
+        `editor-model.fromEditorModel: gap/overlap before segment ${i} ` +
+          `(prev.to=${structure[i - 1].to}, from=${structure[i].from})`,
+      );
+    }
+  }
+  const end = structure[structure.length - 1].to;
+  if (end !== docLength) {
+    throw new Error(
+      `editor-model.fromEditorModel: structure ends at ${end}, doc length ${docLength}`,
+    );
+  }
 }
 
 // Map the structure through a transaction's changes (DIFF-EDITOR.md §1.8

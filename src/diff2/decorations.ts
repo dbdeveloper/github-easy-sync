@@ -228,6 +228,18 @@ export function buildDecorationSet(
     activeEmptyVer.group === group &&
     activeEmptyVer.role === role;
 
+  // Block widgets are only well-defined at a line boundary. In the EOL-less
+  // edge where ver1 and ver2 share one cmDoc line (e.g. base "abc" /
+  // sibling "XYZ" → "abcXYZ"), the middle marker's anchor is mid-line —
+  // emitting a block widget there is undefined in CM6 (layout throw / bad
+  // render, review finding C). Skip any block widget not at a line boundary;
+  // the top/bottom markers (at the line's start/end) still frame the group.
+  const pushBlock = (anchor: number, widget: WidgetType, side: number): void => {
+    const line = doc.lineAt(anchor);
+    if (anchor !== line.from && anchor !== line.to) return;
+    decos.push(Decoration.widget({ widget, block: true, side }).range(anchor));
+  };
+
   for (let i = 0; i < structure.length; i++) {
     const s = structure[i];
 
@@ -250,30 +262,22 @@ export function buildDecorationSet(
     // Top marker — anchor at ver1 start, or ver2 start when ver1 empty
     // (zero-width point guard, mirrors the legacy anchor rule).
     const topAnchor = v1Empty ? v2.from : v1.from;
-    decos.push(
-      Decoration.widget({
-        widget: new ConflictMarkerWidget(
-          "top",
-          opts.oursLabel,
-          v1.group,
-          opts.isMarkdown,
-          opts.callbacks,
-          v1Empty,
-        ),
-        block: true,
-        side: -1,
-      }).range(topAnchor),
+    pushBlock(
+      topAnchor,
+      new ConflictMarkerWidget(
+        "top",
+        opts.oursLabel,
+        v1.group,
+        opts.isMarkdown,
+        opts.callbacks,
+        v1Empty,
+      ),
+      -1,
     );
 
     // §1.8.a: an activated empty ver1 shows a temporary 1-line container.
     if (v1Empty && isActive(v1.group, "ver1")) {
-      decos.push(
-        Decoration.widget({
-          widget: new EmptyVerActiveWidget(),
-          block: true,
-          side: -1,
-        }).range(topAnchor),
-      );
+      pushBlock(topAnchor, new EmptyVerActiveWidget(), -1);
     }
 
     // ver1 line backgrounds.
@@ -283,30 +287,22 @@ export function buildDecorationSet(
 
     // Middle marker — only when ver2 has content (legacy behavior).
     if (!v2Empty) {
-      decos.push(
-        Decoration.widget({
-          widget: new ConflictMarkerWidget(
-            "middle",
-            opts.theirsLabel,
-            v1.group,
-            opts.isMarkdown,
-            opts.callbacks,
-          ),
-          block: true,
-          side: -1,
-        }).range(v2.from),
+      pushBlock(
+        v2.from,
+        new ConflictMarkerWidget(
+          "middle",
+          opts.theirsLabel,
+          v1.group,
+          opts.isMarkdown,
+          opts.callbacks,
+        ),
+        -1,
       );
     }
 
     // §1.8.a: an activated empty ver2 shows a temporary 1-line container.
     if (v2Empty && isActive(v1.group, "ver2")) {
-      decos.push(
-        Decoration.widget({
-          widget: new EmptyVerActiveWidget(),
-          block: true,
-          side: -1,
-        }).range(v2.from),
-      );
+      pushBlock(v2.from, new EmptyVerActiveWidget(), -1);
     }
 
     // ver2 line backgrounds.
@@ -331,19 +327,17 @@ export function buildDecorationSet(
 
     // Bottom marker — below ver2, or below ver1 when ver2 empty.
     const bottomAnchor = v2Empty ? v1.to : v2.to;
-    decos.push(
-      Decoration.widget({
-        widget: new ConflictMarkerWidget(
-          "bottom",
-          opts.theirsLabel,
-          v1.group,
-          opts.isMarkdown,
-          opts.callbacks,
-          v2Empty,
-        ),
-        block: true,
-        side: 1,
-      }).range(bottomAnchor),
+    pushBlock(
+      bottomAnchor,
+      new ConflictMarkerWidget(
+        "bottom",
+        opts.theirsLabel,
+        v1.group,
+        opts.isMarkdown,
+        opts.callbacks,
+        v2Empty,
+      ),
+      1,
     );
   }
 
