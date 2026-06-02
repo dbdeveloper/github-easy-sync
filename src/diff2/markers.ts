@@ -35,6 +35,9 @@ export interface MarkerWidgetCallbacks {
   // Fired with the chosen resolution for THIS diff group. The DiffPane
   // dispatches the doc replacement + recomputed structure (effect).
   onAction: (group: number, choice: ChunkChoice) => void;
+  // §1.8.a: fired when the user clicks the `<<<<<` / `>>>>>` chars of a
+  // marker whose ver-block is EMPTY → activate that empty ver for typing.
+  onActivateEmptyVer: (group: number, role: "ver1" | "ver2") => void;
 }
 
 // One widget instance per marker line. Equality based on
@@ -57,6 +60,10 @@ export class ConflictMarkerWidget extends WidgetType {
     // Action callbacks. Phase 3 always provides these; tests may
     // pass an empty implementation.
     readonly callbacks: MarkerWidgetCallbacks,
+    // §1.8.a: whether THIS marker's ver-block (top→ver1, bottom→ver2) is
+    // empty. When true the marker chars become a click hit-target to
+    // activate the empty ver. Meaningless for the middle marker.
+    readonly verEmpty: boolean = false,
   ) {
     super();
   }
@@ -66,7 +73,8 @@ export class ConflictMarkerWidget extends WidgetType {
       other.kind === this.kind &&
       other.label === this.label &&
       other.group === this.group &&
-      other.isMarkdown === this.isMarkdown
+      other.isMarkdown === this.isMarkdown &&
+      other.verEmpty === this.verEmpty
     );
   }
 
@@ -74,7 +82,9 @@ export class ConflictMarkerWidget extends WidgetType {
     const line = document.createElement("div");
     line.className = `diff2-marker diff2-marker-${this.kind}`;
 
-    // Marker glyph (5 brackets per R7.2).
+    // Marker glyph (5 brackets per R7.2). For top/bottom markers whose
+    // ver-block is empty, the glyph chars are a click hit-target that
+    // activates the empty ver (§1.8.a); otherwise inert (data-action="none").
     const glyph = document.createElement("span");
     glyph.className = "diff2-marker-glyph";
     glyph.textContent =
@@ -83,6 +93,18 @@ export class ConflictMarkerWidget extends WidgetType {
         : this.kind === "bottom"
           ? ">>>>>"
           : "=====";
+    const role: "ver1" | "ver2" | null =
+      this.kind === "top" ? "ver1" : this.kind === "bottom" ? "ver2" : null;
+    const action = role && this.verEmpty ? `focus-${role}` : "none";
+    glyph.dataset.action = action;
+    if (role && this.verEmpty) {
+      glyph.style.cursor = "pointer";
+      glyph.addEventListener("click", (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        this.callbacks.onActivateEmptyVer(this.group, role);
+      });
+    }
     line.appendChild(glyph);
 
     // Action buttons (R7.5 / R7.6).

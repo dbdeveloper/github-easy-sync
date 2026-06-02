@@ -23,13 +23,19 @@
 //   - docs/tasks/DIFF-EDITOR.md §1 (model), §1.10 (gutter), §1.6 (chunk ops)
 //   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R7
 
-import { EditorState, Transaction, TransactionSpec } from "@codemirror/state";
+import {
+  EditorSelection,
+  EditorState,
+  Transaction,
+  TransactionSpec,
+} from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import type { ChunkChoice, JoinContext } from "./chunk-actions";
 import {
   type BuildOpts,
   diffPaneExtension,
   diffPaneStateField,
+  setActiveEmptyVer,
   setDiffPaneState,
 } from "./decorations";
 import {
@@ -81,6 +87,7 @@ export class DiffPane {
           diffPaneExtension({
             structure: model.structure,
             opts: this.buildOpts(),
+            activeEmptyVer: null,
           }),
           siblingWinsGutter(),
           sentinelGuard,
@@ -157,7 +164,26 @@ export class DiffPane {
     return {
       onAction: (group: number, choice: ChunkChoice) =>
         this.applyToChunk(group, choice),
+      onActivateEmptyVer: (group: number, role: "ver1" | "ver2") =>
+        this.activateEmptyVer(group, role),
     };
+  }
+
+  // §1.8.a — activate an EMPTY ver-block so the next typed char grows it
+  // (places the caret at the block's point + sets the explicit active
+  // state). No-op if the block isn't found or isn't empty.
+  private activateEmptyVer(group: number, role: "ver1" | "ver2"): void {
+    const field = this.view.state.field(diffPaneStateField, false);
+    if (!field) return;
+    const seg = field.structure.find(
+      (s) => s.role === role && s.group === group,
+    );
+    if (!seg || seg.from !== seg.to) return; // only for empty ver-blocks
+    this.view.dispatch({
+      selection: EditorSelection.single(seg.from),
+      effects: setActiveEmptyVer.of({ group, role }),
+    });
+    this.view.focus();
   }
 
   // Current model read from the live EditorState (source of truth).
@@ -178,6 +204,7 @@ export class DiffPane {
       effects: setDiffPaneState.of({
         structure: next.structure,
         opts: this.buildOpts(),
+        activeEmptyVer: null, // a chunk action clears any activation
       }),
     });
   }

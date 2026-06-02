@@ -33,7 +33,12 @@ import {
   StateField,
   Text,
 } from "@codemirror/state";
-import { Decoration, DecorationSet, EditorView } from "@codemirror/view";
+import {
+  Decoration,
+  DecorationSet,
+  EditorView,
+  WidgetType,
+} from "@codemirror/view";
 import {
   type ActiveBlock,
   mapStructure,
@@ -59,14 +64,52 @@ const lineOurs = Decoration.line({ class: OURS_LINE_CLASS });
 const lineTheirs = Decoration.line({ class: THEIRS_LINE_CLASS });
 const wordMark = Decoration.mark({ class: WORD_MARK_CLASS });
 
+// §1.8.a temporary 1-line container shown when an empty ver-block is
+// activated, so the caret has a visible spot to type into. Visual only —
+// it adds no characters to the doc (the ver content stays "" until typed).
+class EmptyVerActiveWidget extends WidgetType {
+  eq(): boolean {
+    return true;
+  }
+  toDOM(): HTMLElement {
+    const el = document.createElement("div");
+    el.className = "diff2-empty-ver-active";
+    return el;
+  }
+  ignoreEvent(): boolean {
+    return false;
+  }
+}
+
 export interface DiffPaneFieldState {
   structure: Segment[];
   opts: BuildOpts;
+  // §1.8.a: an explicitly-activated EMPTY ver-block (click on its marker,
+  // or 1b.4b keyboard stop). Overrides the position heuristic so the next
+  // typed char grows THIS block (a zero-width ver shares its position with
+  // a neighbour, so the heuristic alone can't address it). null when no
+  // empty ver is activated. Folded into this field (not a separate one)
+  // so update() reads it atomically — no field-ordering trap.
+  activeEmptyVer: ActiveBlock | null;
 }
 
 // Effect carrying a recomputed structure (chunk-action path). DiffPane
 // dispatches this alongside the doc change in applyToChunk / resolveAll.
 export const setDiffPaneState = StateEffect.define<DiffPaneFieldState>();
+
+// Effect activating an empty ver-block (§1.8.a). DiffPane dispatches it
+// with a caret placed at the block's point.
+export const setActiveEmptyVer = StateEffect.define<ActiveBlock | null>();
+
+// Locate a (group, role) block in a structure.
+function blockOf(
+  structure: Segment[],
+  block: ActiveBlock,
+): Segment | undefined {
+  return structure.find(
+    (s) => s.role === block.role && s.group === block.group,
+  );
+}
 
 // The structure-of-record. See module header for the two update paths.
 export const diffPaneStateField = StateField.define<DiffPaneFieldState | null>({
@@ -76,20 +119,43 @@ export const diffPaneStateField = StateField.define<DiffPaneFieldState | null>({
   update(value, tr) {
     for (const e of tr.effects) {
       if (e.is(setDiffPaneState)) return e.value;
+      if (e.is(setActiveEmptyVer) && value) {
+        return { ...value, activeEmptyVer: e.value };
+      }
     }
-    if (!value || !tr.docChanged) return value;
-    // Free-edit path: map positions only. `active` = the block the
-    // caret sat in BEFORE the edit, so an insert at a block edge / into
-    // an empty ver grows the right block (§1.8.a). Full §1.8 nav is
-    // 1b.4; this minimal derivation keeps typing sound now.
-    const active = activeBlockAt(
-      value.structure,
-      tr.startState.selection.main.head,
-    );
-    return {
-      structure: mapStructure(value.structure, tr.changes as ChangeDesc, active),
-      opts: value.opts,
-    };
+    if (!value) return value;
+
+    if (tr.docChanged) {
+      // Free-edit path: map positions only. `active` = the explicitly
+      // activated empty ver (§1.8.a) if any, else the block the caret sat
+      // in BEFORE the edit (heuristic, correct for strict-interior carets).
+      const active =
+        value.activeEmptyVer ??
+        activeBlockAt(value.structure, tr.startState.selection.main.head);
+      const structure = mapStructure(
+        value.structure,
+        tr.changes as ChangeDesc,
+        active,
+      );
+      // Clear the activation once the block gains content — the heuristic
+      // takes over from there (caret now sits strictly inside it).
+      let activeEmptyVer = value.activeEmptyVer;
+      if (activeEmptyVer) {
+        const b = blockOf(structure, activeEmptyVer);
+        if (!b || b.to !== b.from) activeEmptyVer = null;
+      }
+      return { structure, opts: value.opts, activeEmptyVer };
+    }
+
+    // Selection-only change: clear activation if the caret left the
+    // activation point (a stale activation would misattribute later edits).
+    if (value.activeEmptyVer && tr.selection) {
+      const b = blockOf(value.structure, value.activeEmptyVer);
+      if (!b || tr.newSelection.main.head !== b.from) {
+        return { ...value, activeEmptyVer: null };
+      }
+    }
+    return value;
   },
 });
 
@@ -98,7 +164,12 @@ const decorationsProvider = EditorView.decorations.compute(
   (state) => {
     const field = state.field(diffPaneStateField);
     if (!field) return Decoration.none;
-    return buildDecorationSet(state.doc, field.structure, field.opts);
+    return buildDecorationSet(
+      state.doc,
+      field.structure,
+      field.opts,
+      field.activeEmptyVer,
+    );
   },
 );
 
@@ -127,8 +198,13 @@ export function buildDecorationSet(
   doc: Text,
   structure: Segment[],
   opts: BuildOpts,
+  activeEmptyVer: ActiveBlock | null = null,
 ): DecorationSet {
   const decos: ReturnType<typeof lineCommon.range>[] = [];
+  const isActive = (group: number, role: "ver1" | "ver2"): boolean =>
+    activeEmptyVer !== null &&
+    activeEmptyVer.group === group &&
+    activeEmptyVer.role === role;
 
   for (let i = 0; i < structure.length; i++) {
     const s = structure[i];
@@ -160,11 +236,23 @@ export function buildDecorationSet(
           v1.group,
           opts.isMarkdown,
           opts.callbacks,
+          v1Empty,
         ),
         block: true,
         side: -1,
       }).range(topAnchor),
     );
+
+    // §1.8.a: an activated empty ver1 shows a temporary 1-line container.
+    if (v1Empty && isActive(v1.group, "ver1")) {
+      decos.push(
+        Decoration.widget({
+          widget: new EmptyVerActiveWidget(),
+          block: true,
+          side: -1,
+        }).range(topAnchor),
+      );
+    }
 
     // ver1 line backgrounds.
     eachLineStart(doc, v1.from, v1.to, (from) =>
@@ -182,6 +270,17 @@ export function buildDecorationSet(
             opts.isMarkdown,
             opts.callbacks,
           ),
+          block: true,
+          side: -1,
+        }).range(v2.from),
+      );
+    }
+
+    // §1.8.a: an activated empty ver2 shows a temporary 1-line container.
+    if (v2Empty && isActive(v1.group, "ver2")) {
+      decos.push(
+        Decoration.widget({
+          widget: new EmptyVerActiveWidget(),
           block: true,
           side: -1,
         }).range(v2.from),
@@ -218,6 +317,7 @@ export function buildDecorationSet(
           v1.group,
           opts.isMarkdown,
           opts.callbacks,
+          v2Empty,
         ),
         block: true,
         side: 1,
