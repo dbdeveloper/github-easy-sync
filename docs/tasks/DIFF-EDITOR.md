@@ -121,11 +121,25 @@ hotkeys §1.9), **fail-closed на коміті**, **empty→`\n`**. DiffPane щ
 30, Home/End на загорнутих візуальних рядках, delete-to-EOL (Ctrl+K — не в defaultKeymap, поки
 не прив'язано). Чек-лист — **для всього плагіна** (не лише редактора), окремий док для manual-тестерів.
 
-**Stage 2 (далі):** `[←]` 7-step pair-atomic commit (§5.0) + `done.json` barrier +
-11-станова recovery-матриця (§5.0.b) + TOCTOU (§5.0.e) + `deriveAutosaveId` (§2.4.1).
-Поточний `exit-protocol.ts` — ще наївний 2-call.
+**Послідовність далі — переглянуто (chicken-and-egg):** 7-step commit залежить від
+autosave-каталогу (`done.json` у `.diff2-autosave/<id>/`, TOCTOU звіряє `meta.baseShaAtStart`,
+recovery сканує каталог), який створює session-start протокол. Тому спільний фундамент —
+**окремо й першим**; 7-step і live-autosave обидва на ньому (можна паралельно). history-log/cursor
+самому коміту НЕ потрібні — лише meta+snapshots+done.json.
 
-**Stage 3 (далі):** Phase 5 — persistent autosave (§2–§4).
+- **Stage 2.0 — autosave-каталог фундамент (спільний):** `deriveAutosaveId` (§2.4.1) +
+  session-start протокол (§2.5.a: mkdir, snapshots, `meta.json` з SHA, init `cursor.json` +
+  порожній `history.jsonl`) + reuse-snapshot (§2.5.b).
+- **Stage 2.1 — 7-step pair-atomic commit:** §5.0 + `done.json` barrier + 11-станова
+  recovery-матриця (§5.0.b) + TOCTOU (§5.0.e). Замінює наївний 2-call `exit-protocol.ts`.
+- **Stage 3 — live autosave:** REDO-log `history.jsonl` (§2.6–§2.8) + cursor-timer (§2.9) +
+  recovery dialog (§3) + cleanup/TTL (§4). «REDO» = forward-replay для crash-recovery
+  (`ChangeSet.toJSON` записує from-to-insert), НЕ CM6-`redo()`.
+
+Stage 2.1 та Stage 3 спираються на 2.0; порядок між ними вільний.
+
+**Manual/Playwright покриття** (layout-залежне + mobile + наскрізний UI, чого не ловлять
+автотести) — у [`MANUAL-TEST-CHECKLIST.md`](./MANUAL-TEST-CHECKLIST.md) (для всього плагіна).
 
 **Ратифіковані рішення:** `diff` лишається v9 (у `meta.json` пишемо ФАКТИЧНУ версію,
 не 5.2.0; DEFAULT `diffLines`, не `newlineIsToken` — інакше ламає §1.2); line-wrap
