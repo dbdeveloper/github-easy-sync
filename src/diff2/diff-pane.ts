@@ -49,6 +49,7 @@ import {
   setDiffPaneState,
 } from "./decorations";
 import {
+  type ActiveBlock,
   assertTiling,
   baseSiblingToModel,
   type EditorModel,
@@ -80,6 +81,21 @@ const DEFAULT_OPTS: DiffPaneOpts = {
   isMarkdown: false,
 };
 
+// §1.8.a init activation: the initial caret is at position 0. If the document
+// starts with an EMPTY ver-block (a `\1<ver2>` diff → empty ver1 at [0,0], or
+// the mirror), return it so the field expands it on open. Only a ver sitting
+// EXACTLY at [0,0] qualifies (ver1 precedes ver2 in nav order; the §1.6
+// invariant means at most one side is empty). Exported for unit testing.
+export function initialEmptyVerAt0(structure: Segment[]): ActiveBlock | null {
+  for (const s of structure) {
+    if (s.from > 0) break; // ordered; nothing else can start at 0
+    if ((s.role === "ver1" || s.role === "ver2") && s.from === 0 && s.to === 0) {
+      return { role: s.role, group: s.group };
+    }
+  }
+  return null;
+}
+
 export class DiffPane {
   private view: EditorView;
   private readonly opts: DiffPaneOpts;
@@ -100,7 +116,11 @@ export class DiffPane {
           diffPaneExtension({
             structure: model.structure,
             opts: this.buildOpts(),
-            activeEmptyVer: null,
+            // §1.8.a init: the default caret is at 0; if a ver-block sits EMPTY
+            // there (a leading `\1<ver2>` diff — empty ver1 at [0,0]), activate
+            // it so it expands and the cursor visibly lands inside, rather than
+            // sitting at a zero-width invisible spot.
+            activeEmptyVer: initialEmptyVerAt0(model.structure),
           }),
           siblingWinsGutter(),
           sentinelGuard,
