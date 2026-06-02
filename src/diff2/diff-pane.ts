@@ -99,6 +99,7 @@ export class DiffPane {
           collapseGuard,
           selectionRules(),
           normalizeGuard,
+          emptyVerArrowNav,
           this.hotkeys(),
           EditorView.lineWrapping,
         ],
@@ -534,6 +535,80 @@ const normalizeGuard = EditorState.transactionFilter.of(
 
     return [tr, { changes: { from: left.to, insert: "\n" } }];
   },
+);
+
+// §1.8 / §1.8.a (1b.4b): the EMPTY ver-block (zero-width point) that a plain
+// vertical caret move from `caretHead` to `targetHead` would skip over (an
+// empty ver has no visual line, so default nav jumps past it). Returns the
+// closest such ver in the direction of travel, or null. `targetHead` comes
+// from CM6's own moveVertically (wrap-aware) — geometry stays in CM6.
+export function findEmptyVerSkipped(
+  structure: Segment[],
+  caretHead: number,
+  targetHead: number,
+): { group: number; role: "ver1" | "ver2"; point: number } | null {
+  if (targetHead === caretHead) return null;
+  const down = targetHead > caretHead;
+  let best: { group: number; role: "ver1" | "ver2"; point: number } | null =
+    null;
+  for (const s of structure) {
+    if (s.role === "normal" || s.from !== s.to) continue; // empty vers only
+    const p = s.from;
+    const skipped = down
+      ? p > caretHead && p <= targetHead
+      : p >= targetHead && p < caretHead;
+    if (!skipped) continue;
+    const cand = { group: s.group, role: s.role, point: p };
+    if (down) return cand; // closest below = first in doc order
+    best = cand; // closest above = last match while ascending
+  }
+  return best;
+}
+
+// Plain (no-Shift) ↑/↓ caret nav that STOPS at an empty ver-block instead of
+// skipping it (§1.8). Reuses the §1.8.a activation state + widget: entering
+// sets activeEmptyVer (caret at the ver's point, column 0 — it's empty);
+// pressing the arrow again clears it and continues in that direction. The
+// "where would the arrow land" geometry is delegated to view.moveVertically
+// (wrap-aware), so this needs real layout — verified manually, not in
+// happy-dom (the pure findEmptyVerSkipped is unit-tested instead).
+function makeArrowNav(forward: boolean) {
+  return (view: EditorView): boolean => {
+    const field = view.state.field(diffPaneStateField, false);
+    if (!field || field.structure.length === 0) return false;
+    const cur = view.state.selection.main;
+    if (!cur.empty) return false; // plain caret only (Shift-arrow is selection)
+
+    const target = view.moveVertically(cur, forward).head;
+
+    // Already in an activated empty ver → this arrow leaves it.
+    if (field.activeEmptyVer) {
+      view.dispatch({
+        selection: EditorSelection.cursor(target),
+        effects: setActiveEmptyVer.of(null),
+      });
+      return true;
+    }
+
+    const skipped = findEmptyVerSkipped(field.structure, cur.head, target);
+    if (!skipped) return false; // nothing skipped → default nav
+
+    view.dispatch({
+      selection: EditorSelection.cursor(skipped.point),
+      effects: setActiveEmptyVer.of({
+        group: skipped.group,
+        role: skipped.role,
+      }),
+    });
+    return true;
+  };
+}
+
+const emptyVerArrowNav = Prec.high(
+  keymap.of([
+    { key: "ArrowDown", run: makeArrowNav(true) },
+    { key: "ArrowUp", run: makeArrowNav(false) },
+  ]),
 );
 
 // True when `group`'s ver2 is the last segment in the structure (so the

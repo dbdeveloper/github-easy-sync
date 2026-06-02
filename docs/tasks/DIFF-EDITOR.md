@@ -50,8 +50,11 @@
 - ✅ **1b.4a** — активація порожніх ver §1.8.a: `activeEmptyVer` стан + marker `data-action`
   (focus-ver1/ver2 лише коли порожній) + клік→активація + `EmptyVerActiveWidget`. Typing
   росте активований ver; clear на content-gain / caret-leave.
-- ⏸️ **1b.4b** — keyboard «стоп на порожньому ver» при стрілках: **відкладено** (layout-залежне,
-  не тестується в happy-dom, UX-only; порожні ver досяжні кліком/кнопками).
+- ✅ **1b.4b** — keyboard «стоп на порожньому ver» при стрілках §1.8 (`diff-pane.ts`
+  `emptyVerArrowNav` + `findEmptyVerSkipped`): plain ↑/↓ зупиняється на порожньому ver
+  (геометрія делегована `view.moveVertically` → wrap-aware); вхід ставить колонку 0 + reuse
+  `activeEmptyVer`/widget (1b.4a); повторна стрілка лишає блок. Pure-вирішувач + state-переходи
+  тестовані; фінальний geometry-крок — manual (happy-dom без layout).
 - ✅ **1b.5** — auto-collapse §1.6 (`collapseGuard` у `diff-pane.ts`): вільний edit, що робить
   `ver1==ver2` byte-exact, дописує колапс у ТУ Ж транзакцію (`[tr, spec]` + `setDiffPaneState`):
   обидва порожні → remove (`neither`); однаковий непорожній → apply ver1 (`ours`). Combined →
@@ -67,8 +70,8 @@
   `Ctrl+Backspace` remove, `Ctrl+Shift+Enter` both, `Ctrl+Shift+Backspace` neither,
   `Ctrl+Shift+.` join (md-only). Активні лише коли каретка у ver-блоці (інакше inert).
 
-    **✅ Stage 1 ЗАВЕРШЕНО** (модель §1 + уся поведінка редактора). Єдиний відкладений пункт —
-    **1b.4b** (keyboard-стоп на порожніх ver, UX-only, не блокує).
+    **✅ Stage 1 ЗАВЕРШЕНО ПОВНІСТЮ** — модель §1 + уся поведінка редактора, **без відкладань**
+    (1b.4b теж зроблено). Усі §1.1–§1.10 реалізовані.
 
 *Поточний стан редагування:* live + безпечне + повна §1 модель (selection §1.7, sentinel §1.3,
 auto-collapse §1.6, гліф `↵` §1.6.a.1, normalization §1.6.a.2, hotkeys §1.9). DiffPane ще НЕ
