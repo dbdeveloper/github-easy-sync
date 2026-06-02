@@ -458,7 +458,10 @@ function relayout(items: SegItem[]): EditorModel {
 // inverse (undo) transaction; symmetrically, the undo tx's own setDiffPaneState
 // is inverted on redo. Free edits carry no setDiffPaneState (structure is
 // remapped from the inverse changes), so they need no inversion here.
-const structureHistory = invertedEffects.of((tr) => {
+// Exported so the Stage-3b history-replay path can build a recovery editor with
+// the SAME undo semantics (replay dispatches setDiffPaneState on every block;
+// this inverts them so undo-after-replay walks the per-block trajectory).
+export const structureHistory = invertedEffects.of((tr) => {
   for (const e of tr.effects) {
     if (e.is(setDiffPaneState)) {
       const prev = tr.startState.field(diffPaneStateField, false);
