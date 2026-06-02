@@ -46,6 +46,7 @@ import {
 } from "./joined-doc";
 import { siblingWinsGutter } from "./line-numbers";
 import type { MarkerWidgetCallbacks } from "./markers";
+import { selectionRules } from "./selection-rules";
 
 export interface DiffPaneOpts {
   oursLabel: string;
@@ -83,6 +84,7 @@ export class DiffPane {
           }),
           siblingWinsGutter(),
           sentinelGuard,
+          selectionRules(),
           EditorView.lineWrapping,
         ],
       }),
