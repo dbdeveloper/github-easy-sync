@@ -1271,6 +1271,16 @@ Step  3. siblingBytes = await vault.adapter.readBinary(siblingPath)
 Step  4. baseShaAtStart    = sha(baseBytes)     // in-memory hash
 Step  5. siblingShaAtStart = sha(siblingBytes)
 
+Step  5.5 (PLANNED §2.5 joinedDocSha). joined = build(baseStr, siblingStr)
+          joinedDocSha = sha(utf8(joined))
+          // ВСЕ in-memory, ДО будь-якого disk-write. meta.json write-once
+          // immutable і несе joinedDocSha → build + hash МУСЯТЬ передувати
+          // step 10. Mount-шлях усе одно будує joined для рендера редактора
+          // (baseSiblingToModel → build → toEditorModel), тож НЕ рахуємо двічі:
+          // прокинути joined (або joinedDocSha) з mount-шляху у startSession.
+          // build() кидає на \0/\1 collision — collision-free гарантує
+          // findSentinelCollision у mount-шляху (§1.3), який біжить ПЕРЕД цим.
+
 Step  6. atomicWriteFile(.diff2-autosave/<conflictId>/base.snapshot,    baseBytes)
 Step  7. atomicWriteFile(.diff2-autosave/<conflictId>/sibling.snapshot, siblingBytes)
 
@@ -1287,8 +1297,7 @@ Step 10. atomicWriteFile(.diff2-autosave/<conflictId>/meta.json, {
              siblingPath,
              baseShaAtStart,    // bytes-binding: гарантовано match snapshot
              siblingShaAtStart,
-             joinAlgoVersion,
-             joinAlgoOptions,
+             joinedDocSha,      // PLANNED §2.5: замінює joinAlgoVersion/joinAlgoOptions
          })
          // ← COMMIT POINT. Якщо crash до цього кроку — на recovery нема
          //    meta.json → cleanup (умова 1 §4.2) → fresh session.
