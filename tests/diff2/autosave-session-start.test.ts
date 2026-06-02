@@ -12,11 +12,11 @@ import * as crypto from "crypto";
 import { Vault as MockVault } from "../../mock-obsidian";
 import type { Vault } from "obsidian";
 import { calculateGitBlobSHA } from "../../src/utils";
+import { build } from "../../src/diff2/joined-doc";
 import {
   AUTOSAVE_ROOT,
-  JOIN_ALGO_VERSION,
   autosaveDir,
-  classifyOpen,
+  classifyReopen,
   readMeta,
   startSession,
   type AutosaveMeta,
@@ -55,8 +55,10 @@ describe("startSession — §2.5.a", () => {
     expect(meta.conflictId).toBe(id);
     expect(meta.v).toBe(1);
     expect(meta.createdAt).toBe(NOW);
-    expect(meta.joinAlgoVersion).toBe(JOIN_ALGO_VERSION);
-    expect(meta.joinAlgoOptions).toEqual({});
+    // joinedDocSha = SHA(build(base, sibling)) — the replay-validity fingerprint.
+    expect(meta.joinedDocSha).toBe(
+      await calculateGitBlobSHA(enc(build("base content\n", "sibling content\n"))),
+    );
   });
 
   it("snapshots are byte-exact copies and meta SHAs match them", async () => {
@@ -99,9 +101,10 @@ describe("startSession — §2.5.a", () => {
   });
 });
 
-describe("classifyOpen — §2.5.b detection only", () => {
+describe("classifyReopen — §3.1 detection (joinedDocSha gate)", () => {
   let fx: ReturnType<typeof fixture>;
   const id = "tracked-xyz";
+  const reopen = () => classifyReopen(fx.vault, id, "base.md", "sibling.md");
 
   beforeEach(async () => {
     fx = fixture();
@@ -111,37 +114,65 @@ describe("classifyOpen — §2.5.b detection only", () => {
   afterEach(() => fs.rmSync(fx.root, { recursive: true, force: true }));
 
   it("no meta → fresh", async () => {
-    const status = await classifyOpen(fx.vault, id, "base.md", "sibling.md");
-    expect(status.kind).toBe("fresh");
+    expect((await reopen()).kind).toBe("fresh");
   });
 
-  it("vault unchanged since session start → reuse", async () => {
+  it("vault unchanged → resume", async () => {
     const meta = await startSession(fx.vault, id, "base.md", "sibling.md", NOW);
-    const status = await classifyOpen(fx.vault, id, "base.md", "sibling.md");
-    expect(status.kind).toBe("reuse");
-    if (status.kind === "reuse") expect(status.meta).toEqual(meta);
+    const status = await reopen();
+    expect(status.kind).toBe("resume");
+    if (status.kind === "resume") expect(status.meta).toEqual(meta);
   });
 
-  it("base changed since session start → mismatch with current SHAs", async () => {
+  it("input changed (joined differs) → vault-changed with current SHAs", async () => {
     await startSession(fx.vault, id, "base.md", "sibling.md", NOW);
     await fx.vault.adapter.writeBinary("base.md", enc("base v2 — pulled\n"));
-
-    const status = await classifyOpen(fx.vault, id, "base.md", "sibling.md");
-    expect(status.kind).toBe("mismatch");
-    if (status.kind === "mismatch") {
-      expect(status.currentBaseSha).toBe(
-        await calculateGitBlobSHA(enc("base v2 — pulled\n")),
-      );
+    const status = await reopen();
+    expect(status.kind).toBe("vault-changed");
+    if (status.kind === "vault-changed") {
+      expect(status.currentBaseSha).toBe(await calculateGitBlobSHA(enc("base v2 — pulled\n")));
       expect(status.currentBaseSha).not.toBe(status.meta.baseShaAtStart);
-      // sibling unchanged → its current SHA still matches meta
       expect(status.currentSiblingSha).toBe(status.meta.siblingShaAtStart);
     }
   });
 
-  it("corrupt meta.json → fresh (treated as no session)", async () => {
+  it("inputs SAME but joinedDocSha differs (library drift) → library-drift", async () => {
+    await startSession(fx.vault, id, "base.md", "sibling.md", NOW);
+    // Simulate a different diff-library output for identical inputs by tampering
+    // meta.joinedDocSha while leaving base/sibling untouched.
+    const meta = (await readMeta(fx.vault, id))!;
+    await fx.vault.adapter.write(
+      `${autosaveDir(id)}/meta.json`,
+      JSON.stringify({ ...meta, joinedDocSha: "deadbeef".padEnd(40, "0") }),
+    );
+    expect((await reopen()).kind).toBe("library-drift");
+  });
+
+  it("a \\0 sentinel entered an input since start → sentinel (route to §1.3)", async () => {
+    await startSession(fx.vault, id, "base.md", "sibling.md", NOW);
+    await fx.vault.adapter.writeBinary("base.md", enc("base\0poisoned\n"));
+    expect((await reopen()).kind).toBe("sentinel");
+  });
+
+  it("snapshot integrity failure → corrupt", async () => {
+    await startSession(fx.vault, id, "base.md", "sibling.md", NOW);
+    await fx.vault.adapter.writeBinary(`${autosaveDir(id)}/base.snapshot`, enc("tampered\n"));
+    const status = await reopen();
+    expect(status.kind).toBe("corrupt");
+    if (status.kind === "corrupt") expect(status.reason).toBe("snapshot-integrity");
+  });
+
+  it("input file removed since start → corrupt (input-missing)", async () => {
+    await startSession(fx.vault, id, "base.md", "sibling.md", NOW);
+    await fx.vault.adapter.remove("base.md");
+    const status = await reopen();
+    expect(status.kind).toBe("corrupt");
+    if (status.kind === "corrupt") expect(status.reason).toBe("input-missing");
+  });
+
+  it("corrupt meta.json → fresh (readMeta degrades to null)", async () => {
     await startSession(fx.vault, id, "base.md", "sibling.md", NOW);
     await fx.vault.adapter.write(`${autosaveDir(id)}/meta.json`, "{ not json");
-    const status = await classifyOpen(fx.vault, id, "base.md", "sibling.md");
-    expect(status.kind).toBe("fresh");
+    expect((await reopen()).kind).toBe("fresh");
   });
 });

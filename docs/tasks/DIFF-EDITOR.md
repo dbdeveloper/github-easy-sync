@@ -184,9 +184,9 @@ Stage 2.1 та Stage 3 спираються на 2.0; порядок між ни
 **Manual/Playwright покриття** (layout-залежне + mobile + наскрізний UI, чого не ловлять
 автотести) — у [`docs/MANUAL-TEST-CHECKLIST.md`](../MANUAL-TEST-CHECKLIST.md) (English, для всього плагіна).
 
-**Ратифіковані рішення:** `diff` лишається v9 (у `meta.json` пишемо ФАКТИЧНУ версію,
-не 5.2.0; DEFAULT `diffLines`, не `newlineIsToken` — інакше ламає §1.2); line-wrap
-завжди ON ⇒ `↵` скрізь (§1.6.a); sibling-wins нумерація (§1.10).
+**Ратифіковані рішення:** DEFAULT `diffLines`, не `newlineIsToken` — інакше ламає §1.2;
+line-wrap завжди ON ⇒ `↵` скрізь (§1.6.a); sibling-wins нумерація (§1.10). (Версію diff
+у `meta.json` НЕ зберігаємо — replay-валідність гарантує `joinedDocSha`, §2.5.)
 
 ---
 

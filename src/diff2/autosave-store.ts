@@ -25,17 +25,11 @@
 import { normalizePath, type Vault } from "obsidian";
 import { calculateGitBlobSHA } from "../utils";
 import { atomicWriteFile } from "../sync2/atomic-write";
+import { build } from "./joined-doc";
 
 export const AUTOSAVE_ROOT = ".diff2-autosave";
 
-// The ACTUAL bundled `diff` version. Round-trip (build∘split) is
-// version-independent, so this is recorded ONLY for Stage-3 history-replay
-// offset-stability validation (§1.5 / §2.5) — a future `diff` bump is a
-// one-line change here, not a correctness risk.
-export const JOIN_ALGO_VERSION = "diff@9.0.0";
-// We call diffLines with NO options (the DEFAULT); see joined-doc.ts header
-// for why {newlineIsToken:true} (the doc's stale value) breaks the §1.2 model.
-export const JOIN_ALGO_OPTIONS: Record<string, unknown> = {};
+const utf8Decode = (bytes: ArrayBuffer): string => new TextDecoder().decode(bytes);
 
 // ── conflict-id derivation (§2.4 / §2.4.1) ───────────────────────────
 
@@ -116,8 +110,13 @@ export interface AutosaveMeta {
   siblingPath: string;
   baseShaAtStart: string;
   siblingShaAtStart: string;
-  joinAlgoVersion: string;
-  joinAlgoOptions: Record<string, unknown>;
+  // §2.5 joinedDocSha — git-blob SHA of build(base, sibling) (the joined `\0`/`\1`
+  // string, which serializes BOTH the clean doc and the structure partition).
+  // Replaces joinAlgoVersion/joinAlgoOptions: replay is valid iff a fresh
+  // build() reproduces this fingerprint, which detects diff-library drift
+  // DIRECTLY (no version tracking). Drives the replay-validity gate in
+  // classifyReopen; orthogonal to the input SHAs (which drive the dialog).
+  joinedDocSha: string;
 }
 
 const utf8 = (s: string): ArrayBuffer =>
@@ -131,6 +130,14 @@ const utf8 = (s: string): ArrayBuffer =>
 // trust meta without re-hashing snapshots (defence-in-depth still re-checks).
 // Each write is itself crash-safe via atomicWriteFile (temp + rename). `nowIso`
 // is injectable for deterministic tests.
+//
+// SINGLE-READ INVARIANT (§2.5.a): baseShaAtStart, siblingShaAtStart,
+// joinedDocSha AND both snapshots all derive from ONE read of the input bytes —
+// build() takes decode(baseBytes), never a separate adapter.read — so the meta
+// is internally consistent (no intra-start TOCTOU). build() + joinedDocSha run
+// BEFORE mkdir, so a `\0`/`\1` collision throw leaves NO autosave dir at all
+// (fail before touching disk). The caller (mount §1.3) guarantees collision-
+// free input in practice; here we simply let build() throw.
 export async function startSession(
   vault: Vault,
   conflictId: string,
@@ -138,12 +145,16 @@ export async function startSession(
   siblingPath: string,
   nowIso: string = new Date().toISOString(),
 ): Promise<AutosaveMeta> {
-  await ensureDir(vault, autosaveDir(conflictId)); // step 1 (idempotent)
+  // Steps 2–5.5 — read inputs ONCE, derive every fingerprint from those bytes.
+  const baseBytes = await vault.adapter.readBinary(basePath);
+  const siblingBytes = await vault.adapter.readBinary(siblingPath);
+  const baseShaAtStart = await calculateGitBlobSHA(baseBytes);
+  const siblingShaAtStart = await calculateGitBlobSHA(siblingBytes);
+  const joinedDocSha = await calculateGitBlobSHA(
+    utf8(build(utf8Decode(baseBytes), utf8Decode(siblingBytes))),
+  ); // may throw on \0/\1 collision — before any disk write
 
-  const baseBytes = await vault.adapter.readBinary(basePath); // step 2
-  const siblingBytes = await vault.adapter.readBinary(siblingPath); // step 3
-  const baseShaAtStart = await calculateGitBlobSHA(baseBytes); // step 4
-  const siblingShaAtStart = await calculateGitBlobSHA(siblingBytes); // step 5
+  await ensureDir(vault, autosaveDir(conflictId)); // step 1 (idempotent), after build
 
   await atomicWriteFile(vault, baseSnapshotPath(conflictId), baseBytes); // 6
   await atomicWriteFile(vault, siblingSnapshotPath(conflictId), siblingBytes); // 7
@@ -162,8 +173,7 @@ export async function startSession(
     siblingPath,
     baseShaAtStart,
     siblingShaAtStart,
-    joinAlgoVersion: JOIN_ALGO_VERSION,
-    joinAlgoOptions: JOIN_ALGO_OPTIONS,
+    joinedDocSha,
   };
   await atomicWriteFile(vault, metaPath(conflictId), utf8(JSON.stringify(meta))); // step 10 — COMMIT POINT
   return meta;
@@ -182,53 +192,92 @@ export async function readMeta(
   }
 }
 
-// ── reopen detection (§2.5.b) — DETECTION ONLY ───────────────────────
+// ── reopen classification (§3.1) — DETECTION ONLY ────────────────────
 
-// On `openDiffPane(conflictId)` decide how to open. This returns a status; it
-// does NOT render the recovery dialog or run cleanup — those are Stage 3
-// (§3.2 / §3.2.a) / §4. Snapshots are preserved untouched so the caller has
-// the ground-truth bytes to act on.
+// On `openDiffPane(conflictId)` decide how to open. Returns a status; does NOT
+// render the recovery dialog or run cleanup (Stage 3 §3.2/§3.2.a, §4). The
+// REPLAY-VALIDITY gate is `joinedDocSha`: replay is valid iff a fresh
+// build(currentBase, currentSibling) reproduces meta.joinedDocSha. The input
+// SHAs are ORTHOGONAL — they choose the DIALOG (clean resume vs vault-changed),
+// not whether replay can run. The two can disagree: a whitespace-only input
+// change that diffLines collapses leaves joinedDocSha matching → replay is
+// genuinely valid → "resume" (joinedDocSha governs).
 //
-// NOTE for the Stage 2.1 open-flow caller: unlike readMeta (which degrades to
-// null on a missing/corrupt meta), this THROWS if basePath/siblingPath no
-// longer exist — readBinary rejects. If an interleaved sync can remove a
-// tracked conflict's base between sessions, the caller must catch and fall
-// back to "fresh" (or this gains a fourth status). Decide when wiring 2.1.
-// The `reuse` verdict only compares vault SHAs to meta — it does NOT confirm
-// the snapshot files still exist/are intact (snapshot integrity is §4.2); the
-// 2.1 reuse path must re-check snapshot presence before trusting them.
-export type AutosaveOpenStatus =
-  | { kind: "fresh" } // no usable session → caller runs startSession
-  | { kind: "reuse"; meta: AutosaveMeta } // vault unchanged since session start
+//   resume        → joined reproduces        → §3.2 normal recovery dialog
+//   library-drift → joined differs, inputs SAME → diff lib changed; replay
+//                    impossible AND restore-from-snapshot can't help either
+//                    (build(snapshot) ≠ joinedDocSha too) → start fresh (Notice)
+//   vault-changed → joined differs, inputs DIFFER → §3.2.a (the restore path
+//                    re-checks build(snapshot) === joinedDocSha itself)
+//   corrupt       → meta unparseable / snapshot-integrity fail / input missing
+//                    → cleanup → fresh
+//   sentinel      → a \0/\1 entered an input since session start (build throws)
+//                    → route to the §1.3 "open externally" outcome
+//   fresh         → no meta
+export type ReopenStatus =
+  | { kind: "fresh" }
+  | { kind: "corrupt"; reason: "meta" | "snapshot-integrity" | "input-missing" }
+  | { kind: "sentinel"; meta: AutosaveMeta }
+  | { kind: "resume"; meta: AutosaveMeta }
+  | { kind: "library-drift"; meta: AutosaveMeta }
   | {
-      kind: "mismatch"; // vault changed during/since the session (§3.2.a territory)
+      kind: "vault-changed";
       meta: AutosaveMeta;
       currentBaseSha: string;
       currentSiblingSha: string;
     };
 
-export async function classifyOpen(
+export async function classifyReopen(
   vault: Vault,
   conflictId: string,
   basePath: string,
   siblingPath: string,
-): Promise<AutosaveOpenStatus> {
+): Promise<ReopenStatus> {
   const meta = await readMeta(vault, conflictId);
   if (!meta) return { kind: "fresh" };
 
-  const currentBaseSha = await calculateGitBlobSHA(
-    await vault.adapter.readBinary(basePath),
-  );
-  const currentSiblingSha = await calculateGitBlobSHA(
-    await vault.adapter.readBinary(siblingPath),
-  );
+  // Snapshot integrity (§4.2 condition 5 / Stage-2.0-review #2): the stored
+  // ground truth must still match its recorded SHA.
   if (
-    currentBaseSha === meta.baseShaAtStart &&
-    currentSiblingSha === meta.siblingShaAtStart
+    !(await snapshotMatches(vault, baseSnapshotPath(conflictId), meta.baseShaAtStart)) ||
+    !(await snapshotMatches(vault, siblingSnapshotPath(conflictId), meta.siblingShaAtStart))
   ) {
-    return { kind: "reuse", meta }; // §2.5.b: reuse existing snapshots
+    return { kind: "corrupt", reason: "snapshot-integrity" };
   }
-  return { kind: "mismatch", meta, currentBaseSha, currentSiblingSha };
+
+  // Current vault inputs — may be gone (interleaved sync deleted a side).
+  let baseBytes: ArrayBuffer;
+  let siblingBytes: ArrayBuffer;
+  try {
+    baseBytes = await vault.adapter.readBinary(basePath);
+    siblingBytes = await vault.adapter.readBinary(siblingPath);
+  } catch {
+    return { kind: "corrupt", reason: "input-missing" };
+  }
+
+  const currentBaseSha = await calculateGitBlobSHA(baseBytes);
+  const currentSiblingSha = await calculateGitBlobSHA(siblingBytes);
+
+  // The replay-validity gate. build() throws if a sentinel entered an input
+  // since session start — route to §1.3 rather than crashing the reopen.
+  let currentJoinedSha: string;
+  try {
+    currentJoinedSha = await calculateGitBlobSHA(
+      utf8(build(utf8Decode(baseBytes), utf8Decode(siblingBytes))),
+    );
+  } catch {
+    return { kind: "sentinel", meta };
+  }
+
+  if (currentJoinedSha === meta.joinedDocSha) {
+    return { kind: "resume", meta }; // replay valid regardless of cosmetic input diffs
+  }
+  const inputsMatch =
+    currentBaseSha === meta.baseShaAtStart && currentSiblingSha === meta.siblingShaAtStart;
+  if (inputsMatch) {
+    return { kind: "library-drift", meta }; // same inputs, different joined → diff lib changed
+  }
+  return { kind: "vault-changed", meta, currentBaseSha, currentSiblingSha };
 }
 
 // ── internals ────────────────────────────────────────────────────────
@@ -237,4 +286,18 @@ async function ensureDir(vault: Vault, dir: string): Promise<void> {
   const root = normalizePath(AUTOSAVE_ROOT);
   if (!(await vault.adapter.exists(root))) await vault.adapter.mkdir(root);
   if (!(await vault.adapter.exists(dir))) await vault.adapter.mkdir(dir);
+}
+
+// True iff the snapshot file exists and its bytes hash to `expectedSha`.
+async function snapshotMatches(
+  vault: Vault,
+  snapshotPath: string,
+  expectedSha: string,
+): Promise<boolean> {
+  if (!(await vault.adapter.exists(snapshotPath))) return false;
+  try {
+    return (await calculateGitBlobSHA(await vault.adapter.readBinary(snapshotPath))) === expectedSha;
+  } catch {
+    return false;
+  }
 }

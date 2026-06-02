@@ -51,7 +51,7 @@ export interface DoneJson {
 // commit7Step; on "mismatch" it shows the modal and only then calls
 // commit7Step (default paths for "force overwrite", or alt paths for "save to
 // alternative"). Throws if a file was deleted externally (readBinary rejects);
-// the Phase-6 caller handles that like classifyOpen's missing-file case.
+// the Phase-6 caller handles that like classifyReopen's input-missing case.
 export type ToctouStatus =
   | { kind: "ok" }
   | {

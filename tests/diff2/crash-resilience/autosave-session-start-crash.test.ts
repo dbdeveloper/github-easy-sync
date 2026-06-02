@@ -3,7 +3,7 @@
 //
 // The load-bearing invariant: meta.json is written LAST, so
 //   meta.json present  ⇔  the session is fully initialised
-//   meta.json absent   ⇒  classifyOpen returns "fresh" (no half session)
+//   meta.json absent   ⇒  classifyReopen returns "fresh" (no half session)
 //
 // We crash startSession after each protocol step by making the vault
 // adapter throw on the writeBinary that stages the NEXT file
@@ -19,7 +19,7 @@ import { Vault as MockVault } from "../../../mock-obsidian";
 import type { Vault } from "obsidian";
 import {
   autosaveDir,
-  classifyOpen,
+  classifyReopen,
   readMeta,
   startSession,
 } from "../../../src/diff2/autosave-store";
@@ -120,15 +120,15 @@ describe("crash: session-start protocol, meta-last invariant", () => {
       expect(await readMeta(fx.vault, ID)).toBeNull();
 
       // Reopen must NOT mistake a half-written dir for a usable session.
-      const status = await classifyOpen(fx.vault, ID, "base.md", "sibling.md");
+      const status = await classifyReopen(fx.vault, ID, "base.md", "sibling.md");
       expect(status.kind).toBe("fresh");
     });
   }
 
-  it("no crash: meta present ⇒ session usable (reuse), the invariant's other half", async () => {
+  it("no crash: meta present ⇒ session usable (resume), the invariant's other half", async () => {
     const meta = await startSession(fx.vault, ID, "base.md", "sibling.md", NOW);
     expect(await readMeta(fx.vault, ID)).toEqual(meta);
-    const status = await classifyOpen(fx.vault, ID, "base.md", "sibling.md");
-    expect(status.kind).toBe("reuse");
+    const status = await classifyReopen(fx.vault, ID, "base.md", "sibling.md");
+    expect(status.kind).toBe("resume");
   });
 });
