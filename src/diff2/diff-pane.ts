@@ -139,9 +139,18 @@ export class DiffPane {
   }
 
   // Full (base, sibling) reconstruction — Stage 2's 7-step commit writes
-  // both sides.
+  // both sides. An emptied side is committed as "\n", never "" — a diff2
+  // base/sibling ALWAYS had content (snapshot.size !== 0), so a 0-byte
+  // commit would trip SYNC2 §2.9's zero-byte-restore guard and resurrect
+  // the old content, silently reverting the user's "clear the file" intent.
+  // "\n" is the canonical minimal non-empty file (matches normalizeText's
+  // "non-empty ⇒ trailing newline" policy).
   getResolved(): { base: string; sibling: string } {
-    return split(fromEditorModel(this.modelNow()));
+    const { base, sibling } = split(fromEditorModel(this.modelNow()));
+    return {
+      base: base === "" ? "\n" : base,
+      sibling: sibling === "" ? "\n" : sibling,
+    };
   }
 
   getView(): EditorView {

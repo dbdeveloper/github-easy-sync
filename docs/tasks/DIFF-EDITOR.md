@@ -89,10 +89,27 @@
 - **(C)** `buildDecorationSet` `pushBlock` — block-widget'и лише на межі рядка → EOL-less
   same-line ver1/ver2 не дає mid-line widget.
 
+**Stage 1.t — chaos/coverage hardening** (exhaustive edge-probing + TDD):
+- **Boundary-insert bug (finding B deeper root):** `mapStructure` губив текст, вставлений на
+  межі сегмента (друк на поч. документа). Фікс: `growSegmentIndex`/`growIndexFor` нарощують
+  сегмент, що містить позицію edit'у (спільні для field+collapseGuard).
+- **#3 empty→`\n`:** `getResolved` повертає `"\n"` для порожньої сторони (не `""`) — base/sibling
+  diff2 завжди мали контент, тож 0-byte тригернув би SYNC2 §2.9 zero-byte-restore (відкотив би
+  видалення). `"\n"` = канонічний мінімальний непорожній файл (узгоджено з `normalizeText`).
+- **Покриття:** довгі рядки/великі доки (10×200 ver, 300 рядків) + **250-step seeded fuzz**;
+  selection-shapes §1.7 (multi-line у ver, cross-boundary); sentinel-guard edit-time; Ctrl+A
+  (block vs whole-doc); leading/trailing empty-ver на межах доку.
+
 *Поточний стан редагування:* live + безпечне + повна §1 модель (selection §1.7, sentinel §1.3,
-auto-collapse §1.6, гліф `↵` §1.6.a.1, normalization §1.6.a.2 + **commit-boundary** §1.6.a.2,
-hotkeys §1.9), **fail-closed на коміті**. DiffPane ще НЕ вбудований у бандл (`main.js` не
-змінюється; Phase 6 entry-points).
+auto-collapse §1.6, гліф `↵` §1.6.a.1, normalization §1.6.a.2 + **commit-boundary**,
+hotkeys §1.9), **fail-closed на коміті**, **empty→`\n`**. DiffPane ще НЕ вбудований у бандл
+(`main.js` не змінюється; Phase 6 entry-points).
+
+**Відкрите перед Phase 6:** (1) DiffPane не має `defaultKeymap`/`history` → delete-line,
+delete-to-EOL, word-arrows, PgUp/PgDn-як-команди **не прив'язані** — додати + протестувати, що
+команди йдуть через фільтри. (2) Layout-залежне (happy-dom не може) — PgUp/PgDn/Ctrl+Home/End
+навігація (зокрема на приховані порожні ver на межах), реальний wrap 200-симв. рядка при ширині
+30, Home/End на загорнутих → **manual/Playwright чек-лист**.
 
 **Stage 2 (далі):** `[←]` 7-step pair-atomic commit (§5.0) + `done.json` barrier +
 11-станова recovery-матриця (§5.0.b) + TOCTOU (§5.0.e) + `deriveAutosaveId` (§2.4.1).
