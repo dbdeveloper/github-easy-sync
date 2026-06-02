@@ -56,11 +56,15 @@
   `ver1==ver2` byte-exact, дописує колапс у ТУ Ж транзакцію (`[tr, spec]` + `setDiffPaneState`):
   обидва порожні → remove (`neither`); однаковий непорожній → apply ver1 (`ours`). Combined →
   single Ctrl+Z (коли з'явиться history у Phase 5).
-- ⏳ **1b.6** гліф `↵` + focus-leave normalization §1.6.a · **1b.7** hotkeys §1.9.
+- ✅ **1b.6a** — гліф `↵` §1.6.a.1 (`decorations.ts` + `NewlineGlyphWidget`): ghost-`↵` на
+  кінці кожного рядка крім останнього (= на кожному реальному `\n`); не в doc, не копіюється.
+  CSS `.diff2-newline-glyph`.
+- ⏳ **1b.6b** focus-leave normalization §1.6.a.2 · **1b.7** hotkeys §1.9.
 
-*Поточний стан редагування:* live + безпечне (selection §1.7 + sentinel-filter + auto-collapse).
-Немає ще: гліф `↵`, normalization (§1.6.a), hotkeys (§1.9), keyboard-стоп на порожніх ver (1b.4b).
-DiffPane ще НЕ вбудований у бандл (`main.js` не змінюється; Phase 6 entry-points).
+*Поточний стан редагування:* live + безпечне (selection §1.7 + sentinel-filter + auto-collapse)
++ гліф `↵` скрізь. Немає ще: focus-leave normalization (§1.6.a.2), hotkeys (§1.9),
+keyboard-стоп на порожніх ver (1b.4b). DiffPane ще НЕ вбудований у бандл (`main.js` не
+змінюється; Phase 6 entry-points).
 
 **Etap 2 (далі):** `[←]` 7-step pair-atomic commit (§5.0) + `done.json` barrier +
 11-станова recovery-матриця (§5.0.b) + TOCTOU (§5.0.e) + `deriveAutosaveId` (§2.4.1).

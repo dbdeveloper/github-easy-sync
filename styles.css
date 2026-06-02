@@ -233,6 +233,16 @@
     text-decoration: underline dotted;
 }
 
+/* §1.6.a.1: ghost ↵ marking each real newline (line-wrap is always on, so
+ * this disambiguates a hard break from a soft wrap). Faint, non-interactive. */
+.diff2-newline-glyph {
+    color: var(--text-faint);
+    opacity: 0.5;
+    margin-left: 2px;
+    user-select: none;
+    pointer-events: none;
+}
+
 /* §1.8.a: temporary 1-line container shown while an empty ver-block is
  * activated, so the caret has a visible spot to type into. */
 .diff2-empty-ver-active {

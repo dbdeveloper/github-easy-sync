@@ -81,6 +81,26 @@ class EmptyVerActiveWidget extends WidgetType {
   }
 }
 
+// §1.6.a.1 newline glyph — a ghost `↵` after a line's content marking its
+// real \n. Not in the doc → not selectable, not copied. One shared
+// instance (stateless; eq() always true so CM6 reuses DOM).
+class NewlineGlyphWidget extends WidgetType {
+  eq(): boolean {
+    return true;
+  }
+  toDOM(): HTMLElement {
+    const el = document.createElement("span");
+    el.className = "diff2-newline-glyph";
+    el.textContent = "↵";
+    el.setAttribute("aria-hidden", "true");
+    return el;
+  }
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+const NEWLINE_GLYPH = new NewlineGlyphWidget();
+
 export interface DiffPaneFieldState {
   structure: Segment[];
   opts: BuildOpts;
@@ -324,6 +344,19 @@ export function buildDecorationSet(
         block: true,
         side: 1,
       }).range(bottomAnchor),
+    );
+  }
+
+  // §1.6.a.1: a `↵` glyph at the end of every line that is followed by a
+  // real \n — i.e. all lines except the last. Since line-wrap is always
+  // on (§1.6.a.0), this disambiguates a hard line break from a soft wrap,
+  // across the WHOLE document. The LAST line gets no glyph: its absence
+  // signals "no trailing newline" (§1.2 last-line-of-file). Ghost only —
+  // a widget, never part of the doc, so never selected or copied.
+  for (let ln = 1; ln < doc.lines; ln++) {
+    const line = doc.line(ln);
+    decos.push(
+      Decoration.widget({ widget: NEWLINE_GLYPH, side: 1 }).range(line.to),
     );
   }
 
