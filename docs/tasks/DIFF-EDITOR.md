@@ -43,10 +43,24 @@
   word-diff), sibling-wins gutter (`line-numbers.ts`, §1.10), chunk-actions як doc-edit'и,
   sentinel `transactionFilter` (§1.3 edit-time), collision-check у в'ю. `getResolvedBase()`
   = `split(...).base`. Мертву `diff-chunks`-модель видалено.
-- ⏳ **1b.3** selection rules §1.7 · **1b.4** caret nav + активація порожніх ver §1.8/§1.8.a ·
-  **1b.5** auto-collapse §1.6 · **1b.6** гліф `↵` + focus-leave normalization §1.6.a ·
-  **1b.7** hotkeys §1.9. *(До 1b.3 редагування live, але необмежене — виділення може
-  перетнути межу ver1/ver2.)*
+- ✅ **1b.2** — sentinel `transactionFilter` (вкл. у 1b.1): блок вставки `\0`/`\1`.
+- ✅ **1b.3** — selection rules §1.7 (`selection-rules.ts`): фільтр легалізує виділення
+  (anchor у ver → clamp; normal→ver head → snap за межі групи); Ctrl/Cmd-A у ver →
+  лише блок. Collapsed каретка не чіпається.
+- ✅ **1b.4a** — активація порожніх ver §1.8.a: `activeEmptyVer` стан + marker `data-action`
+  (focus-ver1/ver2 лише коли порожній) + клік→активація + `EmptyVerActiveWidget`. Typing
+  росте активований ver; clear на content-gain / caret-leave.
+- ⏸️ **1b.4b** — keyboard «стоп на порожньому ver» при стрілках: **відкладено** (layout-залежне,
+  не тестується в happy-dom, UX-only; порожні ver досяжні кліком/кнопками).
+- ✅ **1b.5** — auto-collapse §1.6 (`collapseGuard` у `diff-pane.ts`): вільний edit, що робить
+  `ver1==ver2` byte-exact, дописує колапс у ТУ Ж транзакцію (`[tr, spec]` + `setDiffPaneState`):
+  обидва порожні → remove (`neither`); однаковий непорожній → apply ver1 (`ours`). Combined →
+  single Ctrl+Z (коли з'явиться history у Phase 5).
+- ⏳ **1b.6** гліф `↵` + focus-leave normalization §1.6.a · **1b.7** hotkeys §1.9.
+
+*Поточний стан редагування:* live + безпечне (selection §1.7 + sentinel-filter + auto-collapse).
+Немає ще: гліф `↵`, normalization (§1.6.a), hotkeys (§1.9), keyboard-стоп на порожніх ver (1b.4b).
+DiffPane ще НЕ вбудований у бандл (`main.js` не змінюється; Phase 6 entry-points).
 
 **Etap 2 (далі):** `[←]` 7-step pair-atomic commit (§5.0) + `done.json` barrier +
 11-станова recovery-матриця (§5.0.b) + TOCTOU (§5.0.e) + `deriveAutosaveId` (§2.4.1).

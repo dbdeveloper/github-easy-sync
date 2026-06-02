@@ -24,6 +24,7 @@
 //   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R7
 
 import {
+  ChangeDesc,
   EditorSelection,
   EditorState,
   Transaction,
@@ -32,6 +33,7 @@ import {
 import { EditorView } from "@codemirror/view";
 import type { ChunkChoice, JoinContext } from "./chunk-actions";
 import {
+  activeBlockAt,
   type BuildOpts,
   diffPaneExtension,
   diffPaneStateField,
@@ -42,6 +44,7 @@ import {
   baseSiblingToModel,
   type EditorModel,
   fromEditorModel,
+  mapStructure,
   type SegRole,
   type Segment,
 } from "./editor-model";
@@ -91,6 +94,7 @@ export class DiffPane {
           }),
           siblingWinsGutter(),
           sentinelGuard,
+          collapseGuard,
           selectionRules(),
           EditorView.lineWrapping,
         ],
@@ -350,5 +354,76 @@ const sentinelGuard = EditorState.transactionFilter.of(
       if (s.includes(LINE_TERMINATOR) || s.includes(VER_SEPARATOR)) bad = true;
     });
     return bad ? [] : tr;
+  },
+);
+
+// Diff groups whose two ver-blocks became byte-equal after an edit (the
+// §1.6 invariant "no diff-line with ver1 === ver2"). Both empty → remove
+// (op4 "neither"); same non-empty → apply ver1 (op1 "ours", chosen for
+// determinism). Compared against the supplied (post-edit) doc + structure.
+function findCollapsibleGroups(
+  doc: string,
+  structure: Segment[],
+): Array<{ group: number; choice: ChunkChoice }> {
+  const out: Array<{ group: number; choice: ChunkChoice }> = [];
+  for (let i = 0; i < structure.length; i++) {
+    const s = structure[i];
+    if (s.role !== "ver1") continue;
+    const v2 = structure[i + 1];
+    if (!v2 || v2.role !== "ver2" || v2.group !== s.group) continue;
+    const t1 = doc.slice(s.from, s.to);
+    const t2 = doc.slice(v2.from, v2.to);
+    if (t1 === t2) {
+      out.push({ group: s.group, choice: t1.length === 0 ? "neither" : "ours" });
+    }
+  }
+  return out;
+}
+
+// Auto-collapse (§1.6): after a free edit makes a diff group's ver1 ===
+// ver2 byte-exact, append the collapse INTO THE SAME transaction (combined
+// spec) so a single Ctrl+Z reverts both the edit and the collapse
+// (§1.6.a.3). The collapse carries a recomputed structure via the
+// setDiffPaneState effect (role change: group → normal), which the field
+// uses verbatim. Skips transactions that already carry that effect (chunk
+// actions, and the collapse's own output → no re-entrancy).
+const collapseGuard = EditorState.transactionFilter.of(
+  (tr: Transaction): TransactionSpec | readonly TransactionSpec[] => {
+    if (tr.effects.some((e) => e.is(setDiffPaneState))) return tr;
+    if (!tr.docChanged) return tr;
+    const field = tr.startState.field(diffPaneStateField, false);
+    if (!field) return tr;
+
+    // Recompute the post-edit structure exactly as the field will (same
+    // active hint), then look for byte-equal ver pairs.
+    const active =
+      field.activeEmptyVer ??
+      activeBlockAt(field.structure, tr.startState.selection.main.head);
+    const postStructure = mapStructure(
+      field.structure,
+      tr.changes as ChangeDesc,
+      active,
+    );
+    const postDoc = tr.newDoc.toString();
+    const collapsible = findCollapsibleGroups(postDoc, postStructure);
+    if (collapsible.length === 0) return tr;
+
+    let items = currentItems({ doc: postDoc, structure: postStructure });
+    for (const c of collapsible) {
+      items = resolveGroupInItems(items, c.group, c.choice, undefined) ?? items;
+    }
+    const collapsed = relayout(items);
+
+    return [
+      tr,
+      {
+        changes: { from: 0, to: postDoc.length, insert: collapsed.doc },
+        effects: setDiffPaneState.of({
+          structure: collapsed.structure,
+          opts: field.opts,
+          activeEmptyVer: null,
+        }),
+      },
+    ];
   },
 );

@@ -177,7 +177,9 @@ const decorationsProvider = EditorView.decorations.compute(
 // mapStructure `active` hint. Returns undefined when the caret is in a
 // normal segment or at an ambiguous boundary. Prefers an interior match
 // (from <= pos < to); falls back to a block ending exactly at pos.
-function activeBlockAt(
+// Exported so the auto-collapse filter (diff-pane.ts) recomputes the same
+// post-edit structure the field will.
+export function activeBlockAt(
   structure: Segment[],
   pos: number,
 ): ActiveBlock | undefined {
