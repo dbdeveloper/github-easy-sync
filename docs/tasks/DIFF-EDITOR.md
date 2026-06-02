@@ -33,7 +33,7 @@
 **передумова** 7-step commit, бо shipped `diff-chunks` side-field десинхронізувався
 на вільних edit'ах і `split(editorDoc)` був несоундним).
 
-**Etap 1 — модель §1:**
+**Stage 1 — модель §1:**
 - ✅ **1a** — `src/diff2/joined-doc.ts`: `build`/`split` (`\0`-термінатор, `\1`-роздільник),
   collision fail-closed (§1.3). Round-trip byte-exact (§1.5).
 - ✅ **1b.0** — `src/diff2/editor-model.ts`: чистий CM6-doc + впорядкований `Segment[]`,
@@ -59,18 +59,22 @@
 - ✅ **1b.6a** — гліф `↵` §1.6.a.1 (`decorations.ts` + `NewlineGlyphWidget`): ghost-`↵` на
   кінці кожного рядка крім останнього (= на кожному реальному `\n`); не в doc, не копіюється.
   CSS `.diff2-newline-glyph`.
-- ⏳ **1b.6b** focus-leave normalization §1.6.a.2 · **1b.7** hotkeys §1.9.
+- ✅ **1b.6b** — normalization §1.6.a.2 (`diff-pane.ts`): `normalizeGuard` (focus-leave) дописує
+  `\n`, коли каретка покидає непорожній ver-блок без trailing `\n`, що не останній у документі
+  (combined-transaction); + apply-time нормалізація в `relayout` (`normalizeItems`). Останній
+  елемент документа лишається EOL-less. Запобігає злиттю контенту при split (correctness).
+- ⏳ **1b.7** hotkeys §1.9 *(останній крок 1b)*.
 
-*Поточний стан редагування:* live + безпечне (selection §1.7 + sentinel-filter + auto-collapse)
-+ гліф `↵` скрізь. Немає ще: focus-leave normalization (§1.6.a.2), hotkeys (§1.9),
-keyboard-стоп на порожніх ver (1b.4b). DiffPane ще НЕ вбудований у бандл (`main.js` не
-змінюється; Phase 6 entry-points).
+*Поточний стан редагування:* live + безпечне + повна §1.6.a модель (selection §1.7, sentinel,
+auto-collapse §1.6, гліф `↵`, normalization §1.6.a). Лишилось: hotkeys (§1.9), keyboard-стоп
+на порожніх ver (1b.4b, deferred). DiffPane ще НЕ вбудований у бандл (`main.js` не змінюється;
+Phase 6 entry-points).
 
-**Etap 2 (далі):** `[←]` 7-step pair-atomic commit (§5.0) + `done.json` barrier +
+**Stage 2 (далі):** `[←]` 7-step pair-atomic commit (§5.0) + `done.json` barrier +
 11-станова recovery-матриця (§5.0.b) + TOCTOU (§5.0.e) + `deriveAutosaveId` (§2.4.1).
 Поточний `exit-protocol.ts` — ще наївний 2-call.
 
-**Etap 3 (далі):** Phase 5 — persistent autosave (§2–§4).
+**Stage 3 (далі):** Phase 5 — persistent autosave (§2–§4).
 
 **Ратифіковані рішення:** `diff` лишається v9 (у `meta.json` пишемо ФАКТИЧНУ версію,
 не 5.2.0; DEFAULT `diffLines`, не `newlineIsToken` — інакше ламає §1.2); line-wrap

@@ -1,4 +1,4 @@
-// DiffPane — CM6 EditorView over the Rep A editor model (Etap 1b.1).
+// DiffPane — CM6 EditorView over the Rep A editor model (Stage 1b.1).
 //
 // CM6 edits a CLEAN doc (no \0/\1); a StateField holds the ordered
 // Segment[] structure (normal/ver1/ver2) and is mapped through every
@@ -55,7 +55,7 @@ import {
 } from "./joined-doc";
 import { siblingWinsGutter } from "./line-numbers";
 import type { MarkerWidgetCallbacks } from "./markers";
-import { selectionRules } from "./selection-rules";
+import { selectionRules, strictVerBlockAt } from "./selection-rules";
 
 export interface DiffPaneOpts {
   oursLabel: string;
@@ -96,6 +96,7 @@ export class DiffPane {
           sentinelGuard,
           collapseGuard,
           selectionRules(),
+          normalizeGuard,
           EditorView.lineWrapping,
         ],
       }),
@@ -132,7 +133,7 @@ export class DiffPane {
     return this.getResolved().base;
   }
 
-  // Full (base, sibling) reconstruction — Etap 2's 7-step commit writes
+  // Full (base, sibling) reconstruction — Stage 2's 7-step commit writes
   // both sides.
   getResolved(): { base: string; sibling: string } {
     return split(fromEditorModel(this.modelNow()));
@@ -321,12 +322,16 @@ function splitLinesNoTrailing(text: string): string[] {
 // Re-lay-out a flat item list into (doc, structure): assign contiguous
 // positions, drop empty NORMAL items (a "neither"-resolved group, or an
 // emptied common run, leaves no line), but KEEP empty ver items (they
-// belong to a live diff group).
+// belong to a live diff group). Applies apply-time normalization first
+// (§1.6.a.2): a resolved NORMAL item that is non-empty, lacks a trailing
+// \n, and is NOT the document's last surviving element gets a \n — else
+// its content would merge into the next segment on split().
 function relayout(items: SegItem[]): EditorModel {
+  const normalized = normalizeItems(items);
   let doc = "";
   const structure: Segment[] = [];
   let pos = 0;
-  for (const it of items) {
+  for (const it of normalized) {
     if (it.role === "normal" && it.text === "") continue;
     structure.push({
       role: it.role,
@@ -338,6 +343,24 @@ function relayout(items: SegItem[]): EditorModel {
     pos += it.text.length;
   }
   return { doc, structure };
+}
+
+// §1.6.a.2 (apply-time): append \n to any non-last NORMAL item that is
+// non-empty and lacks a trailing \n. Ver items pass through untouched
+// (focus-leave normalization handles those). The last surviving element
+// keeps an EOL-less tail (valid last-line-of-file).
+function normalizeItems(items: SegItem[]): SegItem[] {
+  let lastSurviving = -1;
+  for (let i = 0; i < items.length; i++) {
+    if (!(items[i].role === "normal" && items[i].text === "")) lastSurviving = i;
+  }
+  return items.map((it, i) => {
+    if (it.role !== "normal" || i >= lastSurviving) return it;
+    if (it.text.length > 0 && !it.text.endsWith("\n")) {
+      return { ...it, text: it.text + "\n" };
+    }
+    return it;
+  });
 }
 
 // Transaction filter: reject any change that would introduce a sentinel
@@ -427,3 +450,43 @@ const collapseGuard = EditorState.transactionFilter.of(
     ];
   },
 );
+
+// Focus-leave normalization (§1.6.a.2): when the caret leaves a ver-block
+// (selection-only transaction) whose last line lost its \n — non-empty,
+// no trailing \n, and the group is NOT the document's last element —
+// append the \n IN THE SAME transaction. Without it the ver content would
+// merge into the next segment on split() (correctness, not cosmetics). The
+// combined change is mapped by the field's mapStructure with active = the
+// left block (derived from the pre-edit caret), so the \n grows that block.
+const normalizeGuard = EditorState.transactionFilter.of(
+  (tr: Transaction): TransactionSpec | readonly TransactionSpec[] => {
+    if (tr.effects.some((e) => e.is(setDiffPaneState))) return tr;
+    if (tr.docChanged || !tr.selection) return tr;
+    const field = tr.startState.field(diffPaneStateField, false);
+    if (!field) return tr;
+
+    const oldHead = tr.startState.selection.main.head;
+    const newHead = tr.newSelection.main.head;
+    const left = strictVerBlockAt(field.structure, oldHead);
+    // Left iff the caret WAS strictly inside `left` and now is not.
+    if (!left || (newHead > left.from && newHead < left.to)) return tr;
+
+    const content = tr.startState.doc.sliceString(left.from, left.to);
+    if (content.length === 0 || content.endsWith("\n")) return tr;
+    if (isGroupLastElement(field.structure, left.group)) return tr;
+
+    return [tr, { changes: { from: left.to, insert: "\n" } }];
+  },
+);
+
+// True when `group`'s ver2 is the last segment in the structure (so the
+// diff-line is the document's final element → an EOL-less tail is valid).
+function isGroupLastElement(structure: Segment[], group: number): boolean {
+  let v2Index = -1;
+  for (let i = 0; i < structure.length; i++) {
+    if (structure[i].role === "ver2" && structure[i].group === group) {
+      v2Index = i;
+    }
+  }
+  return v2Index === structure.length - 1;
+}
