@@ -114,4 +114,74 @@ describe("free-edit resolution across a conflict block (§1.7 Variant 3)", () =>
     expect(rb).toBe(rs);
     expect(rb).toBe("x\nZy\n"); // x\n + Z + y\n (diff block fully consumed)
   });
+
+  // §1.7.a(1) — virtual normal line before first / after last: a conflict on
+  // the FIRST or LAST line (no real normal neighbour) still resolves.
+  it("conflict on the FIRST line resolves via a span from doc start", () => {
+    const base = "A\nc\nB\n";
+    const sibling = "X\nc\nY\n"; // group0 = A/X (line 0), group1 = B/Y (last line)
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const pane = new DiffPane(container, base, sibling, OPTS);
+    const view = pane.getView();
+
+    // Select from doc start (0) through group0 into the normal "c", replace.
+    view.dispatch({ selection: { anchor: 0, head: 5 } });
+    view.dispatch({ changes: { from: 0, to: 5, insert: "TEST" } });
+
+    const { base: rb, sibling: rs } = pane.getResolved();
+    pane.destroy();
+    container.remove();
+
+    for (const ghost of ["A", "X"]) expect(rb).not.toContain(ghost); // group0 consumed
+    expect(rb).toContain("TEST");
+    expect(rs).toContain("TEST");
+    expect(rb).toContain("B"); // group1 (last line) preserved
+    expect(rs).toContain("Y");
+    expect(rb).not.toBe(rs); // group1 still a conflict
+  });
+
+  it("conflict on the LAST line resolves via a span to doc end", () => {
+    const base = "A\nc\nB\n";
+    const sibling = "X\nc\nY\n";
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const pane = new DiffPane(container, base, sibling, OPTS);
+    const view = pane.getView();
+    const docLen = view.state.doc.length; // clean doc "A\nX\nc\nB\nY\n" → 10
+
+    // Select from mid-"c" (5) through group1 to doc end, replace.
+    view.dispatch({ selection: { anchor: 5, head: docLen } });
+    view.dispatch({ changes: { from: 5, to: docLen, insert: "END" } });
+
+    const { base: rb, sibling: rs } = pane.getResolved();
+    pane.destroy();
+    container.remove();
+
+    for (const ghost of ["B", "Y"]) expect(rb).not.toContain(ghost); // group1 consumed
+    expect(rb).toContain("END");
+    expect(rb).toContain("A"); // group0 (first line) preserved
+    expect(rs).toContain("X");
+    expect(rb).not.toBe(rs);
+  });
+
+  it("Ctrl+A whole-doc select + replace → entire doc becomes the typed text (both files)", () => {
+    const base = "A\nc\nB\n";
+    const sibling = "X\nc\nY\n";
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const pane = new DiffPane(container, base, sibling, OPTS);
+    const view = pane.getView();
+    const docLen = view.state.doc.length;
+
+    view.dispatch({ selection: { anchor: 0, head: docLen } }); // Ctrl+A whole doc
+    view.dispatch({ changes: { from: 0, to: docLen, insert: "ALL" } });
+
+    const { base: rb, sibling: rs } = pane.getResolved();
+    pane.destroy();
+    container.remove();
+
+    expect(rb).toBe("ALL");
+    expect(rs).toBe("ALL"); // every conflict consumed → identical
+  });
 });

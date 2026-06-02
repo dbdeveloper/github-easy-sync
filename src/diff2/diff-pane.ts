@@ -538,44 +538,60 @@ function detectSpanningResolve(
   return { fromA, toA, delta: ins - (toA - fromA) };
 }
 
-// Rebuild the structure for a spanning resolve: segments fully before the start
-// normal stay; the [i..j] run (start-normal … spanned groups … end-normal)
-// becomes ONE normal segment; segments after the end normal shift by delta. i
-// via first-match (left normal at a boundary — keeps the prefix), j via
-// last-match (right normal — keeps the suffix); correct even with an empty ver
-// sitting exactly on the boundary.
+// Rebuild the structure for a spanning resolve: the resolved region (left-normal
+// prefix … spanned groups … right-normal suffix) becomes ONE normal segment;
+// segments fully before it stay; segments fully after shift by delta. The left
+// edge is the normal containing fromA (first-match — keeps its prefix); the
+// right edge is the normal containing toA (last-match — keeps its suffix).
+//
+// §1.7.a(1) — DOCUMENT BOUNDARY: when line 0 (or the last line) is a diff there
+// is NO real normal at that edge. We then treat it as if a VIRTUAL empty normal
+// line bracketed the document: a missing left normal is allowed ONLY when
+// fromA === 0 (true doc start), a missing right normal ONLY when toA === oldLen
+// (true doc end). A missing normal anywhere else (e.g. a ver1/ver2 junction) is
+// ambiguous → return null (falls through → the tiling assert rejects it).
 function rebuildSpanningResolve(
   structure: Segment[],
   fromA: number,
   toA: number,
   delta: number,
 ): Segment[] | null {
-  let i = -1;
+  const oldLen = structure[structure.length - 1].to;
+  let li = -1;
   for (let k = 0; k < structure.length; k++) {
     const s = structure[k];
     if (s.role === "normal" && fromA >= s.from && fromA <= s.to) {
-      i = k;
+      li = k;
       break;
     }
   }
-  let j = -1;
+  let ri = -1;
   for (let k = structure.length - 1; k >= 0; k--) {
     const s = structure[k];
     if (s.role === "normal" && toA >= s.from && toA <= s.to) {
-      j = k;
+      ri = k;
       break;
     }
   }
-  if (i < 0 || j < 0 || i > j) return null;
+  // Virtual boundary normals only at the true document edges.
+  if (li < 0 && fromA !== 0) return null;
+  if (ri < 0 && toA !== oldLen) return null;
+
+  const regionStartOld = li >= 0 ? structure[li].from : 0;
+  const regionEndOld = ri >= 0 ? structure[ri].to : oldLen;
+  if (regionStartOld > fromA || regionEndOld < toA) return null; // region must cover the change
+
   const merged: Segment = {
     role: "normal",
     group: -1,
-    from: structure[i].from,
-    to: structure[j].to + delta,
+    from: regionStartOld,
+    to: regionEndOld + delta,
   };
-  const out: Segment[] = structure.slice(0, i);
+  const prefixEnd = li >= 0 ? li : 0; // segments[0..prefixEnd-1] kept as-is
+  const suffixStart = ri >= 0 ? ri + 1 : structure.length; // segments[suffixStart..] shift
+  const out: Segment[] = structure.slice(0, prefixEnd);
   out.push(merged);
-  for (let k = j + 1; k < structure.length; k++) {
+  for (let k = suffixStart; k < structure.length; k++) {
     out.push({ ...structure[k], from: structure[k].from + delta, to: structure[k].to + delta });
   }
   return out;

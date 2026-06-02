@@ -761,15 +761,27 @@ diff-рядка не було (`nor[…diff…]string 2` + `TEST` → `norTESTst
   `setDiffPaneState` з цією структурою. **+ додати tiling-assert** у внутрішній
   collapse-шлях (mis-tile → гучний throw, не тиха втрата).
 
-**(1) Конфлікт на МЕЖІ документа (перший/останній рядок — diff-рядок).** Як
-обробляти selection, зокрема `Ctrl+A`, або виділення з normal-рядка до
-початку/кінця файлу, коли перед/після diff немає normal-рядка-сусіда?
-**Напрям:** трактувати так, ніби **перед першим рядком і після останнього є ще
-один невидимий normal-рядок** — тоді Варіант-1/3 і `Ctrl+A` лишаються
-визначеними (виділення legal до межі-як-до-normal), і spanning-resolve на межі
-має ту ж семантику. Перевірити взаємодію з `legalizeRange` (boundary-rule:
-позиція на краю ver = normal-space) та auto-collapse на крайових порожніх ver
-(вже частково покрито «boundary empty-ver» тестами §1.h/1.t).
+**(1) ✅ ВИПРАВЛЕНО (2026-06-02) — конфлікт на МЕЖІ документа (перший/останній
+рядок = diff).** Модель: **перед першим і після останнього рядка є віртуальний
+порожній normal-рядок**. Це стосується БУДЬ-ЯКОГО виділення, що сягає межі —
+`Ctrl+A`, `shift+PgUp/PgDn`, `shift+Ctrl+Home/End`.
+- **Реалізація (edge-handling, без матеріалізації):** `rebuildSpanningResolve`
+  трактує відсутність left-normal як віртуальний край ЛИШЕ коли `fromA===0`
+  (істинний doc-start), а відсутність right-normal — коли `toA===oldLen`
+  (doc-end). Тоді merged-region = `[0 / structure[li].from … oldLen /
+  structure[ri].to]`. Тести: conflict-on-first-line, conflict-on-last-line,
+  Ctrl+A-whole-doc (`free-edit-resolve-bug.test.ts`).
+- **Розглянуті альтернативи представлення (НЕ обрані — інвазивні, зайві):**
+  (a) логічні рядки −1 і N(=кількість рядків); (b) фізично line 0 = віртуальний,
+  реальні з 1. Обидві потребували б renumbering / матеріалізації віртуальних
+  сегментів (зачіпає build/split/toEditorModel/line-numbers/усі offset'и).
+  Edge-handling дає ту саму семантику дешевше.
+- **Інваріант (реафірмовано, вже в `legalizeRange`):** виділення ВСЕРЕДИНІ
+  ver-блоку НІКОЛИ не виходить за його межі (Варіант-2: anchor у ver → clamp
+  head у `[ver.from, ver.to]`), що б не робили (shift-extend, drag, shift+PgUp/Dn).
+- **Layout-залежне → manual:** реальна геометрія shift+PgUp/PgDn/Home/End, що
+  сягає межі (happy-dom без layout). Логіка (legalize до межі = normal-space;
+  resolve на межі) — покрита unit-тестами вище.
 
 **(2) Copy/Paste виділення, що містить diff-рядок.** Що кладемо в clipboard,
 коли Варіант-3 виділення покриває diff?
