@@ -1,4 +1,4 @@
-// Selection rules for the DiffPane (DIFF-EDITOR.md §1.7) — Etap 1b.3.
+// Selection rules for the DiffPane (DIFF-EDITOR.md §1.7) — Stage 1b.3.
 //
 // "Two editors in one": normal lines form the main editor; each ver-block
 // is an isolated sub-editor. A selection may not mix the two spaces.

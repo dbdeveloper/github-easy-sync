@@ -4,7 +4,7 @@
 // (operating on the editor-model's ver texts, which carry their own \n
 // terminators) — the legacy line-array helpers (chooseLines /
 // chunkReplacementRange) didn't fit the Rep A model and were removed in
-// Etap 1b.1. This module keeps the shared CHOICE + JOIN-CONTEXT types.
+// Stage 1b.1. This module keeps the shared CHOICE + JOIN-CONTEXT types.
 //
 // Canonical specs:
 //   - docs/tasks/DIFF-EDITOR.md §1.6 (resolution operations)

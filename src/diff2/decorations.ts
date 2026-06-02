@@ -1,5 +1,5 @@
 // DiffPane decoration extension — derives a DecorationSet from the
-// editor-model structure (Segment[]) + the live doc (Etap 1b.1).
+// editor-model structure (Segment[]) + the live doc (Stage 1b.1).
 //
 // Replaces the Phase-3 chunks/offsets side-field. The structure now
 // lives in a StateField with TWO update paths (DIFF-EDITOR.md §1):

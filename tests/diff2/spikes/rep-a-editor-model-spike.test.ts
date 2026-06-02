@@ -1,6 +1,6 @@
 // Retrofit Spike — Rep A editor model (clean CM6 doc + mapped structure).
 //
-// Question (Etap 1b architecture):
+// Question (Stage 1b architecture):
 //   The joined-doc spike validated Rep B (sentinels \0/\1 live as real
 //   chars in the doc). We are NOT shipping Rep B — its \n/\0 mix fights
 //   CM6's line model. Rep A keeps the shipped clean-doc + widget-markers

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 //
-// DiffPane action-handling tests (Etap 1b.1 model). Chunk-level
+// DiffPane action-handling tests (Stage 1b.1 model). Chunk-level
 // apply/remove/both/neither/join + bulk resolveAll operate on the
 // editor-model structure and dispatch a recomputed structure (effect).
 // Assertions read getResolved() (the split base/sibling) rather than the

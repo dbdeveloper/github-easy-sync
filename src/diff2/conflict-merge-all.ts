@@ -1,7 +1,7 @@
 // File-type guard for the [Join all] button (R7.9a).
 //
 // The bulk-resolution logic (resolveAll) moved into DiffPane.resolveAll
-// in Etap 1b.1 (it operates on the editor-model structure directly); the
+// in Stage 1b.1 (it operates on the editor-model structure directly); the
 // legacy chunks-list helpers were removed. This module retains the
 // markdown path guard used by the detail toolbar.
 //

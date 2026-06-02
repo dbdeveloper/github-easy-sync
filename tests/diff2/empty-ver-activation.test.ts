@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 //
-// §1.8.a empty-ver activation (Etap 1b.4a): marker `data-action` routing,
+// §1.8.a empty-ver activation (Stage 1b.4a): marker `data-action` routing,
 // click → activate, typing into an activated empty ver grows THAT ver, and
 // the activation clear-lifecycle (content gain / caret leave).
 
