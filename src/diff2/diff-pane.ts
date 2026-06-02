@@ -34,6 +34,12 @@ import {
   TransactionSpec,
 } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
+import {
+  defaultKeymap,
+  history,
+  historyKeymap,
+  invertedEffects,
+} from "@codemirror/commands";
 import type { ChunkChoice, JoinContext } from "./chunk-actions";
 import {
   type BuildOpts,
@@ -102,6 +108,16 @@ export class DiffPane {
           normalizeGuard,
           emptyVerArrowNav,
           this.hotkeys(),
+          // Standard editing/undo. Our Prec.high keymaps above win for the
+          // keys they bind (Mod-a, ↑/↓, Ctrl+Enter…); everything else
+          // (Backspace/Delete/Enter, word-arrows, Home/End, PageUp/Down,
+          // delete-line) falls through to defaultKeymap → a normal edit
+          // through the filter pipeline. history({newGroupDelay:0}): each tx
+          // is its own undo step (§2.3). structureHistory versions the
+          // structure field across undo/redo (chunk-action role changes).
+          history({ newGroupDelay: 0 }),
+          structureHistory,
+          keymap.of([...historyKeymap, ...defaultKeymap]),
           EditorView.lineWrapping,
         ],
       }),
@@ -291,6 +307,7 @@ function resolveGroupInItems(
   const text = resolveText(v1, v2, choice, joinCtx);
   const out = items.slice();
   out.splice(i, 2, { role: "normal", group: -1, text });
+  out[i] = { ...out[i], text: ensureNlIfFollowed(text, out, i) };
   return out;
 }
 
@@ -300,17 +317,34 @@ function resolveAllItems(
   joinCtx: JoinContext | undefined,
 ): SegItem[] {
   const out: SegItem[] = [];
+  const resolvedIdx: number[] = [];
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
     if (it.role === "ver1" && items[i + 1]?.role === "ver2") {
       const text = resolveText(it.text, items[i + 1].text, choice, joinCtx);
       out.push({ role: "normal", group: -1, text });
+      resolvedIdx.push(out.length - 1);
       i++; // consume ver2
       continue;
     }
     out.push(it);
   }
+  for (const idx of resolvedIdx) {
+    out[idx] = { ...out[idx], text: ensureNlIfFollowed(out[idx].text, out, idx) };
+  }
   return out;
+}
+
+// §1.6.a.2 at resolution: a group resolved to NORMAL whose content lacks a
+// trailing \n would merge into the following segment on split(). Give it a \n
+// — but ONLY the resolved item, and only when content follows it. Pre-existing
+// normal segments are never touched (a collapsed group between two normals must
+// not gain a spurious blank line); ver segments left unresolved are normalized
+// at the commit boundary (fromEditorModel) instead.
+function ensureNlIfFollowed(text: string, items: SegItem[], idx: number): string {
+  if (text.length === 0 || text.endsWith("\n")) return text;
+  const hasLater = items.slice(idx + 1).some((it) => it.text.length > 0);
+  return hasLater ? text + "\n" : text;
 }
 
 // Per-choice resolution on the raw ver texts (which carry their own \n
@@ -394,17 +428,15 @@ export function hotkeyTarget(
 
 // Re-lay-out a flat item list into (doc, structure): assign contiguous
 // positions, drop empty NORMAL items (a "neither"-resolved group, or an
-// emptied common run, leaves no line), but KEEP empty ver items (they
-// belong to a live diff group). Applies apply-time normalization first
-// (§1.6.a.2): a resolved NORMAL item that is non-empty, lacks a trailing
-// \n, and is NOT the document's last surviving element gets a \n — else
-// its content would merge into the next segment on split().
+// emptied common run, leaves no line), but KEEP empty ver items (they belong
+// to a live diff group). Normalization is NOT done here — it is applied per
+// resolved item in resolve*InItems (ensureNlIfFollowed), so pre-existing
+// normal segments are never given a spurious \n.
 function relayout(items: SegItem[]): EditorModel {
-  const normalized = normalizeItems(items);
   let doc = "";
   const structure: Segment[] = [];
   let pos = 0;
-  for (const it of normalized) {
+  for (const it of items) {
     if (it.role === "normal" && it.text === "") continue;
     structure.push({
       role: it.role,
@@ -418,23 +450,23 @@ function relayout(items: SegItem[]): EditorModel {
   return { doc, structure };
 }
 
-// §1.6.a.2 (apply-time): append \n to any non-last NORMAL item that is
-// non-empty and lacks a trailing \n. Ver items pass through untouched
-// (focus-leave normalization handles those). The last surviving element
-// keeps an EOL-less tail (valid last-line-of-file).
-function normalizeItems(items: SegItem[]): SegItem[] {
-  let lastSurviving = -1;
-  for (let i = 0; i < items.length; i++) {
-    if (!(items[i].role === "normal" && items[i].text === "")) lastSurviving = i;
-  }
-  return items.map((it, i) => {
-    if (it.role !== "normal" || i >= lastSurviving) return it;
-    if (it.text.length > 0 && !it.text.endsWith("\n")) {
-      return { ...it, text: it.text + "\n" };
+// Version the structure field across undo/redo. CM6 history reverts the doc
+// but does NOT re-apply our setDiffPaneState effects, so undoing a chunk
+// action / collapse (which changed segment ROLES) would revert the text yet
+// leave the structure "resolved" — a desync. For any tx that set the
+// structure, record the PRE-tx structure as the effect to attach to the
+// inverse (undo) transaction; symmetrically, the undo tx's own setDiffPaneState
+// is inverted on redo. Free edits carry no setDiffPaneState (structure is
+// remapped from the inverse changes), so they need no inversion here.
+const structureHistory = invertedEffects.of((tr) => {
+  for (const e of tr.effects) {
+    if (e.is(setDiffPaneState)) {
+      const prev = tr.startState.field(diffPaneStateField, false);
+      return prev ? [setDiffPaneState.of(prev)] : [];
     }
-    return it;
-  });
-}
+  }
+  return [];
+});
 
 // Transaction filter: reject any change that would introduce a sentinel
 // (\0 or \1) into the doc. Editing is live in 1b.1, so a control-char

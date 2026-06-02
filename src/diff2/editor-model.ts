@@ -124,14 +124,17 @@ export function fromEditorModel(model: EditorModel): string {
   // fail-closed philosophy, applied at the write boundary).
   assertTiling(structure, doc.length);
 
-  // §1.6.a.2 normalization, enforced at the commit boundary (review
-  // findings E + the focus-leave rule) so it holds however the commit was
-  // reached. A content-bearing segment whose last line lacks a trailing \n
-  // gets one UNLESS its diff-line / line is the document's LAST element —
-  // an EOL-less tail is only valid at end-of-file. The test is POSITIONAL,
-  // not content-based: ver1 and ver2 live on different sides, so "is there
-  // a later element in the document?" (not "a later non-empty segment") is
-  // what decides whether each side's tail would merge into a following one.
+  // §1.6.a.2 normalization at the commit boundary (review findings E + the
+  // focus-leave rule), so it holds however the commit was reached. It applies
+  // ONLY to ver1/ver2: a ver-block's last line that lacks a trailing \n would,
+  // on split(), merge into the following segment on its OWN side (ver1→base,
+  // ver2→sibling). NORMAL segments need no such fix — their bytes go to BOTH
+  // sides identically, so emitNormalLines + concatenation reproduce the doc
+  // verbatim (the \n simply lives in the content or the next normal segment;
+  // adding one would inject a spurious blank line, e.g. after a group between
+  // two normals is collapsed away). The test is POSITIONAL: normalize a ver
+  // only when its group is NOT the document's last element (an EOL-less tail
+  // is valid only at end-of-file).
   const lastIdx = structure.length - 1;
   const needsNl = (s: string): boolean => s.length > 0 && !s.endsWith("\n");
 
@@ -139,9 +142,7 @@ export function fromEditorModel(model: EditorModel): string {
   for (let i = 0; i < structure.length; i++) {
     const s = structure[i];
     if (s.role === "normal") {
-      let content = doc.slice(s.from, s.to);
-      if (i < lastIdx && needsNl(content)) content += "\n";
-      joined += emitNormalLines(content);
+      joined += emitNormalLines(doc.slice(s.from, s.to));
       continue;
     }
     if (s.role === "ver1") {
