@@ -202,26 +202,67 @@ function assertTiling(structure: Segment[], docLength: number): void {
   }
 }
 
-// Map the structure through a transaction's changes (DIFF-EDITOR.md §1.8
-// — must run on EVERY doc-changing transaction). See the module header
-// for the assoc rule. Document order is preserved (mapPos is monotonic).
-// `active` is the block the caret sits in (undefined for programmatic
-// edits that don't append at a block edge).
+// Map the structure through a transaction's changes (DIFF-EDITOR.md §1.8 —
+// must run on EVERY doc-changing transaction). Document order is preserved
+// (mapPos is monotonic). The segment at `growIdx` uses INCLUSIVE edges
+// (from→−1, to→+1) so an insert at either of its boundaries grows IT; every
+// other segment uses EXCLUSIVE edges (from→+1, to→−1) so it never claims a
+// boundary insert. `growIdx` is the segment the edit belongs to — the caret's
+// segment (growSegmentIndex) or an explicitly-activated empty ver (§1.8.a),
+// resolved by growIndexFor. Without a correct growIdx, an insert at a segment
+// boundary (e.g. typing at doc start, a line start) would fall into a gap and
+// be dropped — caught now by fromEditorModel's tiling assertion.
 export function mapStructure(
   structure: Segment[],
   changes: ChangeDesc,
-  active?: ActiveBlock,
+  growIdx = -1,
 ): Segment[] {
-  return structure.map((s) => {
-    const isActive =
-      active !== undefined && s.role === active.role && s.group === active.group;
-    const from = changes.mapPos(s.from, isActive ? -1 : 1);
-    let to = changes.mapPos(s.to, isActive ? 1 : -1);
+  return structure.map((s, idx) => {
+    const grows = idx === growIdx;
+    const from = changes.mapPos(s.from, grows ? -1 : 1);
+    let to = changes.mapPos(s.to, grows ? 1 : -1);
     // A collapsed range (from === to) is valid: an emptied ver-block
-    // awaiting auto-collapse in Phase 1b.5. Never let it invert.
+    // awaiting auto-collapse (§1.6). Never let it invert.
     if (to < from) to = from;
     return { role: s.role, group: s.group, from, to };
   });
+}
+
+// The index of the segment an edit at `pos` belongs to: the segment whose
+// interior contains pos; else a non-empty segment STARTING at pos (caret at
+// its start → grow it leftward); else a non-empty segment ENDING at pos
+// (caret at doc end); else -1. Never returns a zero-width segment — an empty
+// ver-block can only be grown via an explicit activation (growIndexFor).
+export function growSegmentIndex(structure: Segment[], pos: number): number {
+  for (let i = 0; i < structure.length; i++) {
+    if (pos > structure[i].from && pos < structure[i].to) return i;
+  }
+  for (let i = 0; i < structure.length; i++) {
+    if (structure[i].from === pos && structure[i].to > structure[i].from) return i;
+  }
+  for (let i = structure.length - 1; i >= 0; i--) {
+    if (structure[i].to === pos && structure[i].to > structure[i].from) return i;
+  }
+  return -1;
+}
+
+// Resolve the grow target for a doc-changing transaction: an explicitly
+// activated empty ver-block (§1.8.a) wins (its position is shared with a
+// neighbour, so it can't be found by `caret` alone); otherwise the caret's
+// segment. Shared by the structure field and the auto-collapse filter so
+// they compute the SAME post-edit structure.
+export function growIndexFor(
+  structure: Segment[],
+  activeEmptyVer: ActiveBlock | null,
+  caret: number,
+): number {
+  if (activeEmptyVer) {
+    const i = structure.findIndex(
+      (s) => s.role === activeEmptyVer.role && s.group === activeEmptyVer.group,
+    );
+    if (i >= 0) return i;
+  }
+  return growSegmentIndex(structure, caret);
 }
 
 // Commit convenience: (doc, structure) → (base, sibling).

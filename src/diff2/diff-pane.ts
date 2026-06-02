@@ -36,7 +36,6 @@ import {
 import { EditorView, keymap } from "@codemirror/view";
 import type { ChunkChoice, JoinContext } from "./chunk-actions";
 import {
-  activeBlockAt,
   type BuildOpts,
   diffPaneExtension,
   diffPaneStateField,
@@ -47,6 +46,7 @@ import {
   baseSiblingToModel,
   type EditorModel,
   fromEditorModel,
+  growIndexFor,
   mapStructure,
   type SegRole,
   type Segment,
@@ -481,15 +481,18 @@ const collapseGuard = EditorState.transactionFilter.of(
     const field = tr.startState.field(diffPaneStateField, false);
     if (!field) return tr;
 
-    // Recompute the post-edit structure exactly as the field will (same
-    // active hint), then look for byte-equal ver pairs.
-    const active =
-      field.activeEmptyVer ??
-      activeBlockAt(field.structure, tr.startState.selection.main.head);
+    // Recompute the post-edit structure EXACTLY as the field will (same
+    // grow target via the shared growIndexFor), then look for byte-equal
+    // ver pairs.
+    const growIdx = growIndexFor(
+      field.structure,
+      field.activeEmptyVer,
+      tr.startState.selection.main.head,
+    );
     const postStructure = mapStructure(
       field.structure,
       tr.changes as ChangeDesc,
-      active,
+      growIdx,
     );
     const postDoc = tr.newDoc.toString();
     const collapsible = findCollapsibleGroups(postDoc, postStructure);

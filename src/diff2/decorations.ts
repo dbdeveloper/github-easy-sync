@@ -41,6 +41,7 @@ import {
 } from "@codemirror/view";
 import {
   type ActiveBlock,
+  growIndexFor,
   mapStructure,
   type Segment,
 } from "./editor-model";
@@ -146,16 +147,19 @@ export const diffPaneStateField = StateField.define<DiffPaneFieldState | null>({
     if (!value) return value;
 
     if (tr.docChanged) {
-      // Free-edit path: map positions only. `active` = the explicitly
-      // activated empty ver (§1.8.a) if any, else the block the caret sat
-      // in BEFORE the edit (heuristic, correct for strict-interior carets).
-      const active =
-        value.activeEmptyVer ??
-        activeBlockAt(value.structure, tr.startState.selection.main.head);
+      // Free-edit path: map positions only. The grown segment is the one the
+      // edit belongs to — an explicitly activated empty ver (§1.8.a), else
+      // the caret's segment (incl. normal segments, so an insert at a segment
+      // boundary like doc-start grows the right segment instead of gapping).
+      const growIdx = growIndexFor(
+        value.structure,
+        value.activeEmptyVer,
+        tr.startState.selection.main.head,
+      );
       const structure = mapStructure(
         value.structure,
         tr.changes as ChangeDesc,
-        active,
+        growIdx,
       );
       // Clear the activation once the block gains content — the heuristic
       // takes over from there (caret now sits strictly inside it).
@@ -192,29 +196,6 @@ const decorationsProvider = EditorView.decorations.compute(
     );
   },
 );
-
-// Find the ver-block (ver1/ver2) whose range contains `pos`, for the
-// mapStructure `active` hint. Returns undefined when the caret is in a
-// normal segment or at an ambiguous boundary. Prefers an interior match
-// (from <= pos < to); falls back to a block ending exactly at pos.
-// Exported so the auto-collapse filter (diff-pane.ts) recomputes the same
-// post-edit structure the field will.
-export function activeBlockAt(
-  structure: Segment[],
-  pos: number,
-): ActiveBlock | undefined {
-  let edgeMatch: ActiveBlock | undefined;
-  for (const s of structure) {
-    if (s.role === "normal") continue;
-    if (pos >= s.from && pos < s.to) {
-      return { role: s.role, group: s.group };
-    }
-    if (pos === s.to) {
-      edgeMatch = { role: s.role, group: s.group };
-    }
-  }
-  return edgeMatch;
-}
 
 export function buildDecorationSet(
   doc: Text,

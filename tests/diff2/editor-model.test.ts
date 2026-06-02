@@ -13,11 +13,15 @@ import {
   type Segment,
   baseSiblingToModel,
   fromEditorModel,
+  growIndexFor,
+  growSegmentIndex,
   mapStructure,
   modelToBaseSibling,
 } from "../../src/diff2/editor-model";
 
-// Apply an edit through CM6 and map the structure with it.
+// Apply an edit through CM6 and map the structure with it. `active` (an empty
+// ver-block) wins via growIndexFor; otherwise the grown segment is the one
+// containing the edit position (mirrors the field's growIndexFor(caret)).
 function edit(
   model: EditorModel,
   spec: { from: number; to?: number; insert?: string },
@@ -26,7 +30,10 @@ function edit(
   const state = EditorState.create({ doc: model.doc });
   const changes = state.changes(spec);
   const doc = changes.apply(state.doc).toString();
-  return { doc, structure: mapStructure(model.structure, changes, active) };
+  const growIdx = active
+    ? growIndexFor(model.structure, active, spec.from)
+    : growSegmentIndex(model.structure, spec.from);
+  return { doc, structure: mapStructure(model.structure, changes, growIdx) };
 }
 
 function seg(model: EditorModel, role: string, group: number): Segment {
