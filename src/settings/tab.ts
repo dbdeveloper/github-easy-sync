@@ -13,6 +13,7 @@ import {
 } from "obsidian";
 import GitHubSyncPlugin from "src/main";
 import { logFileNameFor } from "src/logger";
+import { runAutosaveBenchmark } from "src/diff2/autosave-benchmark";
 import { formatSyncMessage } from "src/sync2/commit-message";
 import { renderTokenHelpBox } from "src/sync2/views/token-help";
 import manifest from "../../manifest.json";
@@ -681,6 +682,43 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
                       await this.plugin.saveSettings();
                   });
           });
+
+      new Setting(containerEl)
+          .setName("Run mobile autosave benchmark")
+          .setDesc(
+              "Measures the diff-editor autosave write latency (history append " +
+              "+ cursor rewrite) on THIS device, p50/p95/p99. Run on Android/iOS " +
+              "and send the result file so the coalesce timing can be tuned for " +
+              "production. Writes/cleans a temporary .diff2-bench/ folder; no " +
+              "plugin state touched.",
+          )
+          .addButton((button) =>
+              button.setButtonText("Run benchmark").onClick(async () => {
+                  button.setDisabled(true);
+                  button.setButtonText("Running…");
+                  try {
+                      const result = await runAutosaveBenchmark(
+                          this.plugin.app.vault,
+                      );
+                      const outPath = "diff2-autosave-benchmark.md";
+                      await this.plugin.app.vault.adapter.write(
+                          outPath,
+                          result.report,
+                      );
+                      new Notice(
+                          `Autosave benchmark done — saved to ${outPath}. ` +
+                          `append p95=${result.singleAppend.p95.toFixed(1)}ms, ` +
+                          `cursor p95=${result.cursorRewrite.p95.toFixed(1)}ms.`,
+                          10_000,
+                      );
+                  } catch (err) {
+                      new Notice(`Benchmark failed: ${String(err)}`);
+                  } finally {
+                      button.setDisabled(false);
+                      button.setButtonText("Run benchmark");
+                  }
+              }),
+          );
 
     // ── Logging ─────────────────────────────────────────────────────
     new Setting(containerEl).setName("Logging").setHeading();
