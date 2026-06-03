@@ -50,11 +50,17 @@ import manifest from "../manifest.json";
 // short enough that consecutive Sync clicks don't stack notices.
 const BRIEF_NOTICE_MS = 700;
 
-// Delay before the startup sync fires after layout-ready. Long enough
-// for an outgoing instance's drain teardown to settle across a
-// disable+enable plugin reload; short enough to be imperceptible on a
-// cold start. See the onLayoutReady startup-sync block.
-const STARTUP_SYNC_DELAY_MS = 1500;
+// Delay before the startup sync fires after layout-ready. Long enough for
+// (a) an outgoing instance's drain teardown to settle across a disable+enable
+// plugin reload, AND (b) Obsidian's own startup config-write storm to FINISH —
+// at launch Obsidian rewrites .obsidian/app.json / appearance.json /
+// core-plugins.json (loading core plugins, applying appearance), and a sync that
+// races it reads transient versions → spurious "modified" detections + the
+// ENOENT vanish window (SYNC2 §7.7). A field log on Android showed the storm
+// still active ~1.9 s after onload, so 1500 ms wasn't enough; 4 s clears it with
+// margin while staying imperceptible-enough for a startup sync. Manual [Sync]
+// is unaffected (fires immediately). See the onLayoutReady startup-sync block.
+const STARTUP_SYNC_DELAY_MS = 4000;
 
 // Internal Obsidian plugin-manager surface we touch for the
 // BRAT-style auto-reload (§20/§21). None of these are in the public
@@ -285,34 +291,28 @@ export default class GitHubSyncPlugin extends Plugin {
       await this.initSync2();
       this.logger.info("Plugin onload: initSync2 done");
 
-      // Always start the timer: when interval is enabled, it runs at the
-      // user's configured cadence and ticks pull + drain; when disabled
-      // it's a 5-min watchdog that only drains pending batches (so a
-      // failed earlier drain gets retried automatically).
-      this.startSyncInterval();
-      this.logger.info("Plugin onload: interval scheduler started");
-
       this.app.workspace.onLayoutReady(() => {
         if (this.settings.showStatusBarItem) this.showStatusBarItem();
         if (this.settings.showSyncRibbonButton) this.showSyncRibbonIcon();
         if (this.settings.showCommitRibbonButton)
           this.showCommitRibbonIcon();
-        if (this.settings.syncOnStartup && this.isConfigured()) {
-          // 2.0.2-beta2 hardening: delay the startup sync a beat
-          // rather than firing it the instant layout is ready. On a
-          // plugin reload (disable+enable), this gives the OUTGOING
-          // instance's onunload (cancelDrain + worker terminate) time
-          // to wind its in-flight drain down before this NEW instance
-          // starts its own — closing the drain-overlap window without
-          // any marker-file bookkeeping. On a normal cold start the
-          // ~1.5s wait is imperceptible (auto-sync isn't time-
-          // critical). Tracked so onunload can cancel it if we unload
-          // again before it fires.
-          this.startupSyncTimer = window.setTimeout(() => {
-            this.startupSyncTimer = null;
+
+        // Delay BOTH the interval scheduler AND the startup sync past the
+        // STARTUP_SYNC_DELAY_MS window — so NO timer (periodic tick, watchdog,
+        // or the one-shot startup pulse) can race Obsidian's startup
+        // config-write storm (SYNC2 §7.7) or a prior instance's drain teardown
+        // (disable+enable reload). The interval start is unconditional (it runs
+        // even with syncOnStartup off — interval cadence / 5-min watchdog);
+        // the startup pulse only fires when opted in + configured. Tracked so
+        // onunload can cancel the whole thing if we unload before it fires.
+        this.startupSyncTimer = window.setTimeout(() => {
+          this.startupSyncTimer = null;
+          this.startSyncInterval();
+          this.logger.info("Plugin onload: interval scheduler started");
+          if (this.settings.syncOnStartup && this.isConfigured()) {
             void this.runStartupSync();
-          }, STARTUP_SYNC_DELAY_MS);
-        }
+          }
+        }, STARTUP_SYNC_DELAY_MS);
       });
 
       // 2.0.2-beta2 command surface — 5 actions, each hotkey-bindable.
