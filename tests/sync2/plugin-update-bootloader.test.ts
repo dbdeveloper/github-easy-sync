@@ -317,6 +317,7 @@ describe("runSelfUpdateBootloader — marker-based recovery for main.js + manife
       const result = await runSelfUpdateBootloader({
         adapter: f.adapter,
         pluginDir: f.pluginDir,
+        pluginLabel: "github-easy-sync",
         reloadPlugin: r.reloadPlugin,
         scheduleReload: r.scheduleReload,
         notice: (msg, d) => notices.push({ msg, duration: d }),
@@ -332,8 +333,10 @@ describe("runSelfUpdateBootloader — marker-based recovery for main.js + manife
       }
       // ONE reload, not three.
       expect(r.captured.delays).toEqual([500]);
+      // ONE notice that names the plugin (not a per-file count), even
+      // though three files were applied.
       expect(notices.length).toBe(1);
-      expect(notices[0].msg).toContain("3 files");
+      expect(notices[0].msg).toBe(`Plugin "github-easy-sync" updated`);
       // All applied
       expect(await f.adapter.read(`${f.pluginDir}/${FILES.main.final}`)).toBe(
         "new-main",
@@ -465,7 +468,7 @@ describe("runSelfUpdateBootloader — marker-based recovery for main.js + manife
     }
   });
 
-  it("notice text aggregates count when multiple files applied", async () => {
+  it("notice names the plugin regardless of how many files applied", async () => {
     const f = makeFixture();
     try {
       await setup(f.adapter, f.pluginDir, {
@@ -480,13 +483,16 @@ describe("runSelfUpdateBootloader — marker-based recovery for main.js + manife
       await runSelfUpdateBootloader({
         adapter: f.adapter,
         pluginDir: f.pluginDir,
+        pluginLabel: "github-easy-sync",
         reloadPlugin: r.reloadPlugin,
         scheduleReload: r.scheduleReload,
         notice: (msg, d) => notices.push({ msg, duration: d }),
       });
 
+      // Always names the plugin, never counts files — a single reload
+      // picks up any combination of applied files.
       expect(notices.length).toBe(1);
-      expect(notices[0].msg).toContain("2 files");
+      expect(notices[0].msg).toBe(`Plugin "github-easy-sync" updated`);
       expect(notices[0].duration).toBe(3000);
     } finally {
       f.cleanup();

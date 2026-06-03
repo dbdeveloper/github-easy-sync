@@ -226,6 +226,7 @@ export default class GitHubSyncPlugin extends Plugin {
         const bootloaderResult = await runSelfUpdateBootloader({
           adapter: this.app.vault.adapter,
           pluginDir: `${this.app.vault.configDir}/plugins/${manifest.id}`,
+          pluginLabel: manifest.id,
           reloadPlugin: () => {
             void reloadPluginById(this.app, manifest.id).catch((err) => {
               try {

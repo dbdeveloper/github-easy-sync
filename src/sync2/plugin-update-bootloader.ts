@@ -62,9 +62,14 @@ export interface BootloaderDeps {
   // so tests can capture the call without touching Obsidian's
   // internal API and so the bootloader stays platform-agnostic.
   reloadPlugin: () => void;
-  // Optional. Surfaces "Plugin updated — reloading…" so the user
-  // sees SOMETHING happen before the reload fires.
+  // Optional. Surfaces `Plugin "<label>" updated` so the user sees
+  // SOMETHING happen before the reload fires. Always our own plugin —
+  // the label names it (e.g. "github-easy-sync"), matching the
+  // sibling-plugin reload notice in main.ts.
   notice?: (msg: string, durationMs?: number) => void;
+  // Display label for OUR plugin (manifest.id). Used in the notice.
+  // Falls back to "github-easy-sync" when omitted.
+  pluginLabel?: string;
   // Optional. Logger sink for diagnostic lines. Falls back to
   // console in production (logger isn't initialised yet at
   // bootloader time).
@@ -189,6 +194,7 @@ export async function runSelfUpdateBootloader(
     reloadPlugin,
     notice,
     log,
+    pluginLabel = "github-easy-sync",
     scheduleReload = (cb, delay) => setTimeout(cb, delay),
   } = deps;
   const logFn =
@@ -233,11 +239,11 @@ export async function runSelfUpdateBootloader(
       logFn("reloadPlugin call failed", { err: `${err}` });
     }
   }, 500);
-  const msg =
-    appliedFiles.length === 1
-      ? `Plugin updated (${appliedFiles[0]})`
-      : `Plugin updated (${appliedFiles.length} files)`;
-  notice?.(msg, 3000);
+  // Always our own plugin — name it, don't count files. A single
+  // reload picks up any combination of (main.js, manifest.json,
+  // styles.css), so the file list is an implementation detail the user
+  // doesn't need; the applied set is still logged below for diagnostics.
+  notice?.(`Plugin "${pluginLabel}" updated`, 3000);
   logFn("Self-update bootloader: apply complete, reload scheduled", {
     appliedFiles,
   });
