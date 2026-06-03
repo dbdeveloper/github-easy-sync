@@ -10,12 +10,13 @@
 // deterministic function of what's on disk — it can always roll forward to
 // the committed state or cleanly roll back to the autosave session.
 //
-// SCOPE (Stage 2.1 = tested core, like Stage 2.0): this module is the commit
-// engine + TOCTOU detector + per-dir recovery. NOT wired into the view yet —
-// the §5.0.e resolution MODAL, the `committing` UI guard (Step 0), Step 8
-// (detachLeaf + historyClear), startSession-at-mount, and the onload sweep
-// iteration over all autosave dirs are Phase 6 / Phase 11. The naive
-// `exit-protocol.ts` stays until that wiring swaps the caller.
+// SCOPE: this module is the commit engine + TOCTOU detector + per-dir
+// recovery. WIRED into the view as of W1: `commit7Step` is the `[←]` save
+// (DiffEditView.exitDetailView), `classifyToctou` gates it, and `recoverCommit`
+// runs at onload via `onload-recovery.ts` (before AtomicWriteRecovery.sweep).
+// Still Phase-6 polish: the §5.0.e resolution MODAL (W5), the `committing` UI
+// guard (Step 0), and Step 8 (detachLeaf + historyClear). The naive
+// `exit-protocol.ts` is deleted — W1's swap replaced it.
 //
 // Canonical spec: docs/tasks/DIFF-EDITOR.md §5.0 (7 steps), §5.0.a/b
 // (recovery sweep + A–K matrix), §5.0.c (orphan discrimination), §5.0.e
