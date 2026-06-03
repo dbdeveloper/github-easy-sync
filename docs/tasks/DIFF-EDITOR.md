@@ -199,6 +199,12 @@ Stage 2.1 та Stage 3 спираються на 2.0; порядок між ни
 line-wrap завжди ON ⇒ `↵` скрізь (§1.6.a); sibling-wins нумерація (§1.10). (Версію diff
 у `meta.json` НЕ зберігаємо — replay-валідність гарантує `joinedDocSha`, §2.5.)
 
+**Phase 5/6 prep — autosave-значення ЗАПІНЕНО бенчмарком (Android mid-tier, 2026-06-03):**
+`history append single p95 = 3.10 ms` → §6.2 band `<10ms` → **history.jsonl per-transaction,
+БЕЗ coalesce** (§2.8). `cursor rewrite p95 = 28.01 ms` → band `20–80ms` → **cursor-timer
+2500 ms active / 6000 ms navigation** (§2.9). Бенчмарк-кнопку з Settings прибрано (своє
+відпрацювала). Wiring (Phase 6) стартує на цих значеннях.
+
 ---
 
 ## §1. Документ-модель і поведінка редактора (R7.7 core)
@@ -1593,8 +1599,15 @@ call" — proven у production. Не потрібно ні read-modify-write, н
 
 ### §2.8 Coalesce window — flush triggers
 
-**Не пишемо append НА КОЖНУ CM6 transaction окремо.** Тримаємо in-memory
-pending-queue redo-блоків. Flush триггериться однією з чотирьох умов:
+> **РАТИФІКОВАНО бенчмарком (Android mid-tier, 2026-06-03): coalesce НЕ використовуємо —
+> append per CM6 transaction.** `single-append p95 = 3.10 ms` (max 23.70, n=200) → band
+> §6.2 `< 10 ms` → «Append per CM6 transaction, no coalesce. Найпростіша імплементація.»
+> `HistoryWriter` flush'ить кожну транзакцію негайно (queue cap=1 за фактом). Таблиця
+> нижче (idle/typing-pause/queue-cap машинерія) **збережена як contingency-дизайн** на
+> випадок, якщо на іншій платформі p95 виросте — production-шлях її не активує.
+
+**Contingency-дизайн (НЕ активний):** тримати in-memory pending-queue redo-блоків,
+flush по одній з чотирьох умов:
 
 | Тригер                                | Інтервал / умова          | Раціонал                                                                                                                          |
 |---------------------------------------|---------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
@@ -1616,9 +1629,9 @@ pending-queue redo-блоків. Flush триггериться однією з 
 R7.7.a. 150-500 ms — не "ой я забув"-throttle, а нормальний micro-batching.
 Семантично — той самий append-only лог.
 
-**Точні значення 150 ms / 500 ms / 10 blocks — placeholders до §6 benchmark.**
-Якщо тест на Android покаже p95 < 10 ms — coalesce можна викинути взагалі. Якщо
-p95 > 50 ms — збільшити idle до 300 ms.
+**Рішення прийняте (2026-06-03):** Android-бенчмарк дав `p95 = 3.10 ms` → coalesce
+**викинуто**, append per-transaction (див. банер угорі §2.8). Значення 150/500/10
+лишаються лише як contingency на випадок регресу швидкості на іншій платформі.
 
 ### §2.9 `cursor.json` — окремий файл, timer-based
 
@@ -1675,12 +1688,15 @@ async function persistCursor() {
 (`if (exists) remove; rename` — портативний pattern для Capacitor — див.
 PSEUDO-MERGE-MODE §11.)
 
-**Таймер:**
+**Таймер (РАТИФІКОВАНО бенчмарком, Android 2026-06-03):** `cursor atomic rewrite
+p95 = 28.01 ms` (max 45.90, n=200) → band §6.2 `20–80 ms` → **2500 ms active /
+6000 ms navigation**. (Дефолт 1–2с/3–5с піднято, бо rewrite потрапив у 20–80ms,
+а не <20ms — atomic temp+rename коштує помітно, тож рідший таймер уникає jank.)
 
-| Режим             | Інтервал       | Раціонал                                                                                          |
-|-------------------|----------------|---------------------------------------------------------------------------------------------------|
-| Active typing     | 1–2 секунди    | Користувач друкує, cursor рухається швидко. Коротший інтервал → точніший recovery.                  |
-| Pure navigation   | 3–5 секунд     | Користувач лише сканує / читає. Cursor зрушується повільніше; рідше переходить у нову позицію.      |
+| Режим             | Інтервал (запінено) | Раціонал                                                                                          |
+|-------------------|---------------------|---------------------------------------------------------------------------------------------------|
+| Active typing     | **2500 ms**         | Користувач друкує, cursor рухається швидко. Коротший інтервал → точніший recovery, але 28ms rewrite ⇒ не частіше.  |
+| Pure navigation   | **6000 ms**         | Користувач лише сканує / читає. Cursor зрушується повільніше; рідше переходить у нову позицію.      |
 
 **Як визначаємо "active typing" vs "pure navigation":** простий debounce — кожна
 CM6 transaction скидає таймер у "active" режим на ≥3 секунди. Після 3 секунд без
@@ -2398,9 +2414,12 @@ background, CM6 буфер у пам'яті переживає, coalesce-flush +
 
 ## §6. Mobile append benchmark — Settings test button
 
-**Не будуємо зараз. Специфікуємо.** Implementor додасть кнопку у Settings →
-"Diff Editor" → "Run mobile autosave benchmark" окремим (маленьким) PR
-**перед** Phase 5. Без цього benchmark — coalesce window (§2.8) — здогадка.
+> **ВІДПРАЦЮВАВ І ПРИБРАНИЙ (2026-06-03).** Кнопку Settings → "Run mobile autosave
+> benchmark" (+ `src/diff2/autosave-benchmark.ts` + тест) було додано, прогнано на Android
+> mid-tier, і **видалено** — тимчасовий prep-інструмент, що своє відпрацював. Результат:
+> `single-append p95 = 3.10 ms`, `cursor-rewrite p95 = 28.01 ms` (n=200, block=641B) →
+> запінено per-transaction-no-coalesce (§2.8) + cursor 2500/6000 ms (§2.9). Специфікація
+> нижче лишається на випадок повторного заміру (напр. iOS, §6.3) — тоді кнопку відновити з git.
 
 ### §6.1 Що вимірюємо
 
