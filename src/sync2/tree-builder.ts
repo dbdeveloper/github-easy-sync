@@ -52,18 +52,16 @@ export default class TreeBuilder {
   // vault — the batch represents the user's intent at enqueue time and
   // must not be re-read against current disk state.
   //
-  // `hooks` are optional progress callbacks for the UI.
-  // `onUploadStart(total)` fires once before any file is processed
-  // (caller can show "0/N files"); `onFileProcessed(done, total)`
-  // fires after every file passes through the builder — text files
-  // count too, because the user thinks in terms of total files
-  // shipping to GitHub, not in terms of "blob round-trips happened".
-  // Both hooks are skipped when the batch is delete-only (no files
-  // to upload at all).
+  // `hooks.onFileProcessed(done, total)` is an optional progress
+  // callback. It fires PRE-OP — once just before each file's blob work
+  // begins — so a UI counter shows the file currently shipping and
+  // holds for exactly that file's upload. Text files count too: the
+  // user thinks in terms of total files shipping to GitHub, not "blob
+  // round-trips". Skipped when the batch is delete-only (no files to
+  // upload). SYNC2 §4.5.
   async buildTreeEntries(
     batchId: string,
     hooks?: {
-      onUploadStart?: (totalFiles: number) => void;
       onFileProcessed?: (processed: number, total: number) => void;
     },
   ): Promise<{ entries: NewTreeRequestItem[]; baseTreeSha: string | null; batch: QueueBatch }> {
@@ -81,9 +79,11 @@ export default class TreeBuilder {
 
     const entries: NewTreeRequestItem[] = [];
     const totalFiles = textFiles.length + binaryFiles.length;
-    if (totalFiles > 0) hooks?.onUploadStart?.(totalFiles);
     let processed = 0;
     const tickProgress = (): void => {
+      // Pre-op: advance BEFORE the file's work so a UI counter shows
+      // the file currently shipping and holds for exactly that file's
+      // upload. SYNC2 §4.5.
       processed += 1;
       hooks?.onFileProcessed?.(processed, totalFiles);
     };
@@ -91,6 +91,7 @@ export default class TreeBuilder {
     // Text files: read once, inline as `content`. GitHub stores it as
     // the blob; we never touch createBlob for these.
     for (const path of textFiles) {
+      tickProgress();
       const content = await this.vault.adapter.read(
         `${batchVaultDir}/${path}`,
       );
@@ -100,66 +101,48 @@ export default class TreeBuilder {
         type: "blob",
         content,
       });
-      tickProgress();
     }
 
-    // Binary files: createBlob in parallel for throughput. Each call
-    // returns a blob SHA; the tree entry references it. Concurrency
-    // is bounded by Promise.allSettled (one per file) — fine on the
-    // small batches sync2 produces (single Sync click, 1–10 files
-    // typical).
-    //
-    // Resume optimisation: `batch.uploadedBlobs` holds path→SHA pairs
-    // from prior crashed attempts at this batch. Each map hit skips
-    // the entire createBlob round-trip — the recorded SHA goes
-    // straight into the tree entry. Misses upload as normal, then
-    // persist via `recordBlobUpload` so the next resume sees them.
-    // The metaWriteQueue inside PushQueue serializes those persists
-    // so parallel callbacks don't clobber each other.
-    //
-    // We use allSettled rather than `Promise.all` so a single failure
-    // doesn't abandon sibling callbacks while their createBlob+
-    // recordBlobUpload are still mid-flight — that race would leave
-    // uploadedBlobs out of sync with the actual GitHub-side blob set
-    // and break resume. With allSettled, every sibling either lands
-    // its recordBlobUpload or fails cleanly before we re-throw the
-    // first error.
-    const settled = await Promise.allSettled(
-      binaryFiles.map(async (path) => {
-        const cachedSha = batch.uploadedBlobs[path];
-        if (typeof cachedSha === "string") {
-          tickProgress();
-          return {
-            path,
-            mode: "100644",
-            type: "blob",
-            sha: cachedSha,
-          } satisfies NewTreeRequestItem;
-        }
-        const buf = await this.vault.adapter.readBinary(
-          `${batchVaultDir}/${path}`,
-        );
-        const blob = await this.client.createBlob({
-          content: arrayBufferToBase64(buf),
-          encoding: "base64",
-          retry: true,
-        });
-        await this.queue.recordBlobUpload(batchId, path, blob.sha);
-        tickProgress();
-        return {
+    // Binary files: one blob at a time — SEQUENTIAL, not parallel.
+    // Peak memory is a single file's bytes (read + base64), not all N
+    // resident at once; and to a single host over a bounded uplink,
+    // parallel large-blob uploads are bandwidth-bound anyway (they
+    // share the pipe — no throughput win). Resume bookkeeping:
+    // `batch.uploadedBlobs` holds path→SHA pairs from prior crashed
+    // attempts; a cache hit skips the whole createBlob round-trip.
+    // Each fresh blob SHA is persisted via `recordBlobUpload`
+    // immediately after upload, so a mid-batch crash at file k leaves
+    // 1..k-1 recorded — the next drain's pass hits those in cache and
+    // resumes at k. Being sequential, there is no concurrent
+    // recordBlobUpload, so the old `allSettled` + metaWriteQueue race
+    // is gone by construction. SYNC2 §4.5.
+    for (const path of binaryFiles) {
+      tickProgress();
+      const cachedSha = batch.uploadedBlobs[path];
+      if (typeof cachedSha === "string") {
+        entries.push({
           path,
           mode: "100644",
           type: "blob",
-          sha: blob.sha,
-        } satisfies NewTreeRequestItem;
-      }),
-    );
-    const firstReject = settled.find((r) => r.status === "rejected");
-    if (firstReject && firstReject.status === "rejected") {
-      throw firstReject.reason;
-    }
-    for (const r of settled) {
-      if (r.status === "fulfilled") entries.push(r.value);
+          sha: cachedSha,
+        });
+        continue;
+      }
+      const buf = await this.vault.adapter.readBinary(
+        `${batchVaultDir}/${path}`,
+      );
+      const blob = await this.client.createBlob({
+        content: arrayBufferToBase64(buf),
+        encoding: "base64",
+        retry: true,
+      });
+      await this.queue.recordBlobUpload(batchId, path, blob.sha);
+      entries.push({
+        path,
+        mode: "100644",
+        type: "blob",
+        sha: blob.sha,
+      });
     }
 
     // Deletions: per GitHub's tree API, omit content+sha and explicitly

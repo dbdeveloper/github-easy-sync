@@ -865,6 +865,63 @@ adds a settings surface with no corresponding user need. The
 trailing-label contract is load-bearing for the engine, so the
 format stays fixed.
 
+### 4.5 Blob upload — sequential, low-memory, resumable
+
+`TreeBuilder.buildTreeEntries` turns a queued batch into the `tree[]`
+array `createTree` consumes. Text files inline their content (GitHub
+stores it as the blob, no extra round-trip); binary files each need a
+`createBlob` call first, whose returned SHA the tree entry then
+references. Those blob uploads are issued **one at a time, in order** —
+not concurrently.
+
+This is deliberate, and it corrects an earlier implementation that
+fanned the binary uploads out through `Promise.allSettled`. Parallel
+uploads buy throughput only when the work is *latency-bound* — many
+small requests whose round-trips can overlap. A heavy sync (the only
+case that shows progress at all — see below) is *bandwidth-bound*: the
+files are large, they all go to the same host (`api.github.com`)
+through one network worker (§8) over one uplink, so N concurrent
+uploads simply share the pipe and finish in about the same wall-clock
+as N sequential ones. What concurrency *did* cost was memory — every
+in-flight file held its bytes plus a base64 copy resident at once,
+which is exactly the pressure an Obsidian Mobile WebView can least
+afford. Sequential upload caps peak memory at a single file's bytes.
+
+Sequential upload is also the simpler thing to **resume**. Each fresh
+blob's SHA is persisted to the batch's `uploadedBlobs` map (via
+`PushQueue.recordBlobUpload`) immediately after its `createBlob`
+returns. If the process dies mid-batch — at file *k* of *N* — files
+`1..k-1` are already recorded on disk. The next drain re-runs
+`buildTreeEntries` for the same batch; for every path with a recorded
+SHA it takes the cache hit and skips the `createBlob` round-trip
+entirely, so the upload resumes at exactly file *k*. Because nothing
+runs concurrently, there is no interleaving of `recordBlobUpload`
+writes, and the serialization the old parallel path needed (a
+`metaWriteQueue` guarding against sibling callbacks clobbering each
+other's persist) is unnecessary by construction. A mid-batch failure
+re-throws after the successful files have recorded — strictly forward
+progress, never a lost or double-counted blob.
+
+**Progress signal.** The same per-file boundary drives the user-facing
+notice. `buildTreeEntries` fires `onFileProcessed(done, total)`
+**pre-op** — once just *before* each file's blob work begins — and the
+drain turns that into a long-lived notice that reads `Pushing P/N
+files to GitHub` (or `Pushing 1 file to GitHub…` for a single file; no
+meaningless `1/1`, no `0/N`). Because the tick is pre-op and uploads
+are sequential, each `Pushing P/N` appears before file *P* ships and
+stays on screen for exactly that file's transfer — a 300 ms upload
+shows for 300 ms, a 3 s upload for 3 s. The pull side mirrors this
+contract exactly (`Pulling P/N files from GitHub` /
+`Pulling 1 file from GitHub…`), ticked at the head of `pullIfNeeded`'s
+per-file loop. The notice opens **lazily on the first tick** and only
+when the batch is *heavy* — total bytes over `PROGRESS_BYTES_THRESHOLD`
+(500 KB), or, on a tree-fetch failure, more than `PROGRESS_COUNT_THRESHOLD`
+(5) files — so ordinary small syncs run silent; the drain-level
+`Sync done` finale is their only toast. The lazy-open closure
+(`ensurePushProgress`) closes over the drain-loop's notice handle so
+the handle it opens is the one the finale later hides, and so a second
+batch ticks the same notice rather than spawning a new one.
+
 ---
 
 ## 5. Error Taxonomy

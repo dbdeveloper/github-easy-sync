@@ -252,9 +252,9 @@ describe("TreeBuilder", () => {
   });
 
   it("progress hooks: mixed text+binary batch ticks once per file, total spans both", async () => {
-    // Text files process synchronously in their own loop, binaries
-    // through Promise.allSettled. User-facing counter should treat
-    // them uniformly — "files going to GitHub", not "blob calls".
+    // Text files and binaries are both processed sequentially in their
+    // own loops. The user-facing counter treats them uniformly —
+    // "files going to GitHub", not "blob calls".
     writeVaultFile(f.root, "a.md", "text 1");
     writeVaultFile(f.root, "b.md", "text 2");
     writeVaultFile(f.root, "c.png", Buffer.from([1]));
@@ -266,19 +266,18 @@ describe("TreeBuilder", () => {
         parentTreeSha: null,
       },
     );
-    const starts: number[] = [];
     const ticks: Array<[number, number]> = [];
     await f.builder.buildTreeEntries(id, {
-      onUploadStart: (total) => starts.push(total),
       onFileProcessed: (done, total) => ticks.push([done, total]),
     });
-    expect(starts).toEqual([4]);
     expect(ticks).toHaveLength(4);
-    expect(ticks.map(([n]) => n).sort()).toEqual([1, 2, 3, 4]);
+    // Pre-op, sequential: ticks fire in order 1,2,3,4 (text a,b then
+    // binary c,d), each BEFORE that file's work.
+    expect(ticks.map(([n]) => n)).toEqual([1, 2, 3, 4]);
     expect(ticks.every(([, total]) => total === 4)).toBe(true);
   });
 
-  it("progress hooks: delete-only batch fires neither hook", async () => {
+  it("progress hooks: delete-only batch fires no hook", async () => {
     // Pre-write the file so the queue enqueue can capture its
     // existence-then-delete intent, then immediately delete it from
     // the vault so the queue records a deletion.
@@ -290,13 +289,10 @@ describe("TreeBuilder", () => {
         parentTreeSha: null,
       },
     );
-    let upStartCalls = 0;
     let blobCalls = 0;
     await f.builder.buildTreeEntries(id, {
-      onUploadStart: () => upStartCalls++,
       onFileProcessed: () => blobCalls++,
     });
-    expect(upStartCalls).toBe(0);
     expect(blobCalls).toBe(0);
   });
 

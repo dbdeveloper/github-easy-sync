@@ -1063,31 +1063,37 @@ export class Sync2Manager {
         isHeavyPull = syncableChanges.length > PROGRESS_COUNT_THRESHOLD;
       }
     }
-    if (syncableChanges.length > 0 && isHeavyPull) {
-      const initial =
-        syncableChanges.length === 1
-          ? "Pull file from GitHub…"
-          : `Pull 0/${syncableChanges.length} files from GitHub`;
-      if (pullProgress === null && this.onProgress) {
-        pullProgress = this.onProgress(initial);
-      } else if (pullProgress) {
-        pullProgress.update(initial);
-      }
-    }
+    // The progress notice opens lazily on the FIRST file tick rather
+    // than pre-loop. tickPull runs at loop-start (below), so each
+    // "Pull P/N" appears BEFORE that file is fetched (the user sees the
+    // operation in progress, not after it) and the first glimpse is
+    // "Pull 1/N" — never a "0/N" that reads as "nothing happened".
     let processed = 0;
     const tickPull = (): void => {
       processed += 1;
+      const msg =
+        syncableChanges.length === 1
+          ? "Pulling 1 file from GitHub…"
+          : `Pulling ${processed}/${syncableChanges.length} files from GitHub`;
       if (pullProgress) {
-        pullProgress.update(
-          syncableChanges.length === 1
-            ? "Pull file from GitHub…"
-            : `Pull ${processed}/${syncableChanges.length} files from GitHub`,
-        );
+        // Shared notice (syncAll opened one) OR our own, already open.
+        pullProgress.update(msg);
+      } else if (isHeavyPull && this.onProgress) {
+        // Own notice — sharedProgress was null (ownPullProgress true),
+        // so the finally-hide below fires for it. Gated on isHeavyPull
+        // so light pulls stay silent.
+        pullProgress = this.onProgress(msg);
       }
     };
 
     try {
       for (const f of syncableChanges) {
+        // Pre-op tick: advance the counter BEFORE this file is handled,
+        // so "Pull P/N" reflects the file currently in flight. Every
+        // file ticks exactly once here (replacing the old per-branch
+        // post-op ticks); pulledFilesThisSync++ stays on the real-pull
+        // branches only — it is NOT 1:1 with the counter.
+        tickPull();
         try {
           // Pull-side sanitize: when GitHub carries a path with chars
           // the local platform can't materialise (Mobile rejects `"`,
@@ -1137,7 +1143,6 @@ export class Sync2Manager {
                   { from: f.filename, to: canonical },
                 );
                 this.pulledFilesThisSync++;
-                tickPull();
                 // skip-class: applied ("forbidden remote path sanitized
                 //   to canonical local + intent recorded in
                 //   pendingDeletions queue; next push cleans GitHub")
@@ -1160,7 +1165,6 @@ export class Sync2Manager {
             // deliberately leave lastSync at the OLD expectedHead so
             // processBatch sees the drift and triggers reconcile.
             anyOverlapDeferred = true;
-            tickPull();
             // skip-class: deferred ("path overlaps push-queue;
             //   processBatch's reconcile branch handles it")
             continue;
@@ -1169,7 +1173,6 @@ export class Sync2Manager {
           if (f.status === "removed") {
             await this.applyRemoteDeletion(f.filename, expectedHead, currentHead);
             this.pulledFilesThisSync++;
-            tickPull();
             // skip-class: applied ("remote-deletion processed inline")
             continue;
           }
@@ -1193,7 +1196,6 @@ export class Sync2Manager {
                   size: stat.size,
                 });
               }
-              tickPull();
               // skip-class: already-correct ("local file's git-blob SHA
               //   already matches the compare diff's expected SHA;
               //   snapshot stat-cache refreshed, no write needed")
@@ -1218,7 +1220,6 @@ export class Sync2Manager {
             expectedHead,
           );
           this.pulledFilesThisSync++;
-          tickPull();
         } catch (err) {
           // Per-file observability: without this catch, the very first
           // failure aborted the entire pull loop and the only signal
@@ -2783,26 +2784,29 @@ export class Sync2Manager {
           const ids = await this.queue.list();
           if (ids.length === 0) break;
           commitNum += 1;
-          // Lazy-open a long-lived progress notice only when this
-          // batch's push would actually be heavy. The notice goes
-          // straight into "Push 0/N files to GitHub" — no separate
-          // "starting" pre-message, no batch-number indicator. Each
-          // batch's per-file ticks become the user's only visible
-          // signal during heavy push; light batches stay silent here
-          // and the drain-level "Sync done" finale below shows the
-          // success signal once the whole queue drains.
+          // Progress notice (heavy batches only). The long-lived notice
+          // opens LAZILY on the first per-file tick inside processBatch
+          // — not pre-opened here — so the user's first glimpse is
+          // "Pushing 1/N" (never a "0/N" that reads as "nothing
+          // happened"), shown BEFORE that file ships and held for
+          // exactly its upload. `ensurePushProgress` closes over the
+          // drain-loop `progress`, so the handle it opens is the one the
+          // "Sync done" finale hides; gated on isHeavyPush so light
+          // batches stay silent. Once any batch has opened it, later
+          // (even light) batches keep ticking the same notice. SYNC2 §4.5.
           const batchBytes = await this.estimateBatchBytes(ids[0]);
           const isHeavyPush = batchBytes > this.progressBytesThreshold;
-          if (isHeavyPush && progress === null && this.onProgress) {
-            const peek = await this.queue.read(ids[0]);
-            progress = this.onProgress(
-              `Push 0/${peek.files.length} files to GitHub`,
-            );
-          }
+          const ensurePushProgress = (msg: string): void => {
+            if (progress) {
+              progress.update(msg);
+            } else if (isHeavyPush && this.onProgress) {
+              progress = this.onProgress(msg);
+            }
+          };
           await this.processBatch(
             ids[0],
             headHint,
-            progress,
+            ensurePushProgress,
             commitNum,
             commitNum + ids.length - 1,
           );
@@ -3068,7 +3072,10 @@ export class Sync2Manager {
   private async processBatch(
     id: string,
     headHint: string | null = null,
-    progress: ProgressHandle | null = null,
+    // Lazy-opening progress sink. Called pre-op once per file with the
+    // message to show; opens the notice on first call (heavy only) and
+    // updates it after. Default no-op for callers without a UI. SYNC2 §4.5.
+    ensurePushProgress: (msg: string) => void = () => {},
     commitNum: number = 1,
     commitTotal: number = 1,
   ): Promise<void> {
@@ -3208,14 +3215,17 @@ export class Sync2Manager {
 
       const { entries: rawEntries, baseTreeSha, batch } =
         await this.builder.buildTreeEntries(id, {
-          // Live N/M counter. Each batch starts hidden when not heavy
-          // (progress=null, hook returns immediately). When heavy, the
-          // drain opened the notice with "Push 0/N files to GitHub"
-          // already, so onUploadStart is redundant — only the per-file
-          // tick needs to advance the counter.
+          // Pre-op per-file tick. `ensurePushProgress` lazy-opens the
+          // notice on its first call (heavy batches only) and updates it
+          // thereafter — so "Pushing P/N" appears BEFORE file P ships
+          // and holds for exactly its upload. A single file reads
+          // "Pushing 1 file to GitHub…" (no meaningless "1/1"). SYNC2 §4.5.
           onFileProcessed: (done, total) => {
-            if (!progress) return;
-            progress.update(`Push ${done}/${total} files to GitHub`);
+            ensurePushProgress(
+              total === 1
+                ? "Pushing 1 file to GitHub…"
+                : `Pushing ${done}/${total} files to GitHub`,
+            );
           },
         });
 
