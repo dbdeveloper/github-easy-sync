@@ -1578,6 +1578,11 @@ export class Sync2Manager {
     let remoteOverwrote = 0;
     try {
       for (const filePath of syncablePaths) {
+        // Pre-op tick: advance BEFORE this file is handled, so
+        // "Preparing GitHub syncing: P/N" reflects the file currently
+        // in flight (same contract as pullIfNeeded, SYNC2 §4.5). One
+        // tick per file here replaces the old per-branch post-op ticks.
+        tickPull();
         const item = files[filePath];
         // Pull-side sanitize for bootstrap (initial vault clone). Same
         // shape as in pullIfNeeded — see comment there. Bootstrap runs
@@ -1619,7 +1624,6 @@ export class Sync2Manager {
             );
             pulled++;
             this.pulledFilesThisSync++;
-            tickPull();
             continue;
           } else {
             this.logger.warn(
@@ -1634,7 +1638,6 @@ export class Sync2Manager {
           await this.adoptionPullAndRecord(filePath, item);
           pulled++;
           this.pulledFilesThisSync++;
-          tickPull();
           continue;
         }
 
@@ -1654,7 +1657,6 @@ export class Sync2Manager {
             });
           }
           identical++;
-          tickPull();
           continue;
         }
 
@@ -1682,7 +1684,6 @@ export class Sync2Manager {
             });
           }
           identical++;
-          tickPull();
           continue;
         }
 
@@ -1693,14 +1694,12 @@ export class Sync2Manager {
           // the file as "added" (no snapshot entry) and the next push
           // will lift this local version onto the remote.
           localKept++;
-          tickPull();
           continue;
         }
         // Remote wins. Pull, overwriting the local copy in place.
         await this.adoptionPullAndRecord(filePath, item);
         remoteOverwrote++;
         this.pulledFilesThisSync++;
-        tickPull();
       }
     } finally {
       if (ownPullProgress) pullProgress?.hide();
