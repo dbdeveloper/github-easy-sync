@@ -57,10 +57,10 @@ const BRIEF_NOTICE_MS = 700;
 // core-plugins.json (loading core plugins, applying appearance), and a sync that
 // races it reads transient versions → spurious "modified" detections + the
 // ENOENT vanish window (SYNC2 §7.7). A field log on Android showed the storm
-// still active ~1.9 s after onload, so 1500 ms wasn't enough; 4 s clears it with
+// still active ~1.9 s after onload, so 1500 ms wasn't enough; 5 s clears it with
 // margin while staying imperceptible-enough for a startup sync. Manual [Sync]
 // is unaffected (fires immediately). See the onLayoutReady startup-sync block.
-const STARTUP_SYNC_DELAY_MS = 4000;
+const STARTUP_SYNC_DELAY_MS = 5000;
 
 // Internal Obsidian plugin-manager surface we touch for the
 // BRAT-style auto-reload (§20/§21). None of these are in the public
