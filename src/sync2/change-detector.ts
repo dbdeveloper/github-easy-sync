@@ -67,6 +67,15 @@ export async function isSyncable(
 // trickery here; the date marker `Z` plus the digit-and-dash pattern
 // after `-from-` is structurally unambiguous and unlikely to clash
 // with a real user filename.
+// True for a "file vanished" adapter error — Capacitor surfaces ENOENT with
+// message "File does not exist"; Node/desktop uses code "ENOENT". Path-agnostic
+// (the error rarely names the path). Used to make a mid-walk read fail-soft.
+function isMissingFileError(err: unknown): boolean {
+  if ((err as { code?: unknown } | null)?.code === "ENOENT") return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /does not exist|no such file|enoent/i.test(msg);
+}
+
 const CONFLICT_SIBLING_PATTERN =
   /\.conflict-from-[A-Za-z0-9_-]+-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z(\.[^./]+)?$/;
 // (The trailing-extension group stays optional — files without a
@@ -225,7 +234,8 @@ export default class ChangeDetector {
         // the same cost the upcoming push would pay; we just bring
         // it forward.
         if (this.queue) {
-          const buf = await this.vault.adapter.readBinary(file.path);
+          const buf = await this.readBinaryOrSkip(file.path);
+          if (buf === null) continue; // SYNC2 §6 skip-class — vanished mid-walk
           const localSha = await calculateGitBlobSHA(buf);
           const inQueueSha = await this.queue.peekPathSha(file.path);
           if (inQueueSha === localSha) continue;
@@ -251,7 +261,8 @@ export default class ChangeDetector {
       }
 
       // Stat moved; verify it's a real content change.
-      const buf = await this.vault.adapter.readBinary(file.path);
+      const buf = await this.readBinaryOrSkip(file.path);
+      if (buf === null) continue; // SYNC2 §6 skip-class — vanished mid-walk
       const sha = await calculateGitBlobSHA(buf);
       if (sha === snap.remoteSha) {
         // Touched (mtime/size moved) but content matches the remote
@@ -348,7 +359,8 @@ export default class ChangeDetector {
       return null; // cache hit
     }
 
-    const buf = await this.vault.adapter.readBinary(path);
+    const buf = await this.readBinaryOrSkip(path);
+    if (buf === null) return null; // SYNC2 §6 skip-class — vanished mid-detect
     const sha = await calculateGitBlobSHA(buf);
     if (sha === snap.remoteSha) {
       // Touched but unchanged — refresh stat so future calls
@@ -420,6 +432,24 @@ export default class ChangeDetector {
   // - dotfiles in subfolders are theoretically also missing from the
   //   index, but that scenario is rarer and would need a deeper
   //   recursive walk; address if it surfaces.
+  // SYNC2 §6 skip-class — read a candidate that was just listed in allFiles,
+  // tolerating the file VANISHING mid-walk. On Android (Capacitor) an external
+  // writer (Obsidian rewriting its own .obsidian/* config at startup, or any
+  // app.json/appearance.json/core-plugins.json change) has a brief window where
+  // the file is momentarily absent, so a concurrent readBinary throws ENOENT
+  // ("File does not exist"). That used to fail the whole syncAll. Treat it as
+  // "not a candidate this pass" → null → caller skips; the next sync re-walks
+  // and picks up the real state (transient → re-read; truly deleted → next
+  // allFiles omits it → Pass-2 emits the delete). Non-missing errors rethrow.
+  private async readBinaryOrSkip(path: string): Promise<ArrayBuffer | null> {
+    try {
+      return await this.vault.adapter.readBinary(path);
+    } catch (err) {
+      if (isMissingFileError(err)) return null;
+      throw err;
+    }
+  }
+
   private async walkRootDotfiles(): Promise<FileLike[]> {
     const out: FileLike[] = [];
     if (!(await this.vault.adapter.exists(""))) return out;

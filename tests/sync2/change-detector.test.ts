@@ -278,6 +278,61 @@ describe("ChangeDetector", () => {
       ]);
     });
 
+    it("ENOENT mid-walk (file vanished after listing): skips it, sync survives, other changes still detected", async () => {
+      // Two modified candidates; one's readBinary throws ENOENT (an external
+      // writer — e.g. Obsidian rewriting .obsidian/* — removed it for a moment
+      // between listing and read on Android). SYNC2 §6 skip-class: skip the
+      // vanished one, don't fail findChanges, still emit the healthy one.
+      for (const name of ["Notes/vanish.md", "Notes/ok.md"]) {
+        writeFile(f.root, name, "v1");
+        setMtime(f.root, name, 1_000_000_000_000);
+        f.store.set(name, {
+          path: name,
+          remoteSha: await shaOf("v1"),
+          mtime: 1_000_000_000_000,
+          size: 2,
+        });
+      }
+      f.store.setLastCommitMtime(1_000_000_000_000);
+      // Edit both → modified candidates past the watermark.
+      writeFile(f.root, "Notes/vanish.md", "v2-bigger");
+      setMtime(f.root, "Notes/vanish.md", 2_000_000_000_000);
+      writeFile(f.root, "Notes/ok.md", "o2-bigger");
+      setMtime(f.root, "Notes/ok.md", 2_000_000_000_000);
+
+      // mock-obsidian's `adapter` is a fresh-literal getter, so override the
+      // getter to re-wrap readBinary on every access (a plain reassignment is
+      // lost). Throw ENOENT only for the "vanished" path.
+      const proto = Object.getPrototypeOf(f.vault);
+      const origGet = Object.getOwnPropertyDescriptor(proto, "adapter")!.get!;
+      Object.defineProperty(f.vault, "adapter", {
+        configurable: true,
+        get() {
+          const real = origGet.call(this) as {
+            readBinary: (p: string) => Promise<unknown>;
+          };
+          const orig = real.readBinary;
+          real.readBinary = async (p: string) => {
+            if (p === "Notes/vanish.md") {
+              const e = new Error("File does not exist") as Error & { code?: string };
+              e.code = "ENOENT";
+              throw e;
+            }
+            return orig(p);
+          };
+          return real;
+        },
+      });
+
+      try {
+        const out = await f.detector.findChanges(); // must NOT throw
+        expect(out.find((c) => c.path === "Notes/ok.md")?.kind).toBe("modified");
+        expect(out.find((c) => c.path === "Notes/vanish.md")).toBeUndefined();
+      } finally {
+        Object.defineProperty(f.vault, "adapter", { configurable: true, get: origGet });
+      }
+    });
+
     it("touched-but-unchanged: refreshes mtime in snapshot, emits nothing", async () => {
       writeFile(f.root, "Notes/x.md", "same");
       setMtime(f.root, "Notes/x.md", 1_000_000_000_000);

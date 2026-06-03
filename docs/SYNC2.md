@@ -1013,7 +1013,7 @@ a `throw`, not a `continue`.
 
 The design as described across PSEUDO-MERGE-MODE.md and §1–§12 here reads as a single coherent
 protocol, but the path to that protocol passed through specific
-field incidents that surfaced specific structural gaps. The five
+field incidents that surfaced specific structural gaps. The seven
 postmortems below preserve the historical record: each one captures
 the symptom that was reported, the proximate cause that was
 identified, and the section above whose discipline now makes the
@@ -1198,6 +1198,37 @@ defensive-guard work (zero-byte → conflict instead of push;
 tracked as separate hardening tasks and ships in a follow-up
 release; this postmortem covers the structural fix that resolves
 the primary failure mode.
+
+### 7.7 `File does not exist` (ENOENT) mid-walk fails the whole syncAll on Android (2026-06-03)
+
+**Symptom.** On Obsidian Android, a `[Sync]` shortly after launch
+logged `ERROR "syncAll click failed" … "File does not exist" code:
+"ENOENT"` with a stack containing only `win.androidBridge.onmessage`
+/ `returnResult` (a raw adapter rejection, not plugin logic). A
+*concurrent* syncAll, fired ~100 ms apart at startup, committed the
+batch fine (3 `.obsidian/*` config files modified), so the failure
+was intermittent and left no corruption — the next sync succeeded.
+
+**Cause.** `change-detector.findChanges()` reads each candidate's
+bytes (`readBinary`) to SHA it, right after the file was listed in
+`allFiles`. Obsidian rewrites its own config (`app.json`,
+`appearance.json`, `core-plugins.json`) around startup (and on any
+relevant settings change); on Android the Capacitor write has a brief
+window where the file is momentarily absent. A concurrent `readBinary`
+lands in that window → ENOENT. The read was unguarded, so the
+rejection propagated out of `findChanges` and failed the entire
+syncAll. Two syncAll calls racing at startup widened the window.
+
+**Now-covered-by:** §6 *Skip-Class Discipline*. `findChanges`'
+candidate reads (and the single-path `detectOne`) now go through
+`readBinaryOrSkip`, which catches a "file vanished" error
+(`code === "ENOENT"` or message `/does not exist|no such file/i`) and
+returns `null` → the caller skips that file this pass. Safe because
+the file was already in `allFiles` (so Pass-2 sees it as "seen" and
+emits no spurious delete); a transient vanish is re-read next sync, a
+genuine delete is omitted from the next `allFiles` and emitted then.
+Non-missing errors still rethrow. Test:
+`change-detector.test.ts` "ENOENT mid-walk … skips it, sync survives".
 
 ---
 
