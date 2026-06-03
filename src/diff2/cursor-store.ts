@@ -3,12 +3,22 @@
 // Cursor position lives in its own file (NOT in history.jsonl): edits are
 // append-only and tied to MODIFICATIONS, but ~80% of a session is navigation,
 // where the caret moves without any history block. So cursor is a separate,
-// timer-rewritten file. startSession (§2.5.a) creates it at (0,0,0); this
-// module rewrites it (atomic temp+rename) and reads it back on recovery.
+// timer-rewritten file. startSession (§2.5.a) creates it; this module rewrites
+// it and reads it back on recovery.
 //
-// SCOPE (tested core): persist / read / clamp. The active-typing (1–2 s) vs
-// navigation (3–5 s) debounce timer that DECIDES when to call persistCursor is
-// caller-driven (Phase 6 — real timers, placeholder intervals per §2.9).
+// ⚠ SPEC DRIFT — REWRITE AT W3: §2.9 was RATIFIED (2026-06-04) to the
+// **2-slot ping-pong** (`cursor-a.json` / `cursor-b.json`, each with a
+// monotonic `seq`; write the stale slot via plain `adapter.write` ≈3ms,
+// recover by max valid `seq`). This module is still the PRE-decision atomic
+// temp+rename single-file (`cursor.json`, p95≈28ms). It is greenfield (not yet
+// wired — W3 adds the timer), so the rewrite lands with W3; until then code and
+// §2.9 intentionally differ. The W3 rewrite also touches the contract:
+// startSession (writes `cursor-a.json` seq 0), classifySweep §4.2 cond-3 (check
+// `cursor-a.json` OR `cursor-b.json`), and this module's read (max-seq slot).
+//
+// SCOPE (tested core): persist / read / clamp. The active-typing (2500 ms) vs
+// navigation (6000 ms) debounce timer that DECIDES when to call persistCursor is
+// caller-driven (W3 — real timers).
 
 import type { Vault } from "obsidian";
 import { safeRename } from "../sync2/cross-platform";
