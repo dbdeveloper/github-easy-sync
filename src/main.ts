@@ -35,6 +35,7 @@ import { PreSyncConflictModal } from "./sync2/views/pre-sync-conflict-modal";
 import { TrashStore } from "./diff2/trash-store";
 import { TrashWatcher } from "./diff2/trash-watcher";
 import { sweepOnload as trashSweepOnload } from "./diff2/trash-recovery";
+import { recoverAutosaveDirs } from "./diff2/onload-recovery";
 import { DiffEditView, DIFF2_EDIT_VIEW_TYPE } from "./diff2/diff-edit-view";
 import { TokenExpiredModal } from "./sync2/views/token-expired-modal";
 import { CancelSyncModal } from "./sync2/views/cancel-sync-modal";
@@ -784,6 +785,29 @@ export default class GitHubSyncPlugin extends Plugin {
       });
     } catch (err) {
       this.logger.error("Trash recovery sweep failed", `${err}`);
+    }
+    // diff2 [←]-commit recovery (DIFF-EDITOR.md §5.0.a / §4.2). MUST run
+    // BEFORE AtomicWriteRecovery.sweep below: commit7Step stages the resolved
+    // base+sibling via the SAME .sync-tmp/.sync-bak suffixes the naive sweep
+    // scans, and only recoverCommit's done.json-coordinated dispatch can
+    // restore the PAIR atomically. Filesystem-driven (id = dir name), so a
+    // tracked conflict whose record vanished mid-crash still recovers. No-op
+    // until startSession is wired at mount (no autosave dirs exist yet).
+    try {
+      const r = await recoverAutosaveDirs(this.app.vault);
+      if (r.dirs > 0) {
+        this.logger.info("initSync2: diff2 autosave recovery", {
+          dirs: r.dirs,
+          swept: r.swept,
+          recovered: r.recovered,
+          results: r.results.map((x) => ({
+            id: x.conflictId,
+            kind: x.recover.kind,
+          })),
+        });
+      }
+    } catch (err) {
+      this.logger.error("diff2 autosave recovery failed", `${err}`);
     }
     // Crash-recovery sweep for atomic-write artifacts AND for
     // ConflictStore vault-level `.sync-tmp` staging siblings. Runs BEFORE the
