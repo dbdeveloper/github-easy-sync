@@ -40,9 +40,18 @@ import {
   DiffEditSubTab,
   DiffEditViewState,
 } from "./events";
-import { executeExitProtocol } from "./exit-protocol";
+import {
+  autosaveDir,
+  startSession,
+  type AutosaveMeta,
+} from "./autosave-store";
+import { classifyToctou, commit7Step } from "./exit-commit";
 import { findSentinelCollision } from "./joined-doc";
-import { findAllConflicts, type ConflictEntry } from "./synthetic-detector";
+import {
+  autosaveIdForEntry,
+  findAllConflicts,
+  type ConflictEntry,
+} from "./synthetic-detector";
 import { renderConflictsToolbar } from "./toolbar-conflicts";
 
 export const DIFF2_EDIT_VIEW_TYPE = "diff2-edit-view";
@@ -85,6 +94,11 @@ export class DiffEditView extends ItemView {
   // on every detail-open; destroyed when leaving detail-mode or on
   // view close.
   private activeDiffPane: DiffPane | null = null;
+  // Autosave session bound to the active DiffPane: the conflict's autosave id
+  // + the meta startSession wrote. Set at mount, consumed by the `[←]`
+  // commit7Step, cleared on dispose. Null when no detail editor is open.
+  private activeSession: { conflictId: string; meta: AutosaveMeta } | null =
+    null;
 
   constructor(leaf: WorkspaceLeaf, deps: DiffEditViewDeps) {
     super(leaf);
@@ -150,6 +164,12 @@ export class DiffEditView extends ItemView {
       this.activeDiffPane.destroy();
       this.activeDiffPane = null;
     }
+    // Drop the in-memory session ref. The on-disk .diff2-autosave/<id>/ dir is
+    // intentionally LEFT for recovery — a non-`[←]` exit (switch conflict /
+    // close view) keeps the autosave so a crash mid-edit is still recoverable;
+    // a stale session is GC'd by sweepAll on the next onload (§4.2), and a
+    // reopen rmdir+fresh's it (W1) until the resume dialog lands (W4).
+    this.activeSession = null;
   }
 
   // ── render dispatch ───────────────────────────────────────────────
@@ -310,6 +330,42 @@ export class DiffEditView extends ItemView {
         return;
       }
 
+      // Autosave session (DIFF-EDITOR.md §2.5.a). startSession creates
+      // .diff2-autosave/<id>/ (snapshots + cursor + empty history + meta LAST).
+      // W1: no resume dialog yet — discard any prior session dir and start
+      // fresh (no history to lose until W2's feed). But NEVER nuke a dir with
+      // an in-flight commit (done.json): onload recovery clears those first
+      // (§5.0.a precedence), so its presence here means recovery hasn't run —
+      // bail rather than destroy a recoverable commit.
+      const conflictId = autosaveIdForEntry(entry);
+      const dir = autosaveDir(conflictId);
+      if (await adapter.exists(dir)) {
+        if (await adapter.exists(`${dir}/done.json`)) {
+          new Notice(
+            "A previous save for this conflict is still recovering. " +
+              "Reload the plugin and reopen.",
+          );
+          return;
+        }
+        await adapter.rmdir(dir, true);
+      }
+      let meta: AutosaveMeta;
+      try {
+        meta = await startSession(
+          this.deps.vault,
+          conflictId,
+          entry.basePath,
+          entry.siblingPath,
+        );
+      } catch (err) {
+        body.createEl("p", {
+          cls: "diff2-detail-error",
+          text: `Failed to start the edit session: ${String(err)}`,
+        });
+        return;
+      }
+      this.activeSession = { conflictId, meta };
+
       this.activeDiffPane = new DiffPane(body, ours, theirs, {
         oursLabel: this.deps.localDeviceLabel?.() ?? "local",
         theirsLabel: entry.deviceLabel,
@@ -327,50 +383,59 @@ export class DiffEditView extends ItemView {
     }
   }
 
-  // R7.7.c step 1 — write current buffer to vault base file.
-  // R7.7.c step 2 (Phase 4) — proactive sibling cleanup: for each
-  //   sibling with SHA(sibling) === SHA(base) the post-write,
-  //   adapter.remove(siblingPath). Performed inside
-  //   executeExitProtocol (src/diff2/exit-protocol.ts).
-  // Step 4 (CM6 history null) is implicit when activeDiffPane is
-  // disposed inside render(). Step 5 (close detail view) is the
-  // `[←]` back-to-list transition done at the end of this method.
-  // Step 3 (autosave cleanup) is Phase 5.
+  // `[←]` exit — the 7-step pair-atomic commit (DIFF-EDITOR.md §5.0).
+  // commit7Step writes done.json (barrier) → stages base+sibling →
+  // promotes both → drops backups → §6.5 proactive sibling cleanup
+  // (SHA(base)==SHA(sibling)) → rmdir's the autosave dir. Pair-atomic:
+  // crash ⇒ both sides or neither, and recoverCommit at onload finishes
+  // or rolls back any interrupted commit. (Step 0 `committing` UI guard +
+  // Step 8 detach are Phase-6 polish; the §5.0.e TOCTOU resolution modal
+  // is W5 — W1 aborts-and-stays on mismatch.)
   private async exitDetailView(entry: ConflictEntry): Promise<void> {
     const pane = this.activeDiffPane;
-    if (!pane) {
+    const session = this.activeSession;
+    if (!pane || !session) {
       this.viewState = { mode: "list", tab: "conflicts" };
       this.render();
       return;
     }
 
     try {
-      // getResolvedBase() runs the commit-boundary fail-closed checks
-      // (tiling assertion); keep it INSIDE the try so a thrown corruption
-      // guard means "save failed, stay in the editor" rather than an
-      // unhandled crash.
-      const newOursText = pane.getResolvedBase();
-      const result = await executeExitProtocol(
-        { vault: this.deps.vault },
-        entry.basePath,
-        newOursText,
+      // getResolved() runs the commit-boundary fail-closed checks (tiling
+      // assertion) and applies the empty→"\n" guard to BOTH sides — its bytes
+      // are exactly what commit7Step hashes into done.json. Keep it INSIDE the
+      // try so a thrown corruption guard means "save failed, stay in editor".
+      const resolved = pane.getResolved();
+      // TOCTOU (§5.0 Step 1.5): a sync may have rewritten base/sibling under
+      // us since startSession. W1 aborts-and-stays on a mismatch (the §5.0.e
+      // resolution modal is W5); the user reopens to pick up the new bytes.
+      const toctou = await classifyToctou(this.deps.vault, session.meta);
+      if (toctou.kind === "mismatch") {
+        new Notice(
+          `${entry.basePath} changed on disk since you opened it — ` +
+            "save aborted. Reopen to merge the new version.",
+        );
+        return;
+      }
+      const result = await commit7Step(
+        this.deps.vault,
+        session.conflictId,
+        session.meta,
+        resolved,
       );
-      const cleaned = result.siblingsRemoved.length;
-      const suffix =
-        cleaned === 0
-          ? ""
-          : cleaned === 1
-            ? " (1 redundant sibling cleaned)"
-            : ` (${cleaned} redundant siblings cleaned)`;
-      new Notice(`Saved ${entry.basePath}${suffix}`);
+      const suffix = result.siblingRemoved
+        ? " (redundant sibling cleaned)"
+        : "";
+      new Notice(`Saved ${result.basePath}${suffix}`);
     } catch (err) {
       new Notice(`Failed to save ${entry.basePath}: ${String(err)}`);
-      // Step 1 failed — stay in detail view so the user doesn't
-      // lose work. Step 2 failures inside executeExitProtocol are
-      // swallowed best-effort; only step 1 throws.
+      // Commit failed — stay in detail view so the user doesn't lose work.
+      // commit7Step is pair-atomic; recoverCommit at onload reconciles any
+      // partially-applied commit on the next launch.
       return;
     }
 
+    this.activeSession = null;
     this.viewState = { mode: "list", tab: "conflicts" };
     this.render();
   }

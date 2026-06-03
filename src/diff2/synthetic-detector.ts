@@ -30,6 +30,7 @@ import type { TFile, Vault } from "obsidian";
 import type ConflictStore from "../sync2/conflict-store";
 import type { ConflictRecord } from "../sync2/conflict-store";
 import { parseSiblingFilename } from "./strip-conflict-suffix";
+import { deriveAutosaveId, trackedAutosaveId } from "./autosave-store";
 
 export type ConflictEntryKind = "tracked" | "synthetic";
 
@@ -51,6 +52,20 @@ export interface ConflictEntry {
   kind: ConflictEntryKind;
   // Present only when kind === "tracked".
   record?: ConflictRecord;
+}
+
+// The autosave id for a conflict entry — the key for its
+// `.diff2-autosave/<id>/` session dir. MUST be derived identically at mount
+// (startSession) and at reopen (classifyReopen), so it is a pure, ordered,
+// side-effect-free function of the entry: tracked conflicts key off their
+// stable ConflictStore record id; synthetic conflicts off the (sorted)
+// base+sibling path pair. The reopen path keys off the on-disk dir name (not
+// this), but a view that re-derives the id for the SAME entry must land on the
+// same dir. DIFF-EDITOR.md §2.4 / §2.4.1.
+export function autosaveIdForEntry(entry: ConflictEntry): string {
+  return entry.kind === "tracked" && entry.record
+    ? trackedAutosaveId(entry.record.id)
+    : deriveAutosaveId("synthetic", entry.basePath, entry.siblingPath);
 }
 
 export interface DetectionResult {
