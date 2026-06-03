@@ -235,9 +235,9 @@ export async function runSelfUpdateBootloader(
   }, 500);
   const msg =
     appliedFiles.length === 1
-      ? `Plugin updated (${appliedFiles[0]}) — reloading…`
-      : `Plugin updated (${appliedFiles.length} files) — reloading…`;
-  notice?.(msg, 5000);
+      ? `Plugin updated (${appliedFiles[0]})`
+      : `Plugin updated (${appliedFiles.length} files)`;
+  notice?.(msg, 3000);
   logFn("Self-update bootloader: apply complete, reload scheduled", {
     appliedFiles,
   });

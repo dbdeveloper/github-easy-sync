@@ -1552,9 +1552,9 @@ export default class GitHubSyncPlugin extends Plugin {
     }
     const label =
       willReload.length === 1
-        ? `Plugin "${willReload[0]}" updated — reloading…`
-        : `${willReload.length} plugins updated — reloading…`;
-    new Notice(label, 5000);
+        ? `Plugin "${willReload[0]}" updated`
+        : `${willReload.length} plugins updated`;
+    new Notice(label, 3000);
     this.logger?.info("BRAT-style reload scheduled", { ids: willReload });
   }
 

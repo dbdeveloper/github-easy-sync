@@ -222,7 +222,7 @@ describe("runSelfUpdateBootloader — marker-based recovery for main.js + manife
       expect(await f.adapter.exists(`${f.pluginDir}/${FILES.main.bak}`)).toBe(
         false,
       );
-      expect(notices[0].toLowerCase()).toContain("reloading");
+      expect(notices[0].toLowerCase()).toContain("updated");
     } finally {
       f.cleanup();
     }
@@ -487,7 +487,7 @@ describe("runSelfUpdateBootloader — marker-based recovery for main.js + manife
 
       expect(notices.length).toBe(1);
       expect(notices[0].msg).toContain("2 files");
-      expect(notices[0].duration).toBe(5000);
+      expect(notices[0].duration).toBe(3000);
     } finally {
       f.cleanup();
     }
