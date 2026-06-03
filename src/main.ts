@@ -198,13 +198,6 @@ export default class GitHubSyncPlugin extends Plugin {
   // instance's drain teardown across a plugin reload.
   private startupSyncTimer: number | null = null;
 
-  // True while a NON-user-driven sync (interval tick / startup pulse) runs, so
-  // the "Commit N files" / "Nothing to commit" click-acks stay silent for
-  // background work. Set only around the scheduler's fullSync/drain wrappers;
-  // manual [Sync] never sets it. A plain flag is fine — drain() is
-  // re-entrant-safe, so background and manual syncs don't truly overlap.
-  private backgroundSyncActive = false;
-
   // 2.0.2-beta2: ribbon "syncing" affordance. A drain-status
   // subscription toggles a CSS class on the ribbon icons while a
   // drain runs (spin + accent tint). `drainRunning` caches the
@@ -936,20 +929,12 @@ export default class GitHubSyncPlugin extends Plugin {
       // notice (separate handle from the drain-level Pull/Push notice,
       // so users see them stacked naturally when both fire).
       onLocalCommitted: (count: number) => {
-        // Suppress the click-time ack for BACKGROUND syncs (interval /
-        // startup pulse). They're not user-driven, so a "Commit N files" toast
-        // is noise — and at startup it fires on Obsidian's own config-write
-        // churn (SYNC2 §7.7), which never reaches the server (no-op push),
-        // looking like the plugin is "always committing" when nothing changed.
-        // Manual [Sync] still shows it (the user clicked → the ack is useful).
-        if (this.backgroundSyncActive) return;
         new Notice(
           count === 1 ? "Commit 1 file" : `Commit ${count} files`,
           BRIEF_NOTICE_MS,
         );
       },
       onNoLocalChanges: () => {
-        if (this.backgroundSyncActive) return; // same reason — silent for background
         new Notice("Nothing to commit", BRIEF_NOTICE_MS);
       },
       // Observability hook only. The three user-visible notices in
@@ -1642,8 +1627,8 @@ export default class GitHubSyncPlugin extends Plugin {
       // interval timers and the startup pulse are not user-driven,
       // so a blocking dialog would surprise the user. Detection
       // still runs; conflicts still land as siblings in the vault.
-      drain: () => this.runAsBackgroundSync(() => this.backgroundDrain()),
-      fullSync: () => this.runAsBackgroundSync(() => this.sync()),
+      drain: () => this.backgroundDrain(),
+      fullSync: () => this.sync(),
       logError: (label, err) => {
         void this.logger.error(label, err);
       },
@@ -1666,17 +1651,6 @@ export default class GitHubSyncPlugin extends Plugin {
   // last time is the obvious right thing.
   private async runStartupSync(): Promise<void> {
     await this.intervalScheduler.runStartup();
-  }
-
-  // Run a scheduler-driven (non-user) sync with backgroundSyncActive set, so
-  // the "Commit N files" / "Nothing to commit" click-acks stay silent for it.
-  private async runAsBackgroundSync<T>(fn: () => Promise<T>): Promise<T> {
-    this.backgroundSyncActive = true;
-    try {
-      return await fn();
-    } finally {
-      this.backgroundSyncActive = false;
-    }
   }
 
   stopSyncInterval(): void {
