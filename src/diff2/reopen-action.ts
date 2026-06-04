@@ -22,7 +22,14 @@ export type ReopenAction =
   //   library-drift  — inputs unchanged but build() now yields a different
   //                    joined-doc → replay offsets unsound → start fresh
   //                    (§3.1 gate / §8 #8). No restore (snapshots wouldn't help).
-  | { kind: "discard-fresh"; reason: "corrupt" | "sentinel" | "library-drift" }
+  //   sibling-drift  — base unchanged but the SIBLING changed under the session.
+  //                    The old simple rule: SILENTLY restart — kill + fresh from
+  //                    the current base+sibling. §3.2.a (the dialog) is for a
+  //                    BASE change only.
+  | {
+      kind: "discard-fresh";
+      reason: "corrupt" | "sentinel" | "library-drift" | "sibling-drift";
+    }
   // Valid session, vault unchanged since start → §3.2 ResumeRecoveryModal
   // (Continue = build-from-snapshots + replay; Start over; ×). `meta` is the one
   // classifyReopen already read — threaded so the execute layer never re-reads it.
@@ -46,7 +53,12 @@ export function reopenAction(status: ReopenStatus): ReopenAction {
     case "resume":
       return { kind: "resume", meta: status.meta };
     case "vault-changed":
-      return { kind: "restore", meta: status.meta };
+      // §3.2.a (restore + recreate via dialog) fires only on a BASE change. If
+      // only the sibling changed (base intact), the old simple rule applies:
+      // silently restart — kill + fresh from the current base+sibling.
+      return status.currentBaseSha !== status.meta.baseShaAtStart
+        ? { kind: "restore", meta: status.meta }
+        : { kind: "discard-fresh", reason: "sibling-drift" };
     default: {
       // Exhaustiveness guard: a new ReopenStatus kind must add a branch here.
       const _never: never = status;

@@ -153,4 +153,56 @@ describe("W4c Step C — resume via readResumeSession + replay", () => {
     expect(twin.getResolved()).toEqual(before); // unchanged session-start state
     twin.destroy();
   });
+
+  // §3.2.a base-changed recreation. The view glue is manual; here we pin the
+  // session-recreation OUTCOME: which (base, sibling) the new session snapshots.
+  it("§3.2.a Continue: restored sibling written + recreated → new base vs restored sibling", async () => {
+    const vault = fixture();
+    const oldBase = "a\nMINE\nc\n";
+    const oldSibling = "a\nTHEIRS\nc\n";
+    await vault.adapter.write("base.md", oldBase);
+    await vault.adapter.write("sibling.md", oldSibling);
+    await startSession(vault, "cid", "base.md", "sibling.md");
+
+    // user resolves in the editor → restoredSibling = getResolved().sibling
+    const sess0 = await readResumeSession(vault, "cid");
+    const pane = new DiffPane(mount(), sess0.base, sess0.sibling);
+    pane.resolveAll("ours");
+    const restoredSibling = pane.getResolved().sibling;
+    pane.destroy();
+
+    // base changed in the vault (user edited it directly after a crash, §7)
+    const newBase = "a\nMINE\nc\nNEW\n";
+    await vault.adapter.write("base.md", newBase);
+
+    // Continue: write the restored sibling onto the vault, rmdir, startSession.
+    await vault.adapter.write("sibling.md", restoredSibling);
+    await vault.adapter.rmdir(autosaveDir("cid"), true);
+    await startSession(vault, "cid", "base.md", "sibling.md");
+
+    const sess = await readResumeSession(vault, "cid");
+    expect(sess.base).toBe(newBase); // NEW base — never restored/overwritten
+    expect(sess.sibling).toBe(restoredSibling); // restored sibling carried forward
+    expect(sess.jsonl).toBe(""); // fresh session, empty history
+  });
+
+  it("§3.2.a Start over: recreate with the ORIGINAL (untouched) sibling", async () => {
+    const vault = fixture();
+    const oldBase = "a\nMINE\nc\n";
+    const oldSibling = "a\nTHEIRS\nc\n";
+    await vault.adapter.write("base.md", oldBase);
+    await vault.adapter.write("sibling.md", oldSibling);
+    await startSession(vault, "cid", "base.md", "sibling.md");
+
+    const newBase = "a\nMINE\nc\nNEW\n";
+    await vault.adapter.write("base.md", newBase);
+
+    // Start over: rmdir + startSession — the sibling is NOT overwritten.
+    await vault.adapter.rmdir(autosaveDir("cid"), true);
+    await startSession(vault, "cid", "base.md", "sibling.md");
+
+    const sess = await readResumeSession(vault, "cid");
+    expect(sess.base).toBe(newBase);
+    expect(sess.sibling).toBe(oldSibling); // original, untouched
+  });
 });

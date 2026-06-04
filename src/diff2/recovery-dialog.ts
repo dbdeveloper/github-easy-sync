@@ -9,13 +9,14 @@
 //
 //   §3.2   ResumeRecoveryModal       — vault unchanged since session start:
 //          [Continue editing] / [Start over] / ×(cancel)
-//   §3.2.a SnapshotMismatchModal     — vault changed under the session:
-//          ● Restore / ○ Discard  +  [Proceed] / [Cancel]
+//   §3.2.a SnapshotMismatchModal     — base changed under the session (we
+//          always-restore first, then show this over it):
+//          [Continue] / [Start over] / [Cancel]
 
 import { App, Modal } from "obsidian";
 
 export type ResumeChoice = "continue" | "start-over" | "cancel";
-export type MismatchChoice = "restore" | "discard" | "cancel";
+export type MismatchChoice = "continue" | "start-over" | "cancel";
 
 export interface ResumeInfo {
   basePath: string;
@@ -33,8 +34,6 @@ export interface MismatchInfo {
   siblingPath: string;
   startedAtIso: string;
   editCount: number;
-  baseChanged: boolean;
-  siblingChanged: boolean;
   nowMs: number;
 }
 
@@ -114,8 +113,6 @@ export class ResumeRecoveryModal extends Modal {
 // the old state (review/copy, save-to-alt on exit) or discard for a fresh one.
 export class SnapshotMismatchModal extends Modal {
   private choice: MismatchChoice = "cancel";
-  // Restore is the default (recommended) radio selection.
-  private selected: "restore" | "discard" = "restore";
 
   constructor(
     app: App,
@@ -128,63 +125,34 @@ export class SnapshotMismatchModal extends Modal {
     return new Promise((resolve) => {
       this.onClose = () => resolve(this.choice);
       const c = this.contentEl;
-      this.titleEl.setText("Conflict files changed since you started");
+      this.titleEl.setText("Conflict base changed since you started");
       c.empty();
 
-      const ago = relativeTimeFromIso(this.info.startedAtIso, this.info.nowMs);
+      const base = this.info.basePath.split("/").pop() ?? this.info.basePath;
       c.createEl("p").setText(
-        `You edited these based on their state from ${ago}` +
-          ` (${this.info.editCount} edit${this.info.editCount === 1 ? "" : "s"} saved):`,
+        `You have already started conflict resolving for the previous version ` +
+          `of "${base}"!`,
       );
-      const ul = c.createEl("ul");
-      const star = (changed: boolean) => (changed ? "* " : "");
-      ul.createEl("li").setText(`${star(this.info.baseChanged)}base: ${this.info.basePath}`);
-      ul.createEl("li").setText(
-        `${star(this.info.siblingChanged)}sibling: ${this.info.siblingPath}`,
+      c.createEl("p").setText(
+        "Do you want to CONTINUE resolving the conflict with the actual version " +
+          "of the file, or discard the previous resolution AT ALL and start over " +
+          "from the beginning?",
       );
+      const ago = relativeTimeFromIso(this.info.startedAtIso, this.info.nowMs);
       c.createEl("p", { cls: "diff2-recovery-footnote" }).setText(
-        "* changed in the vault since you last edited",
-      );
-
-      // Two radios — Restore (default) / Discard. Proceed acts on the pick.
-      const group = "diff2-mismatch-choice";
-      const mkRadio = (
-        value: "restore" | "discard",
-        label: string,
-        desc: string,
-      ) => {
-        const wrap = c.createDiv({ cls: "diff2-recovery-option" });
-        const input = wrap.createEl("input", { type: "radio" });
-        input.name = group;
-        input.value = value;
-        if (value === this.selected) input.checked = true;
-        input.addEventListener("change", () => {
-          if (input.checked) this.selected = value;
-        });
-        wrap.createEl("span", { text: ` ${label}` });
-        wrap.createEl("div", { cls: "diff2-recovery-desc", text: desc });
-      };
-      mkRadio(
-        "restore",
-        "Restore previous session",
-        "Reopen your work to review/copy; [← back] proposes alt save paths.",
-      );
-      mkRadio(
-        "discard",
-        "Discard, start fresh",
-        "Wipe the old session; resolve the conflict on the current files.",
-      );
-      c.createEl("p", { cls: "diff2-recovery-footnote" }).setText(
-        "Cancel keeps the session as-is — resolve it on the filesystem if you prefer.",
+        `Started ${ago} · ${this.info.editCount} edit` +
+          `${this.info.editCount === 1 ? "" : "s"} saved · base: ${this.info.basePath}`,
       );
 
       const row = c.createDiv({ cls: "modal-button-container" });
-      const proceed = row.createEl("button", {
-        text: "Proceed",
-        cls: "mod-cta",
+      const cont = row.createEl("button", { text: "Continue", cls: "mod-cta" });
+      cont.addEventListener("click", () => {
+        this.choice = "continue";
+        this.close();
       });
-      proceed.addEventListener("click", () => {
-        this.choice = this.selected; // "restore" | "discard"
+      const over = row.createEl("button", { text: "Start over" });
+      over.addEventListener("click", () => {
+        this.choice = "start-over";
         this.close();
       });
       const cancel = row.createEl("button", { text: "Cancel" });

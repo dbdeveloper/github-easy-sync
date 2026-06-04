@@ -7,8 +7,11 @@ import { describe, it, expect } from "vitest";
 import type { AutosaveMeta, ReopenStatus } from "../../src/diff2/autosave-store";
 import { reopenAction, type ReopenAction } from "../../src/diff2/reopen-action";
 
-// reopenAction ignores meta contents — only the discriminant matters.
+// For most statuses reopenAction ignores meta contents — only the discriminant
+// matters. For vault-changed it compares currentBaseSha vs meta.baseShaAtStart.
 const meta = {} as AutosaveMeta;
+const metaBase = (sha: string) =>
+  ({ baseShaAtStart: sha, siblingShaAtStart: "sib" }) as AutosaveMeta;
 
 const CASES: Array<{ status: ReopenStatus; expected: ReopenAction }> = [
   { status: { kind: "fresh" }, expected: { kind: "fresh" } },
@@ -34,13 +37,24 @@ const CASES: Array<{ status: ReopenStatus; expected: ReopenAction }> = [
   },
   { status: { kind: "resume", meta }, expected: { kind: "resume", meta } },
   {
+    // vault-changed + base CHANGED → restore (the §3.2.a dialog path).
     status: {
       kind: "vault-changed",
-      meta,
-      currentBaseSha: "aaa",
-      currentSiblingSha: "bbb",
+      meta: metaBase("OLD"),
+      currentBaseSha: "NEW",
+      currentSiblingSha: "sib2",
     },
-    expected: { kind: "restore", meta },
+    expected: { kind: "restore", meta: metaBase("OLD") },
+  },
+  {
+    // vault-changed + base SAME (only the sibling changed) → silent restart.
+    status: {
+      kind: "vault-changed",
+      meta: metaBase("SAME"),
+      currentBaseSha: "SAME",
+      currentSiblingSha: "sib2",
+    },
+    expected: { kind: "discard-fresh", reason: "sibling-drift" },
   },
 ];
 
