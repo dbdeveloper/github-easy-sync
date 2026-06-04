@@ -216,11 +216,34 @@ Stage 2.1 та Stage 3 спираються на 2.0; порядок між ни
   non-converged→both written; base-rewritten→TOCTOU mismatch+dir survives).
 - **Наївний `exit-protocol.ts` ВИДАЛЕНО** (W1 swap замінив єдиного викликача).
 
-**Лишилось у Phase 6 (revised order W1→W4→W2→W3→W5):** W4 recovery-dialog
-(`classifyReopen`→§3.2 modal→`replayHistory`/start-over) — **перед** W2, бо інакше
-W1-shortcut «discard+fresh» нищив би записану history; W2 HistoryWriter-feed per-transaction
-(потребує `EditorView.updateListener` у DiffPane — ще нема); W3 cursor-timer (2500/6000ms);
-W5 §5.0.e TOCTOU-modal; + Step-0 committing-guard / Step-8 detach polish.
+**Лишилось у Phase 6 (revised order W1→W4→W2→W3→W5):** W4 recovery-dialog **перед** W2
+(інакше W1-shortcut «discard+fresh» нищив би записану history); W2 HistoryWriter-feed
+per-transaction (потребує `EditorView.updateListener` у DiffPane — ще нема); W3 cursor-timer
+(2.5/6s, §2.9 ping-pong); W5 §5.0.e TOCTOU-modal; + Step-0 committing-guard / Step-8 detach.
+
+**W4: W4a ✅ (`replayFrom`/`setCursor`), W4b ✅ (модалки §3.2/§3.2.a) — пушено. W4c (wiring) —
+свіжа сесія.**
+
+> **W4c — HANDOFF CHECKLIST (cut 2026-06-04, advisor — це checklist, НЕ re-spec; деталі канонічні
+> в §3.2/§3.2.a/§2.9/W4a/W4b).** Замінити W1 discard+fresh shortcut у `mountDiffPane` на
+> `classifyReopen`-гілку. Тест на КОЖНОМУ кроці.
+> - **A.** Витягти ЧИСТУ `reopenAction(status) → action` (exhaustive 6 статусів:
+>   fresh/resume/library-drift/vault-changed/corrupt/sentinel), без wiring, нуль зміни поведінки.
+>   Test: повна unit-таблиця. ← testable spine, найвищий важіль.
+> - **B.** Wire для rmdir+fresh-гілок (fresh/library-drift/corrupt/sentinel) — поведінка
+>   **ІДЕНТИЧНА W1** (структурний swap). Test: поведінка збережена (regression-guard рефактору).
+> - **C.** `resume` → DiffPane з **snapshots** + `replayFrom`(W4a) + `setCursor` + `ResumeRecoveryModal`(W4b).
+>   **Єдина реальна regression-поверхня — ізолювати.** Test: W4a twin-патерн на snapshot-build entry;
+>   модалка — manual. **Покликати advisor ОДИН раз ПЕРЕД цим кроком.**
+> - **D.** `vault-changed` ІНТЕРИМ = restore-from-snapshots + replay (non-lossy) + наявний `[←]`
+>   exit-TOCTOU як backstop. §3.2.a converged/partial reopen-fork (вкл. `[Продовжити]` sibling-write)
+>   **ВІДКЛАДЕНО** — будується як ОДНЕ ціле з sync2 sibling-write. W4b `SnapshotMismatchModal` лишити
+>   (auto-fold переюзає scaffolding; «не wired W4c-інтеримом»). НЕ shippити half-dialog (тільки
+>   discard-опції для converged-роботи = гірше за ніщо).
+> - **❗Ключовий факт:** W2 не wired → `history.jsonl` порожній → resume-replay сьогодні **реплеїть НІЩО**
+>   (correct але inert до W2 — саме тому W4 перед W2). Manual «resume нічого не робить» = ОЧІКУВАНО;
+>   верифікація — synthetic-history тести, не live-capture.
+> - Pure-логіка (reopenAction, replay) = unit; модалки + ItemView glue = manual (mock Modal — stub).
 
 **Manual/Playwright покриття** (layout-залежне + mobile + наскрізний UI, чого не ловлять
 автотести) — у [`docs/MANUAL-TEST-CHECKLIST.md`](../MANUAL-TEST-CHECKLIST.md) (English, для всього плагіна).
