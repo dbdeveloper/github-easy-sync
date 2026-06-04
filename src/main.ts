@@ -6,10 +6,10 @@ import {
   App,
   EventRef,
   MarkdownView,
+  Menu,
   Plugin,
   WorkspaceLeaf,
   Notice,
-  setIcon,
 } from "obsidian";
 import { GitHubSyncSettings, DEFAULT_SETTINGS } from "./settings/settings";
 import GitHubSyncSettingsTab from "./settings/tab";
@@ -29,7 +29,12 @@ import ConflictStore from "./sync2/conflict-store";
 import PendingDeletionsStore from "./sync2/pending-deletions-store";
 import { ConflictCounter } from "./sync2/conflict-counter";
 import { ConflictWatcher } from "./sync2/conflict-watcher";
-import { ConflictStatusIndicator } from "./sync2/views/conflict-status-indicator";
+import {
+  buildStatusMenu,
+  statusBarSuffix,
+  statusMenuState,
+  type MenuActionKey,
+} from "./status-bar-model";
 import WorkerClient from "./worker/worker-client";
 import { PreSyncConflictModal } from "./sync2/views/pre-sync-conflict-modal";
 import { TrashStore } from "./diff2/trash-store";
@@ -170,10 +175,8 @@ export default class GitHubSyncPlugin extends Plugin {
   // UI elements that come and go with toggle settings.
   statusBarItem: HTMLElement | null = null;
   syncRibbonIcon: HTMLElement | null = null;
-  // Pseudo-merge stage 10 — 4-point visibility for pending conflicts.
-  // Status-bar indicator and ribbon-icon badge are created when the
-  // user's settings turn the corresponding bar/ribbon on.
-  conflictStatusIndicator: ConflictStatusIndicator | null = null;
+  // E2 (TODO §6): the conflict count is folded into the single "GitHub"
+  // status-bar item (statusBarItem) — the separate 🔀 indicator was removed.
   // SYNC2 §4.3: the ribbon sync-icon's badge now shows
   // push-queue depth (count of pending batches in .push-queue/),
   // not the unresolved-conflict count. Fed by Sync2Manager's
@@ -1062,7 +1065,10 @@ export default class GitHubSyncPlugin extends Plugin {
 
   // ── sync triggers ───────────────────────────────────────────────────
 
-  async sync(): Promise<void> {
+  // forceCommit (E2 §7 menu "Sync All") — always commit + drain, ignoring the
+  // syncStartsWithCommit toggle. The command + ribbon callers pass no arg, so
+  // they keep honouring the toggle.
+  async sync(forceCommit = false): Promise<void> {
     if (!this.isConfigured()) {
       new Notice("Sync plugin not configured");
       return;
@@ -1090,7 +1096,7 @@ export default class GitHubSyncPlugin extends Plugin {
       //   false           → drain only (resumeQueue)
       // The [Commit] ribbon button is the user's separate path
       // for enqueueing when the master toggle is false.
-      if (this.settings.syncStartsWithCommit ?? true) {
+      if (forceCommit || (this.settings.syncStartsWithCommit ?? true)) {
         await this.sync2Manager.syncAll();
         this.tokenExpiredFlag?.note(null); // E1: syncAll always pulls → auth OK
       } else {
@@ -1205,16 +1211,13 @@ export default class GitHubSyncPlugin extends Plugin {
   // (excludes records with !siblingExists and records where
   // siblingSha == baseSha) reflects what the user actually still
   // has to resolve, not the raw record count.
+  // Conflict-count changed (ConflictCounter.subscribe, line ~866). E2: the
+  // count now lives in the single "GitHub" status-bar item (the "M ⁇" suffix),
+  // so a count change just repaints that item. The ribbon sync-icon badge is
+  // push-queue depth, NOT conflicts (SYNC2 §4.3); the optional diff ribbon icon
+  // (E3, R2.7.4) will carry the conflict badge.
   refreshConflictUI(): void {
-    const count = this.conflictCounter?.getValue() ?? 0;
-    this.conflictStatusIndicator?.refresh(count);
-    // SYNC2 §4.3: the ribbon sync-icon's badge is NO LONGER
-    // driven by conflict-count — it shows push-queue depth instead
-    // (see refreshRibbonPendingBatchesBadge, fed by Sync2Manager's
-    // onQueueDepthChanged callback). Conflict-count is still
-    // surfaced via the status-bar 🔀 N indicator; a future diff2
-    // ribbon icon will optionally double-up on that signal
-    // (DIFF2_IMPLEMENTATION_PLAN.md R2.7.4).
+    this.updateStatusBarItem();
   }
 
   // Subtle absolute-positioned numeric pill in a ribbon icon's
@@ -1233,6 +1236,8 @@ export default class GitHubSyncPlugin extends Plugin {
   private refreshRibbonPendingBatchesBadge(depth: number): void {
     this.currentQueueDepth = depth;
     this.applyPendingBatchesBadge();
+    // E2: the status-bar "↑ N" rides the same depth signal — repaint it too.
+    this.updateStatusBarItem();
   }
 
   // 2.0.2-beta2: reflect drain activity in the UI while a drain runs.
@@ -1335,64 +1340,111 @@ export default class GitHubSyncPlugin extends Plugin {
   showStatusBarItem(): void {
     if (this.statusBarItem) return;
     this.statusBarItem = this.addStatusBarItem();
+    this.statusBarItem.style.cursor = "pointer";
+    // white-space: pre keeps the leading space in " (↑ N)" from collapsing
+    // against the "GitHub" label in the flex status-bar item.
+    this.statusBarItem.addClass("github-easy-sync-statusbar");
+    // E2 (TODO §7) — the single "GitHub" item is clickable → the status menu.
+    this.statusBarItem.addEventListener("click", (evt) =>
+      this.showStatusBarMenu(evt),
+    );
     this.updateStatusBarItem();
-    // Conflict-count indicator lives in its own addStatusBarItem
-    // element so user themes can style it independently. Click
-    // opens the Diff-Edit view (Phase 1+) — replaces the prior
-    // "open first sibling in editor" shortcut so users get the
-    // structured conflicts list directly. See DIFF2_IMPLEMENTATION_PLAN
-    // §R2.7.3 + R9.1 Phase 1 acceptance.
-    if (!this.conflictStatusIndicator) {
-      const indicatorParent = this.addStatusBarItem();
-      this.conflictStatusIndicator = new ConflictStatusIndicator(
-        indicatorParent,
-        () => void this.activateDiffEditView(),
-      );
-    }
-    this.refreshConflictUI();
+    // Seed the push-queue depth so "↑ N" is correct on first paint even when the
+    // sync ribbon (which also seeds it) is hidden — pre-existing batches from an
+    // offline session / crash recovery would otherwise show no ↑ until the next
+    // queue mutation.
+    void this.seedPendingBatchesDepth();
   }
 
   hideStatusBarItem(): void {
     this.statusBarItem?.remove();
     this.statusBarItem = null;
-    this.conflictStatusIndicator?.destroy();
-    this.conflictStatusIndicator = null;
-  }
-
-  // Open the first pending sibling in the editor — used by the
-  // status-bar indicator's click handler. No-op when there are no
-  // pending conflicts.
-  private async openFirstSibling(): Promise<void> {
-    const records = this.conflictStore?.getAll() ?? [];
-    if (records.length === 0) return;
-    try {
-      await this.app.workspace.openLinkText(records[0].siblingPath, "", false);
-    } catch (err) {
-      void this.logger.error(
-        "Failed to open first sibling from status bar",
-        `${err}`,
-      );
-    }
   }
 
   updateStatusBarItem(): void {
     const el = this.statusBarItem;
     if (!el) return;
-    // 2.0.2-beta2: the status-bar item reflects drain activity instead
-    // of sitting on a static "GitHub". While a drain runs it shows a
-    // spinning sync icon + "Syncing…" tinted accent; idle it's a plain
-    // "GitHub". Rebuild the element each call (cheap) so the icon child
-    // appears/disappears cleanly.
+    // E2 (TODO §6): "GitHub (↑ N | M ⁇)". NO spinner — during a drain the WHOLE
+    // item greens (the `-syncing` class on el: "GitHub" + the "( | )" brackets/
+    // pipe), while the "↑ N" decreases live as batches push (onQueueDepthChanged
+    // → here). The suffix segments override with their own colours: "↑ N" green
+    // (same either way), "M ⁇" red (overrides the syncing-green). Rebuilt each
+    // call (cheap).
     el.empty();
     el.toggleClass("github-easy-sync-statusbar-syncing", this.drainRunning);
-    if (this.drainRunning) {
-      const icon = el.createSpan({
-        cls: "github-easy-sync-statusbar-icon",
+    el.createSpan({ text: "GitHub" });
+    const conflicts = this.conflictCounter?.getValue() ?? 0;
+    for (const seg of statusBarSuffix(this.currentQueueDepth, conflicts)) {
+      const span = el.createSpan({ text: seg.text });
+      if (seg.cls === "up") span.addClass("github-easy-sync-statusbar-up");
+      else if (seg.cls === "conflict")
+        span.addClass("github-easy-sync-statusbar-conflict");
+    }
+  }
+
+  // E2 (TODO §7) — the clickable status-bar menu. Three states (uninitialized /
+  // token-expired / normal) + count-aware labels come from the pure
+  // buildStatusMenu; this is just the Obsidian Menu wiring.
+  private showStatusBarMenu(evt: MouseEvent): void {
+    const menu = new Menu();
+    const items = buildStatusMenu({
+      state: statusMenuState(
+        this.isConfigured(),
+        this.tokenExpiredFlag?.isExpiredCached() ?? false,
+      ),
+      pluginName: manifest.name,
+      queueDepth: this.currentQueueDepth,
+      conflictCount: this.conflictCounter?.getValue() ?? 0,
+    });
+    for (const item of items) {
+      if (item.separatorBefore) menu.addSeparator();
+      menu.addItem((mi) => {
+        mi.setTitle(item.label);
+        if (item.key === null) {
+          mi.setDisabled(true);
+          return;
+        }
+        const key = item.key;
+        mi.onClick(() => this.dispatchStatusMenuAction(key));
       });
-      setIcon(icon, "refresh-cw");
-      el.createSpan({ text: " Syncing…" });
-    } else {
-      el.setText("GitHub");
+    }
+    menu.showAtMouseEvent(evt);
+  }
+
+  private dispatchStatusMenuAction(key: MenuActionKey): void {
+    switch (key) {
+      case "sync-all":
+        void this.sync(true); // §7: always commit + drain, ignoring the toggle
+        break;
+      case "commit-all":
+        void this.commit();
+        break;
+      case "commit-current":
+        void this.commitFile();
+        break;
+      case "pull-push":
+        void this.uploadOnly();
+        break;
+      case "open-diff":
+        void this.activateDiffEditView();
+        break;
+      case "settings":
+        this.openSettings();
+        break;
+    }
+  }
+
+  private openSettings(): void {
+    const setting = (
+      this.app as unknown as {
+        setting: { open(): void; openTabById(id: string): void };
+      }
+    ).setting;
+    try {
+      setting.open();
+      setting.openTabById(manifest.id);
+    } catch {
+      // Best effort — older Obsidian may not expose openTabById.
     }
   }
 
@@ -1403,13 +1455,16 @@ export default class GitHubSyncPlugin extends Plugin {
     this.syncRibbonIcon = this.addRibbonIcon(
       "refresh-cw",
       "Sync with GitHub",
-      this.sync.bind(this),
+      // Wrap (not .bind): addRibbonIcon invokes the callback with the click
+      // MouseEvent, which would leak into sync()'s new `forceCommit` param and
+      // make the ribbon always commit+drain regardless of syncStartsWithCommit.
+      () => void this.sync(),
     );
     // Seed the badge with the current push-queue depth so the icon
     // reflects on-disk state on first paint — covers the case where
     // the plugin loads with pre-existing batches (offline session,
     // crash recovery, etc.).
-    void this.refreshSyncRibbonInitial();
+    void this.seedPendingBatchesDepth();
     // Reflect an already-running drain (icon created mid-sync).
     if (this.drainRunning) {
       this.syncRibbonIcon.toggleClass(
@@ -1419,7 +1474,11 @@ export default class GitHubSyncPlugin extends Plugin {
     }
   }
 
-  private async refreshSyncRibbonInitial(): Promise<void> {
+  // Seed the cached push-queue depth from disk so both the ribbon badge and the
+  // E2 status-bar "↑ N" are correct on first paint (pre-existing batches from an
+  // offline session / crash recovery). Called by show{SyncRibbonIcon,
+  // StatusBarItem}; refreshRibbonPendingBatchesBadge repaints both surfaces.
+  private async seedPendingBatchesDepth(): Promise<void> {
     try {
       const queue = (this.sync2Manager as unknown as { queue: PushQueue })
         .queue;

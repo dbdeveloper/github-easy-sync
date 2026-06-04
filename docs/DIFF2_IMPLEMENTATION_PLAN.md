@@ -779,18 +779,26 @@ high-value surfaces) → **E5 → E4 → E6** (deep-link + triggers). E2 НЕ з
   `token-expired-flag` 10 (`classifyAuthOutcome` mapping + flag set/clear/init/cache/idempotent/note/
   out-of-band-delete).
 
-- **E2 — Status-bar текст+меню (TODO §6-7), R2.7.3.** `updateStatusBarItem()` стає
-  **parameterless** (читає `currentQueueDepth` + `conflictCounter.getValue()` + `drainRunning`) і
-  **піггібекає наявні підписки** (`onQueueDepthChanged` main.ts:981, drain-listener:1012,
-  `refreshConflictUI`) — **без** нових підписок (double-fire + забутий teardown). Текст
-  `GitHub[(↑ N)|(↑ N | M ⁇)|(M ⁇)]` — **пробіл після стрілки** (як між M і ⁇; TODO §6 «(↑ 3)»);
-  конфлікт-гліф = `CONFLICT_GLYPH = "⁇"` (U+2047; one place,
-  тривіально на `"??"`). **Видалити** окремий `conflictStatusIndicator` (§6: 🔀 геть зі status-bar)
-  — **всередині E2** (нема вікна без conflict-surface; grep усіх `conflictStatusIndicator`/
-  `refreshConflictUI`/`openFirstSibling` [dead] перед вирізанням). Клік → `new Menu()` (перший
-  ужиток у проєкті) 3 стани: uninit (`!isConfigured()`) / token-expired (E1) / normal → Sync All,
-  Commit all, Commit current, Pull+push stored (N), Open diff-panel (M open conflicts), Settings.
-  Тестоване ядро: формат-функція + menu-model (стан→item-list).
+- **E2 — Status-bar текст+меню (TODO §6-7), R2.7.3. ✅ DONE (2026-06-05).** Pure
+  `src/status-bar-model.ts`: `statusBarSuffix(depth, conflicts)` (`""`/`" (↑ N)"`/`" (↑ N | M ⁇)"`/
+  `" (M ⁇)"`, `CONFLICT_GLYPH="⁇"` U+2047 — one place→тривіально `"??"`) + `statusMenuState`
+  (uninit>expired>normal) + `buildStatusMenu` (heading-стани + count-aware labels). `updateStatusBarItem()`
+  **parameterless** (читає `currentQueueDepth` + `conflictCounter.getValue()` + `drainRunning`),
+  **піггібекає наявні підписки** (`refreshRibbonPendingBatchesBadge`+=repaint, `refreshConflictUI`→repaint,
+  `applyRibbonSyncingState` вже) — **без** нових підписок; `seedPendingBatchesDepth()` (rename з
+  `refreshSyncRibbonInitial`) сидить depth на cold-open зі status-bar теж. `conflictStatusIndicator`
+  (+import/field/show/hide) і мертвий `openFirstSibling` **видалені**; `conflict-status-indicator.ts`
+  deleted. Клік → `new Menu()` (перший у проєкті) → `buildStatusMenu` → dispatch (sync-all→`sync(true)`
+  [TODO §7 always commit+drain; note(null) лишається на syncAll-гілці — E1], commit-all/current,
+  pull-push, open-diff, settings). **UX-уточнення (user 2026-06-05):** БЕЗ spinner — лише слово
+  «GitHub» (+дужки/пайп `( | )`) зеленіють під drain через `-syncing` на `el`; «↑ N» зелене своїм
+  класом, «M ⁇» червоне (перекриває); «↑ N» **зменшується live** по мірі push (onQueueDepthChanged→
+  repaint). CSS `-up`(success)/`-conflict`(error). Тести: `status-bar-model` 12. **Manual:** Menu
+  відкривається вгору зі status-bar (desktop+mobile). **Field-fixes (user-test 2026-06-05):**
+  syncing-колір = `--text-success` (був `--interactive-accent`=фіолетовий у темі); пробіл «GitHub (»
+  через CSS `white-space: pre` на `.github-easy-sync-statusbar` (flex-item колапсував звичайний
+  пробіл). **+ TODO §10** (окремо, у тому ж commit): заголовок Settings зверху —
+  «{name} {version} ([repo]({authorUrl}))» з `manifest.json` (`settings/tab.ts` `display()`).
 
 - **E3 — Ribbon + tooltips (TODO §8-9, R2.7.4).** diff-іконка (badge=conflicts, tooltip
   «Diff-Panel (N open conflicts)») + `showDiffRibbonButton` toggle (default ON); sync-tooltip →

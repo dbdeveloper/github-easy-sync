@@ -299,7 +299,23 @@
  * plain "GitHub". Toggled by main.ts updateStatusBarItem.
  */
 .github-easy-sync-statusbar-syncing {
-    color: var(--interactive-accent);
+    color: var(--text-success);
+}
+/* Preserve the " (" leading space so the suffix reads "GitHub (↑ N)" — the
+ * flex status-bar item otherwise collapses it to "GitHub(↑ N)". */
+.github-easy-sync-statusbar {
+    white-space: pre;
+}
+
+/* TODO §10 — settings header (plugin name + version + repo link). */
+.github-easy-sync-settings-title {
+    font-weight: 600;
+    font-size: 1.15em;
+    margin-bottom: 0.75em;
+}
+.github-easy-sync-settings-repo {
+    font-weight: normal;
+    font-size: 0.85em;
 }
 .github-easy-sync-statusbar-icon {
     display: inline-flex;
@@ -309,4 +325,14 @@
     width: 0.9em;
     height: 0.9em;
     animation: github-easy-sync-ribbon-spin 1s linear infinite;
+}
+
+/* E2 (TODO §6) — status-bar suffix "(↑ N | M ⁇)". The push-queue "↑ N" is
+ * green, the conflict count "M ⁇" red. These sit on the span itself, so they
+ * override the parent's inherited syncing-green while a drain runs. */
+.github-easy-sync-statusbar-up {
+    color: var(--text-success);
+}
+.github-easy-sync-statusbar-conflict {
+    color: var(--text-error);
 }

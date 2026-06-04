@@ -57,6 +57,26 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+
+    // TODO §10 — at the very top: the plugin name + version (+ a small repo
+    // link), so the user can see WHOSE settings these are and which version is
+    // installed. Values come from manifest.json.
+    const m = this.plugin.manifest;
+    const titleEl = containerEl.createEl("div", {
+      cls: "github-easy-sync-settings-title",
+    });
+    titleEl.createSpan({ text: `${m.name} ${m.version}` });
+    if (m.authorUrl) {
+      titleEl.appendText(" ");
+      const link = titleEl.createEl("a", {
+        text: "(repo)",
+        href: m.authorUrl,
+        cls: "github-easy-sync-settings-repo",
+      });
+      link.setAttr("target", "_blank");
+      link.setAttr("rel", "noopener");
+    }
+
     // Visibility for unresolved conflicts lives in three places:
     // status bar, pre-sync modal, ribbon badge. The settings tab
     // does NOT carry a conflict list — users with a conflict click
