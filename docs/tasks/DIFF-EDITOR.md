@@ -1976,23 +1976,43 @@ meta.siblingShaAtStart`. Vault files змінились між старт сес
   sibling не чіпаємо — sync2 ним володіє.)
 - **`[Cancel]`** — лишити сесію as-is; autosave-dir + sibling недоторкані.
 
-**Механізм (за згодою користувача — НЕ silent):** на `[Compare]` — НЕ перезаписувати
-наявний `*.conflict-from-<device>-<ts>` sibling (sync2 ним володіє: Phase A/B +
-auto-merge §6 діють автономно; запис `R` у нього = forged input → silent
-auto-merge у garbage + cross-device push як «версія цього device»). Натомість
-**змінтити НОВИЙ синтетичний sibling** через `ConflictStore.create`, що тримає `R`,
-з **окремим device-label `intermediate`** (щоб (а) не видавати за версію девайса,
-(б) дати sync2 гачок **придушити auto-merge** на ньому — як §10/Scenario-E
-synthetic-batches пропускають `mergeIntoLatestPending`). Далі — звичайний конфлікт
-`newBase` vs `intermediate(R)`, який користувач розв'язує ще раз.
+**Механізм (за згодою користувача — НЕ silent):** на `[Compare]`:
+1. **Захопити oldSibling → trash** через `trashHooks.captureForDelete(oldSiblingPath)`
+   ПЕРЕД заміною — санкціонований **R3.4**-шлях (sync2 уже так робить на pull-delete:
+   «captureForDelete ПЕРЕД adapter.remove, так само як user-driven»; rule 819
+   «explicit-контракт > implicit-bypass»). Restore = Phase 9b. Закриває «а раптом?».
+2. **Змінтити НОВИЙ синтетичний sibling** через `ConflictStore.create`, що тримає `R`,
+   з окремим label `intermediate` + оновити record `theirsBlobSha → SHA(R)`.
+3. Користувач розв'язує `newBase` vs `R` у редакторі.
 
-**Чому sync2-layer, не diff2:** торкається `ConflictStore.create` semantics,
-auto-merge eligibility, cross-device attribution. Відкриті Qs (спроєктувати в
-PSEUDO-MERGE-MODE / SYNC2 ПЕРЕД кодом): чи push'иться `intermediate`-sibling на
-інші девайси (ймовірно НІ, доки не reconciled)? як Phase A/B його трактує? який у
-нього `theirsBlobSha`? Підтверджено code-review'ом: `attemptAutoMerge`
-(conflict-detection.ts) читає sibling-байти + 3-way `mergeText` автономно;
-`classify()` (conflict-classifier.ts) дропає sibling при `baseSha===siblingSha`.
+**❗КРУкс — merge-base (вирішальний constraint, code-verified):** auto-merge — 3-way
+(`ours`, `theirs`, `base`). Движок джерелить `base` з **last-synced ancestor**
+(sync2-manager: рядок 962 «base = lastSyncCommitSha», 989 `base: expectedHead`, 1862
+fetched) — що для синтезованого `newBase` vs `R` **ХИБНО**: `R` — артефакт без чесної
+історії; merge НЕ bail'иться (base є) і НЕ conflict-mark'иться (hunks можуть не
+перетинатись) → **тихий семантично-неправильний результат**. Саме «99% схожі» — це
+failure-case, не safe. Два виходи:
+  - **(A)** провести `base.snapshot`(=oldBase) як merge-base → `merge(newBase, oldBase, R)`
+    коректно поєднує (oldBase→newBase нові правки)+(oldBase→R резолюція). Але движок
+    так НЕ вміє для синтетичних siblings — потрібна нова гілка джерелення base.
+  - **(B) SUPPRESS auto-merge** на `intermediate`-sibling (label-гачок, як §10
+    synthetic-batches) → користувач розв'язує `newBase` vs `R` ВРУЧНУ. Оминає пастку
+    повністю. **Рекомендовано.**
+  Suppress/correct-base МУСИТЬ бути **атомарним зі створенням** sibling: auto-merge
+  стріляє на drain автономно, міг би розв'язати (хибно) ДО reopen/діалогу.
+
+**Виправлено в реконсиляції (2026-06-04, advisor+code):** cross-device «підробка» —
+**ХИБНА теза**: `*.conflict-from-*` force-gitignored, **local-only**
+(gitignore-invariants.ts:98,333) — нікуди не пушиться. Auto-trash — **НЕ виняток**:
+R3.4 `captureForDelete` уже авто-капче system-delete'и. Лишилось реальне: merge-base
+крукс (вище), record `theirsBlobSha` bookkeeping, Phase-9b restore-UI.
+
+**Termination:** `newBase` vs `R` → resolve → якщо base знову зміниться → синтез `R2`
+(кожен крок = звичайний конфлікт «current sibling») → завершується. ОК.
+
+**Чому sync2-layer, не diff2 / не W4c:** торкається `ConflictStore.create`, auto-merge
+eligibility/suppression, merge-base джерелення. Спроєктувати в SYNC2 /
+PSEUDO-MERGE-MODE ПЕРЕД кодом.
 
 **W4c (зараз):** §3.2.a лишається **restore/discard/cancel**; цей auto-fold —
 заплановане покращення поверх sync2.
