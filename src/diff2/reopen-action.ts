@@ -8,7 +8,7 @@
 // matrix unit-testable in one table; the canonical behaviour for each status
 // lives in §3.1 / §3.2 / §3.2.a, not restated here.
 
-import type { ReopenStatus } from "./autosave-store";
+import type { AutosaveMeta, ReopenStatus } from "./autosave-store";
 
 export type ReopenAction =
   // No prior session dir — create a brand-new one (nothing to clear).
@@ -24,13 +24,14 @@ export type ReopenAction =
   //                    (§3.1 gate / §8 #8). No restore (snapshots wouldn't help).
   | { kind: "discard-fresh"; reason: "corrupt" | "sentinel" | "library-drift" }
   // Valid session, vault unchanged since start → §3.2 ResumeRecoveryModal
-  // (Continue = build-from-snapshots + replay; Start over; ×).
-  | { kind: "resume" }
+  // (Continue = build-from-snapshots + replay; Start over; ×). `meta` is the one
+  // classifyReopen already read — threaded so the execute layer never re-reads it.
+  | { kind: "resume"; meta: AutosaveMeta }
   // Vault changed under the session → §3.2.a. W4c INTERIM: restore the old work
   // from snapshots + replay, relying on the [←] exit-TOCTOU backstop. The full
   // §3.2.a converged/partial reopen-fork (incl. [Продовжити] sibling-write) is
   // DEFERRED — built as one unit with the sync2 sibling-write.
-  | { kind: "restore" };
+  | { kind: "restore"; meta: AutosaveMeta };
 
 export function reopenAction(status: ReopenStatus): ReopenAction {
   switch (status.kind) {
@@ -43,9 +44,9 @@ export function reopenAction(status: ReopenStatus): ReopenAction {
     case "library-drift":
       return { kind: "discard-fresh", reason: "library-drift" };
     case "resume":
-      return { kind: "resume" };
+      return { kind: "resume", meta: status.meta };
     case "vault-changed":
-      return { kind: "restore" };
+      return { kind: "restore", meta: status.meta };
     default: {
       // Exhaustiveness guard: a new ReopenStatus kind must add a branch here.
       const _never: never = status;

@@ -280,6 +280,37 @@ export async function classifyReopen(
   return { kind: "vault-changed", meta, currentBaseSha, currentSiblingSha };
 }
 
+// W4c Step C — read a session's REPLAY inputs back from disk for the "continue"
+// path. The session-start SNAPSHOTS (decoded the SAME way startSession computed
+// joinedDocSha — `utf8Decode` / TextDecoder utf-8), so the DiffPane built from
+// {base, sibling} reproduces the exact doc the recorded ChangeSets are offset
+// against. Snapshots are the ground truth — NOT current vault bytes (§3.2.a
+// restore + W4a correctness pin). `jsonl` is "" when history.jsonl is absent.
+export interface ResumeSession {
+  base: string;
+  sibling: string;
+  jsonl: string;
+}
+
+export async function readResumeSession(
+  vault: Vault,
+  conflictId: string,
+): Promise<ResumeSession> {
+  const baseBytes = await vault.adapter.readBinary(baseSnapshotPath(conflictId));
+  const siblingBytes = await vault.adapter.readBinary(
+    siblingSnapshotPath(conflictId),
+  );
+  const hp = historyPath(conflictId);
+  const jsonl = (await vault.adapter.exists(hp))
+    ? await vault.adapter.read(hp)
+    : "";
+  return {
+    base: utf8Decode(baseBytes),
+    sibling: utf8Decode(siblingBytes),
+    jsonl,
+  };
+}
+
 // ── internals ────────────────────────────────────────────────────────
 
 async function ensureDir(vault: Vault, dir: string): Promise<void> {

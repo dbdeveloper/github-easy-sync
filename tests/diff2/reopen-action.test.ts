@@ -32,7 +32,7 @@ const CASES: Array<{ status: ReopenStatus; expected: ReopenAction }> = [
     status: { kind: "library-drift", meta },
     expected: { kind: "discard-fresh", reason: "library-drift" },
   },
-  { status: { kind: "resume", meta }, expected: { kind: "resume" } },
+  { status: { kind: "resume", meta }, expected: { kind: "resume", meta } },
   {
     status: {
       kind: "vault-changed",
@@ -40,7 +40,7 @@ const CASES: Array<{ status: ReopenStatus; expected: ReopenAction }> = [
       currentBaseSha: "aaa",
       currentSiblingSha: "bbb",
     },
-    expected: { kind: "restore" },
+    expected: { kind: "restore", meta },
   },
 ];
 

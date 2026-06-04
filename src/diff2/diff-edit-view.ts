@@ -43,10 +43,14 @@ import {
 import {
   autosaveDir,
   classifyReopen,
+  readResumeSession,
   startSession,
   type AutosaveMeta,
 } from "./autosave-store";
 import { reopenAction } from "./reopen-action";
+import { ResumeRecoveryModal } from "./recovery-dialog";
+import { scanHistory } from "./history-replay";
+import { readCursor } from "./cursor-store";
 import { classifyToctou, commit7Step } from "./exit-commit";
 import { findSentinelCollision } from "./joined-doc";
 import {
@@ -355,27 +359,90 @@ export class DiffEditView extends ItemView {
         ),
       );
 
-      let meta: AutosaveMeta;
+      const opts = {
+        oursLabel: this.deps.localDeviceLabel?.() ?? "local",
+        theirsLabel: entry.deviceLabel,
+        isMarkdown: isMarkdownPath(entry.basePath),
+        joinContext: {
+          remoteDeviceLabel: entry.deviceLabel,
+          timestamp: entry.isoTimestamp,
+        },
+      };
+
+      // Clear any prior dir, open a fresh session, and mount from the CURRENT
+      // vault bytes. Used by fresh / discard-fresh / restore(interim) and the
+      // resume "Start over" choice.
+      const startFreshAndMount = async (): Promise<void> => {
+        if (await adapter.exists(dir)) await adapter.rmdir(dir, true);
+        const meta = await startSession(
+          this.deps.vault,
+          conflictId,
+          entry.basePath,
+          entry.siblingPath,
+        );
+        this.activeSession = { conflictId, meta };
+        this.activeDiffPane = new DiffPane(body, ours, theirs, opts);
+      };
+
       try {
-        // W4c Step B: every action currently clears any prior dir + starts a
-        // fresh session — behaviour IDENTICAL to W1. `resume` (Step C) and
-        // `restore` (Step D) will instead KEEP the dir and replay; until those
-        // land they fall back through to clear+fresh here.
         switch (action.kind) {
           case "fresh":
           case "discard-fresh":
-          case "resume": // TODO Step C — keep dir + replayFrom + ResumeRecoveryModal
-          case "restore": // TODO Step D — keep dir + restore-from-snapshots + replay
-            if (await adapter.exists(dir)) {
-              await adapter.rmdir(dir, true);
-            }
-            meta = await startSession(
-              this.deps.vault,
-              conflictId,
-              entry.basePath,
-              entry.siblingPath,
-            );
+          // Step D will give `restore` its own restore-from-snapshots + replay;
+          // until then it falls back to clear+fresh (still non-lossy — the
+          // snapshots remain on disk for a later restore).
+          case "restore":
+            await startFreshAndMount();
             break;
+          case "resume": {
+            // §3.2 — vault unchanged since session start. Offer replay-resume
+            // vs fresh. editCount = the trustworthy-prefix block count, i.e.
+            // exactly what replayFrom will apply (so the dialog can't promise
+            // more than it restores).
+            const sess = await readResumeSession(this.deps.vault, conflictId);
+            const choice = await new ResumeRecoveryModal(this.app, {
+              basePath: entry.basePath,
+              siblingPath: entry.siblingPath,
+              startedAtIso: action.meta.createdAt,
+              editCount: scanHistory(sess.jsonl).blocks.length,
+              nowMs: Date.now(),
+            }).prompt();
+
+            // ❗The modal can sit open for minutes — re-assert the stale-state
+            // guard before touching disk / mounting. The user may have switched
+            // to another conflict; a stale Start-over would otherwise rmdir a
+            // dir the now-current view is using.
+            if (
+              this.viewState.mode !== "detail" ||
+              this.viewState.entry.siblingPath !== entry.siblingPath ||
+              !body.isConnected
+            ) {
+              return;
+            }
+
+            if (choice === "cancel") {
+              this.viewState = { mode: "list", tab: "conflicts" };
+              this.render();
+              return;
+            }
+            if (choice === "start-over") {
+              await startFreshAndMount();
+              break;
+            }
+            // "continue": rebuild from the session-start SNAPSHOTS, replay the
+            // recorded history, restore the cursor. KEEP the dir and REUSE the
+            // existing session — calling startSession here would overwrite the
+            // snapshots/history we are replaying.
+            const pane = new DiffPane(body, sess.base, sess.sibling, opts);
+            pane.replayFrom(sess.jsonl);
+            const cursor = await readCursor(this.deps.vault, conflictId);
+            if (cursor) {
+              pane.setCursor(cursor.anchor, cursor.head, cursor.scrollTop);
+            }
+            this.activeSession = { conflictId, meta: action.meta };
+            this.activeDiffPane = pane;
+            break;
+          }
         }
       } catch (err) {
         body.createEl("p", {
@@ -384,17 +451,6 @@ export class DiffEditView extends ItemView {
         });
         return;
       }
-      this.activeSession = { conflictId, meta };
-
-      this.activeDiffPane = new DiffPane(body, ours, theirs, {
-        oursLabel: this.deps.localDeviceLabel?.() ?? "local",
-        theirsLabel: entry.deviceLabel,
-        isMarkdown: isMarkdownPath(entry.basePath),
-        joinContext: {
-          remoteDeviceLabel: entry.deviceLabel,
-          timestamp: entry.isoTimestamp,
-        },
-      });
     } catch (err) {
       body.createEl("p", {
         cls: "diff2-detail-error",
