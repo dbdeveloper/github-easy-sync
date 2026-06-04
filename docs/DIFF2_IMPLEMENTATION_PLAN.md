@@ -609,21 +609,77 @@ state, що ламає симетрію tabs.
 Глобальні entry-points (ribbon, status bar) для Compare/History
 **не передбачені** — це context-bound операції.
 
-#### R2.7.3. Status bar
+#### R2.7.3. Status bar — текстовий пункт + клікабельне меню (TODO.md §6–§7)
 
-Одна групова іконка лічильником: `🔀 N`  (де `N` — кількість unresolved конфліктів).
-Клік відкриває diff2 view з default sub-tab за пріоритетом:
+> **Канонічна форма status-bar — TODO.md пункти 6-7** (узгоджено 2026-06-04).
+> Стара «🔀 N»-іконка **скасована** — замість неї текстовий пункт `GitHub[suffix]`,
+> а вхід у diff-panel зі status-bar — через **меню** (нижче), не клік-по-іконці.
+> Реалізація — `src/sync2/views/conflict-status-indicator.ts` (rewrite з icon →
+> text+menu), `src/main.ts` (wire), у **Phase 6**.
 
-1. `Conflicts`, якщо `N > 0`.
+**(§6) Текст пункту** — один з чотирьох виглядів (`N` push-batches у черзі, `M`
+unresolved-конфліктів):
 
-Якщо `N === 0` — іконка прихована.
+| стан | текст |
+|---|---|
+| 0 batches, 0 conflicts | `GitHub` |
+| N batches, 0 conflicts | `GitHub (↑ 3)` |
+| N batches, M conflicts | `GitHub (↑ 3 \| 20 ??)` |
+| 0 batches, M conflicts | `GitHub (20 ??)` |
 
-*Це один з двох (необов'язково обидва увімкнено одночасно)
-surfaces, що показують лічильник конфліктів. Другий — ribbon
-іконка `diff` (R2.7.4). Кожен з них незалежно opt-in через
-settings. Sync-ribbon-іконка `[Sync with GitHub]` лічильник
-конфліктів **НЕ показує** — там тепер push-queue depth, див.
-`PUSH-REORGANIZATION.md` §3.6.*
+- `↑ N` = **push-queue depth** (pending COMMIT-BATCHES — push-queue depth signal,
+  SYNC2/PUSH-REORG) — **зелений**.
+- `M ??` = unresolved-конфлікти (з `ConflictCounter`) — **червоний**. (`??` — обраний
+  template-маркер конфлікту; 🔀 зі status-bar **прибрано**, лишається тільки `({M} ??)`.)
+- Слово `GitHub` — **чорний** коли idle, **зелений** під час drain.
+- Лічильник конфліктів на ribbon-іконці (R2.7.4) лишається — два незалежні opt-in
+  surfaces. Sync-ribbon `[Sync with GitHub]` показує push-queue depth, не конфлікти.
+
+**(§7) Клік → status-bar меню.** Назва плагіна — з `manifest.json` (не константа).
+Три стани (детектяться БЕЗ live-перевірок):
+
+- **Uninitialized** (token/owner/repo/branch — порожні у Settings):
+  ```
+  GitHub Easy Sync: Uninitialized        (сірим)
+  ───────────────
+  Settings
+  ```
+- **Token expired** (існує файл-мітка `.token_expired` — §5 нижче):
+  ```
+  GitHub Easy Sync: Token expired        (сірим)
+  ───────────────
+  Sync All                               (завжди commit+drain, незалежно від syncStartsWithCommit)
+  Commit all changed files
+  Commit current file
+  Pull from repo and push stored (3) commits   (рядок "(N)" — лише якщо є N batches)
+  Open diff-panel (2 open conflicts)     ("(1 open conflict)" коли M==1; "(M open conflicts)" коли M>1; без суфікса коли M==0)
+  ───────────────
+  Settings
+  ```
+- **Без помилок** — першого рядка-стану й роздільника після нього НЕМАЄ:
+  ```
+  Sync All
+  Commit all changed files
+  Commit current file
+  Pull from repo and push stored commits
+  Open diff-panel
+  ───────────────
+  Settings
+  ```
+
+`Open diff-panel` — це і є diff2 entry зі status-bar (замість старого клік-по-🔀);
+відкриває view за default-sub-tab-правилом (R2.7.5). `Sync All` / `Commit all` /
+`Commit current` / `Pull+push` мапляться на наявні команди main.ts.
+
+#### R2.7.3.a. `.token_expired` persistent-мітка (TODO.md §5) — підмурок під §7
+
+Файл-мітка `.token_expired` у каталозі плагіна
+(`.obsidian/plugins/github-easy-sync/`). Ставиться/витирається **у точно відомих
+точках** обробки 401/403 (де помилка виникає / де зв'язок успішно встановлено) —
+тож **без events і без live-перевірок**: просто читаємо наявність файлу у Settings
+(показ повідомлення) і в status-bar меню (§7 стан "Token expired"). Доповнює наявний
+`token-expired-modal.ts` (recovery-діалог) персистентним прапорцем. **Важливо для UX**:
+стан "expired" видно одразу при старті, без жодного мережевого запиту.
 
 #### R2.7.4. Ribbon button — окрема іконка для diff2 (не плутати з sync-icon!)
 
@@ -2109,7 +2165,7 @@ constructor-injection; `diff2` (`TrashStore`) надає їх при wire-up у 
 | 3  | **mvp**                               | Action buttons + group buttons + `[←]`→full 7-step pair-atomic commit               | R7.5, R7.6, R7.9a, **R7.7.c full 7-step + §5.0.a recovery sweep** + R7.11 (sibling cleanup step 6.5)  | `src/diff2/{chunk-actions.ts, conflict-merge-all.ts, toolbar-conflicts.ts, split-builder.ts, exit-protocol.ts, commit-recovery-sweep.ts}`; `diff-pane.ts` (edits)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Per-chunk `[apply]/[remove]`; групові `[Keep all local]/[Apply all remote]/[Join all]` (md only). `[←]` робить **повний 7-step pair-atomic protocol** (DIFF-EDITOR.md §5.0): split → compute SHAs → write `done.json` → write обидва `.sync-tmp` (parallel) → rename originals to `.sync-bak` → rename `.sync-tmp` to originals → cleanup `.sync-bak` → R7.11 sibling cleanup on SHA-match → rmdir autosave-dir. Onload `commit-recovery-sweep` сканує `.diff2-autosave/*/` на `done.json` присутність і виконує roll-forward через decision matrix §5.0.b (11 valid crash станів A–K). **NB: повний protocol у MVP** — інакше crash між base-write і sibling-write мовчки губить ver2-edits (key correctness improvement над наївним 2-call). Перший end-to-end resolve flow вже працює, crash-resilient. |
 | 4  | releasable                            | Refinements + edge-case coverage                                                    | R7.7.d edge cases (clean-shutdown vs kill, tab-switching), additional acceptance | `tests/diff2/crash-resilience/exit-protocol-*.test.ts` (extensive); minor `exit-protocol.ts` refinements                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Comprehensive crash-injection tests для всіх 11 states A–K у §5.0.b. Default-fallback acceptance (state не матчить жоден A–K → cleanup + fresh session). Multi-sibling Scenario C acceptance (PSEUDO-MERGE-MODE §8). Cross-platform safeRename behavior на mobile (rename-non-overwrite handling — SYNC2 §3). Phase 4 не shipping нової user-feature, але покриває edge cases + перевірений release tag. |
 | 5  | releasable                            | Persistent autosave (snapshots + REDO-log + cursor-timer) + recovery dialog          | R7.7.a, R7.7.b, R7.7.d (full spec — DIFF-EDITOR.md §2–§4)                  | `src/diff2/{autosave-store.ts, session-start.ts, history-log-serde.ts, cursor-persist.ts, recovery-dialog.ts, snapshot-mismatch-modal.ts}`; `diff-pane.ts` (edits)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | **Session-start protocol** (DIFF-EDITOR.md §2.5.a): копіюємо basePath → `base.snapshot`, siblingPath → `sibling.snapshot` (ground truth byte-copies), потім cursor.json (0,0,0), порожній history.jsonl, **і ОСТАННІМ** meta.json (commit point — strong invariant "meta exists ⇒ everything valid + SHAs match snapshots"). Per CM6 transaction: push REDO-block у in-memory queue. Flush triggers: ≥150 ms idle / ≥500 ms typing-pause + nav-event / queue ≥10 blocks / explicit close. Flush = single `vault.adapter.append(history.jsonl, ...)` з batched NDJSON-блоків (per-block FNV-1a checksum). `cursor.json` rewrite по таймеру: 1-2 sec active typing / 3-5 sec navigation, atomic temp+rename. **Recovery з 2 шляхами**: (a) vault unchanged → normal §3.2 dialog `[Continue]/[Start over]`; (b) vault changed → §3.2.a snapshot-mismatch dialog `[Restore old]/[Discard]/[Cancel]` (snapshots дають ground truth для restore старої сесії на reference). **Reuse-snapshot optimization** при reopen після crash: якщо SHA(vault) === meta SHAs — skip re-copy. **Mobile perf benchmark preflight** (DIFF-EDITOR.md §6): Settings test button міряє `vault.adapter.append` p50/p95/p99 на Android; точні coalesce values pin-нуться post-benchmark. |
-| 6  | releasable                            | Entry points + summary modal + diff ribbon icon                                     | R2.7 (entry-points only)                                                  | `src/diff2/{entry-points.ts, summary-modal.ts}`; `src/main.ts` (edits); `src/settings/{settings.ts, tab.ts}` (edits — `showDiffRibbonButton` toggle)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | File-menu `Compare with…` / `Show history` + **`Resolve conflict`** on `*.conflict-from-*` siblings (R2.7.1 — uses `stripConflictSuffix` from PR-2, no ConflictStore lookup, works for synthetic + delete-vs-modify); command palette commands; status-bar 🔀 живе; **new** ribbon `diff` icon (R2.7.4) показує badge з кількістю конфліктів (та сама величина, що `🔀 N`; opt-in через `Show diff ribbon button` toggle поруч з `Show sync ribbon button` у Settings → Interface; default ON для нових інсталяцій). Sync-ribbon-іконка більше НЕ показує conflict-counter (це робить push-queue depth, координовано з PUSH-REORG Phase 6). Post-sync modal `[Continue] / [Go to Diff-Edit]` (тільки коли 0→N transition).                                        |
+| 6  | releasable                            | Entry points + summary modal + diff ribbon icon                                     | R2.7 (entry-points only)                                                  | `src/diff2/{entry-points.ts, summary-modal.ts}`; `src/main.ts` (edits); `src/settings/{settings.ts, tab.ts}` (edits — `showDiffRibbonButton` toggle)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | File-menu `Compare with…` / `Show history` + **`Resolve conflict`** on `*.conflict-from-*` siblings (R2.7.1 — uses `stripConflictSuffix` from PR-2, no ConflictStore lookup, works for synthetic + delete-vs-modify); command palette commands; **status-bar = текст `GitHub[↑N \| M ??]` + клікабельне меню (TODO.md §6–§7, R2.7.3) — 🔀-іконку замінено; вхід у diff-panel через меню; підмурок — `.token_expired` persistent-мітка (TODO.md §5, R2.7.3.a)**; **new** ribbon `diff` icon (R2.7.4) показує badge з кількістю конфліктів (та сама величина, що `🔀 N`; opt-in через `Show diff ribbon button` toggle поруч з `Show sync ribbon button` у Settings → Interface; default ON для нових інсталяцій). Sync-ribbon-іконка більше НЕ показує conflict-counter (це робить push-queue depth, координовано з PUSH-REORG Phase 6). Post-sync modal `[Continue] / [Go to Diff-Edit]` (тільки коли 0→N transition).                                        |
 | 7  | releasable                            | History mode                                                                        | R2.3, R7.9b                                                               | `src/github/client.ts` (edits — `listCommitsForPath`, *permitted cross-cut: read-only API wrapper, не sync2-internal*); `src/diff2/{history-list.ts, restore-version.ts, toolbar-history.ts}`; `diff-edit-view.ts` (edits)                                                                                                                                                                                                                                                                                                                                                                                                                         | `Show history of active file` працює; список спершу з push-queue, GitHub on demand (`[Show GitHub history…]`); DiffPane у read-only/edit toggle; `[Restore this version]` з confirm-модалкою                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | 8  | releasable                            | Compare any two                                                                     | R2.1, R7.9c                                                               | `src/diff2/{file-picker.ts, compare-mode.ts, toolbar-compare.ts}`; optional desktop-only `fs-browse.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | `Compare two files…` + `Compare active file with…` + file-menu `Compare with…` працюють; FuzzySuggestModal picker; `[Swap]`; `✏️/🔒` toggle default Reference; filesystem-browse — за результатом R2.1 research (інакше scope-cut)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | 9a | ✅ **shipped** (`28fd725` … `4941592`) | TrashStore core (move-to-trash + three-layer cleanup + compare-lift API + list API) | R3.1–R3.13 (full subsystem), R8.1 trash rows                              | `src/diff2/{trash-store.ts, trash-watcher.ts, trash-recovery.ts}`; `src/sync2/push-queue.ts` (edits — `EnqueueMeta.resolvesConflictForBasePath?: string`); `src/sync2/sync2-manager.ts` (edits — `drain.startedAt`, constructor-injected `trashHooks: {captureForDelete, confirmDeleted, confirmResolved, sweepOlderThan}`, hook call у `applyRemoteDeletion` ПЕРЕД `adapter.remove`, set `resolvesConflictForBasePath` у Phase B `synthesizeResolutionSideBatches`); `src/main.ts` (edits — monkey-patch `app.vault.delete/trash` на onload + restore на unload, wire trash-watcher + hooks); **жодного імпорту з diff2 у sync2** — див. R9 prose | Delete через Obsidian UI → patched vault.delete захоплює байти у `.trash/<id>/`; pull-delete через sync2 → explicit `captureForDelete` hook теж захоплює (R3.4 short recovery window); three-layer cleanup при drain (1a + 1b per batch, 2 на drain-end — pull-delete entries свайп-аються наступним drain-ом за `<id> < drain.startedAt`); compare-lift API — metadata-only marker `liftedAsSessionId` у `.trash/<id>/meta.json` (R3.7), файл не рухається; `TrashStore.list()` повертає disk-scan результат (async, без in-memory index, realistic N ≈ 3–20 entries); `subscribe(() => void)` — bare-signal для UI live-update. **Restore не реалізується у цій фазі.** Onload recovery sweep для intercept partial-states + stale lift markers (clear на disk) |
