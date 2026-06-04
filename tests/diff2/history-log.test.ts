@@ -13,7 +13,6 @@ import type { Segment } from "../../src/diff2/editor-model";
 import { autosaveDir, startSession } from "../../src/diff2/autosave-store";
 import {
   HistoryWriter,
-  QUEUE_CAP,
   fnv1a32,
   parseHistoryBlock,
   serializeHistoryBlock,
@@ -69,7 +68,7 @@ describe("history block serialize / parse / verify (§2.6)", () => {
   });
 });
 
-describe("HistoryWriter — coalesce queue + append flush (§2.7/§2.8)", () => {
+describe("HistoryWriter — serialized append per transaction (§2.7/§2.8)", () => {
   let fx: { root: string; vault: Vault };
   const ID = "tracked-hist";
 
@@ -85,54 +84,44 @@ describe("HistoryWriter — coalesce queue + append flush (§2.7/§2.8)", () => 
   afterEach(() => fs.rmSync(fx.root, { recursive: true, force: true }));
 
   const histPath = () => `${autosaveDir(ID)}/history.jsonl`;
+  const readLines = async () =>
+    (await fx.vault.adapter.read(histPath())).split("\n").filter(Boolean);
 
-  it("record below cap queues without writing; flush appends NDJSON", async () => {
+  it("record enqueues synchronously + schedules a serialized append; drain settles all", async () => {
     const w = new HistoryWriter(fx.vault, ID);
-    await w.record(CHANGE, STRUCT, "t1");
-    await w.record(CHANGE, STRUCT, "t2");
-    expect(w.pendingCount()).toBe(2);
-    // history.jsonl is still the empty file startSession created.
-    expect((await fx.vault.adapter.read(histPath())).length).toBe(0);
-
-    await w.flush();
+    w.record(CHANGE, STRUCT, "t1");
+    w.record([2, [1, "Q"]], STRUCT, "t2");
+    expect(w.pendingCount()).toBe(2); // both queued before any append runs
+    await w.drain();
     expect(w.pendingCount()).toBe(0);
-    const lines = (await fx.vault.adapter.read(histPath())).split("\n").filter(Boolean);
-    expect(lines.length).toBe(2);
-  });
-
-  it("seq is monotonic and every flushed block verifies through a real file round-trip", async () => {
-    const w = new HistoryWriter(fx.vault, ID);
-    await w.record(CHANGE, STRUCT, "t1");
-    await w.record([2, [1, "Q"]], STRUCT, "t2");
-    await w.flush();
-
-    const lines = (await fx.vault.adapter.read(histPath())).split("\n").filter(Boolean);
-    const blocks = lines.map((l) => parseHistoryBlock(l));
+    const blocks = (await readLines()).map((l) => parseHistoryBlock(l));
     expect(blocks.map((b) => b!.seq)).toEqual([1, 2]);
     for (const b of blocks) expect(verifyHistoryBlock(b!)).toBe(true); // byte-identical roundtrip
   });
 
-  it("reaching QUEUE_CAP auto-flushes", async () => {
+  it("burst of synchronous records → all blocks, in order, contiguous seq (serialized flush)", async () => {
     const w = new HistoryWriter(fx.vault, ID);
-    for (let i = 0; i < QUEUE_CAP; i++) await w.record(CHANGE, STRUCT, `t${i}`);
-    expect(w.pendingCount()).toBe(0); // auto-flushed on the cap-th record
-    const lines = (await fx.vault.adapter.read(histPath())).split("\n").filter(Boolean);
-    expect(lines.length).toBe(QUEUE_CAP);
+    const N = 25;
+    for (let i = 0; i < N; i++) w.record(CHANGE, STRUCT, `t${i}`);
+    await w.drain();
+    const seqs = (await readLines()).map((l) => parseHistoryBlock(l)!.seq);
+    // No interleaving / clobber: exactly 1..N, in order.
+    expect(seqs).toEqual(Array.from({ length: N }, (_, i) => i + 1));
   });
 
-  it("multiple flushes append (the log grows, earlier blocks preserved)", async () => {
-    const w = new HistoryWriter(fx.vault, ID);
-    await w.record(CHANGE, STRUCT, "t1");
-    await w.flush();
-    await w.record(CHANGE, STRUCT, "t2");
-    await w.flush();
-    const lines = (await fx.vault.adapter.read(histPath())).split("\n").filter(Boolean);
-    expect(lines.map((l) => parseHistoryBlock(l)!.seq)).toEqual([1, 2]);
+  it("startSeq continues a resumed history.jsonl (resume-Continue keeps the dir)", async () => {
+    const w = new HistoryWriter(fx.vault, ID, 7);
+    w.record(CHANGE, STRUCT, "t1");
+    w.record(CHANGE, STRUCT, "t2");
+    await w.drain();
+    const seqs = (await readLines()).map((l) => parseHistoryBlock(l)!.seq);
+    expect(seqs).toEqual([8, 9]);
+    expect(w.currentSeq()).toBe(9);
   });
 
-  it("flush on an empty queue is a no-op", async () => {
+  it("drain on an empty writer is a no-op", async () => {
     const w = new HistoryWriter(fx.vault, ID);
-    await w.flush();
+    await w.drain();
     expect((await fx.vault.adapter.read(histPath())).length).toBe(0);
   });
 });

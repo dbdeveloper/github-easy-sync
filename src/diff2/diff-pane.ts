@@ -74,6 +74,11 @@ export interface DiffPaneOpts {
   theirsLabel: string;
   isMarkdown: boolean;
   joinContext?: JoinContext;
+  // W2 — invoked once per RECORDABLE transaction (a doc change, or a structure
+  // change via setDiffPaneState), with the same {change, structure} shape the
+  // recovery replay consumes. Fires ONLY while recording is enabled (see
+  // enableRecording): live user edits, never construct / replay / setCursor.
+  onRecord?: (change: unknown, structure: Segment[]) => void;
 }
 
 const DEFAULT_OPTS: DiffPaneOpts = {
@@ -100,6 +105,12 @@ export function initialEmptyVerAt0(structure: Segment[]): ActiveBlock | null {
 export class DiffPane {
   private view: EditorView;
   private readonly opts: DiffPaneOpts;
+  // W2 — history recording is OFF until the owner explicitly enables it, AFTER
+  // construction + any replay/setCursor. This is the real invariant ("only live
+  // user edits record"): it survives a future replayFrom→dispatch change (which
+  // would otherwise silently double history on every reopen) and guards the
+  // fresh-mount init transactions from emitting a spurious first block.
+  private recording = false;
 
   constructor(
     parent: HTMLElement,
@@ -141,10 +152,36 @@ export class DiffPane {
           structureHistory,
           keymap.of([...historyKeymap, ...defaultKeymap]),
           EditorView.lineWrapping,
+          // W2 — history feed: one block per RECORDABLE transaction (a doc
+          // change, or a setDiffPaneState structure change) while recording is
+          // enabled. Double-guarded against the record→replay→re-record loop:
+          // replay uses view.setState (a ViewUpdate with empty `transactions`,
+          // so this loop body never runs) AND `recording` is false during it.
+          EditorView.updateListener.of((u) => {
+            if (!this.recording || !this.opts.onRecord) return;
+            for (const tr of u.transactions) {
+              if (
+                !tr.docChanged &&
+                !tr.effects.some((e) => e.is(setDiffPaneState))
+              ) {
+                continue;
+              }
+              this.opts.onRecord(
+                tr.changes.toJSON(),
+                u.state.field(diffPaneStateField)!.structure,
+              );
+            }
+          }),
         ],
       }),
       parent,
     });
+  }
+
+  // W2 — turn on the history feed. The owner (DiffEditView) calls this AFTER
+  // construction and after any replay/setCursor, so only live user edits record.
+  enableRecording(): void {
+    this.recording = true;
   }
 
   // Resolve ONE diff group. Public API for marker-widget action buttons.

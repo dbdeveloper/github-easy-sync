@@ -55,6 +55,8 @@ import {
 } from "./recovery-dialog";
 import { scanHistory } from "./history-replay";
 import { readCursor } from "./cursor-store";
+import { HistoryWriter } from "./history-log";
+import type { Segment } from "./editor-model";
 import { atomicWriteFile } from "../sync2/atomic-write";
 import { classifyToctou, commit7Step } from "./exit-commit";
 import { findSentinelCollision } from "./joined-doc";
@@ -110,6 +112,10 @@ export class DiffEditView extends ItemView {
   // commit7Step, cleared on dispose. Null when no detail editor is open.
   private activeSession: { conflictId: string; meta: AutosaveMeta } | null =
     null;
+  // W2 — the history feed for the active DiffPane. Reassigned on every mount
+  // (its `record` is what the DiffPane's onRecord calls); drained at the `[←]`
+  // commit (Step 1) so the last edits land before the dir is removed.
+  private activeWriter: HistoryWriter | null = null;
 
   constructor(leaf: WorkspaceLeaf, deps: DiffEditViewDeps) {
     super(leaf);
@@ -372,11 +378,30 @@ export class DiffEditView extends ItemView {
           remoteDeviceLabel: entry.deviceLabel,
           timestamp: entry.isoTimestamp,
         },
+        // W2 — the live history feed. onRecord fires only while the mounted pane
+        // has recording enabled (post-mount/replay) and routes to whichever
+        // writer the current mount path attached. Append errors are swallowed
+        // inside HistoryWriter, never reaching CM6.
+        onRecord: (change: unknown, structure: Segment[]) => {
+          this.activeWriter?.record(change, structure, new Date().toISOString());
+        },
+      };
+
+      // Bind a fresh HistoryWriter to a just-mounted pane and turn recording on
+      // (the owner calls this AFTER any replay/setCursor, so only live edits
+      // record). startSeq lets a resumed history.jsonl continue its seq.
+      const attachWriter = (pane: DiffPane, startSeq: number): void => {
+        this.activeWriter = new HistoryWriter(
+          this.deps.vault,
+          conflictId,
+          startSeq,
+        );
+        pane.enableRecording();
       };
 
       // Clear any prior dir, open a fresh session, and mount from the CURRENT
-      // vault bytes. Used by fresh / discard-fresh / restore(interim) and the
-      // resume "Start over" choice.
+      // vault bytes. Used by fresh / discard-fresh and the resume / §3.2.a
+      // "Start over" choices.
       const startFreshAndMount = async (): Promise<void> => {
         if (await adapter.exists(dir)) await adapter.rmdir(dir, true);
         const meta = await startSession(
@@ -386,14 +411,16 @@ export class DiffEditView extends ItemView {
           entry.siblingPath,
         );
         this.activeSession = { conflictId, meta };
-        this.activeDiffPane = new DiffPane(body, ours, theirs, opts);
+        const pane = new DiffPane(body, ours, theirs, opts);
+        this.activeDiffPane = pane;
+        attachWriter(pane, 0); // fresh history.jsonl
       };
 
       // Non-lossy mount: rebuild from the session-start SNAPSHOTS, replay the
       // recorded history, restore the cursor. KEEPS the dir and REUSES the
       // session — never calls startSession (which would overwrite the snapshots
       // / history being replayed). Shared by resume "Continue" (§3.2) and the
-      // restore interim (§3.2.a).
+      // §3.2.a restore. Recording resumes the existing seq (KEEP dir).
       const mountReplayed = async (
         sess: ResumeSession,
         meta: AutosaveMeta,
@@ -406,6 +433,7 @@ export class DiffEditView extends ItemView {
         }
         this.activeSession = { conflictId, meta };
         this.activeDiffPane = pane;
+        attachWriter(pane, scanHistory(sess.jsonl).blocks.length);
         return pane;
       };
 
@@ -468,12 +496,9 @@ export class DiffEditView extends ItemView {
                 entry.siblingPath,
               );
               this.activeSession = { conflictId, meta };
-              this.activeDiffPane = new DiffPane(
-                body,
-                ours,
-                restoredSibling,
-                opts,
-              );
+              const recreated = new DiffPane(body, ours, restoredSibling, opts);
+              this.activeDiffPane = recreated;
+              attachWriter(recreated, 0); // recreated fresh session
               break;
             }
             // "start-over": discard the interrupted work — recreate with the
@@ -555,6 +580,9 @@ export class DiffEditView extends ItemView {
     }
 
     try {
+      // W2 Step 1 (§5.0) — flush queued history before the commit. commit7Step
+      // Step 7 removes the dir on success; drain() awaits the serialized chain.
+      await this.activeWriter?.drain();
       // getResolved() runs the commit-boundary fail-closed checks (tiling
       // assertion) and applies the empty→"\n" guard to BOTH sides — its bytes
       // are exactly what commit7Step hashes into done.json. Keep it INSIDE the
@@ -590,6 +618,7 @@ export class DiffEditView extends ItemView {
     }
 
     this.activeSession = null;
+    this.activeWriter = null;
     this.viewState = { mode: "list", tab: "conflicts" };
     this.render();
   }

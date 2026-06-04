@@ -99,28 +99,44 @@ export const replayDispatch = Annotation.define<boolean>();
 
 // ── coalesce writer (§2.7 append, §2.8 queue) ────────────────────────
 
-// Queue-cap flush trigger (§2.8 trigger 3). Idle/nav timers (triggers 1/2) and
-// the explicit pre-exit flush (trigger 4) are caller-driven in Phase 6.
-export const QUEUE_CAP = 10;
-
 export class HistoryWriter {
-  private seq = 0;
+  private seq: number;
   private queue: string[] = [];
+  // Serialized append chain — flushes run one-at-a-time so two concurrent
+  // adapter.append calls to history.jsonl can't interleave or clobber (§2.7;
+  // Capacitor gives no cross-call ordering). The enqueue half of record() is
+  // synchronous, so block order is fixed before any await.
+  private tail: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly vault: Vault,
     private readonly autosaveId: string,
-  ) {}
+    // Resume-Continue reuses the SAME history.jsonl (KEEP dir) — continue seq
+    // from the replayed block count so it stays monotonic. Fresh / recreated
+    // sessions start at 0. seq is cosmetic for replay (replayHistory orders by
+    // file position) but kept honest for editCount + tooling. (§3.2 / W2.)
+    startSeq = 0,
+  ) {
+    this.seq = startSeq;
+  }
 
   private path(): string {
     return `${autosaveDir(this.autosaveId)}/history.jsonl`;
   }
 
-  // Queue one transaction's block. Auto-flushes when the queue hits QUEUE_CAP.
-  async record(change: unknown, structure: Segment[], at: string): Promise<void> {
+  // Record one transaction's block. seq++ + enqueue are SYNCHRONOUS (ordering
+  // guaranteed); the append is scheduled on the serialized tail chain. Burst
+  // edits during one in-flight append coalesce into the next flush. §2.8
+  // (append per transaction, no coalesce window).
+  record(change: unknown, structure: Segment[], at: string): void {
     this.seq += 1;
     this.queue.push(serializeHistoryBlock(this.seq, at, change, structure));
-    if (this.queue.length >= QUEUE_CAP) await this.flush();
+    this.tail = this.tail.then(() => this.flush()).catch((e) => {
+      // A failed append loses this one increment; the session snapshots + prior
+      // history + the [← back] Step-1 drain are the backstop. NEVER propagate
+      // into CM6's update cycle.
+      console.error("[gh-sync] diff2 history append failed", e);
+    });
   }
 
   // Append all queued blocks as one NDJSON write (§2.7 — adapter.append is
@@ -130,6 +146,12 @@ export class HistoryWriter {
     const data = this.queue.map((line) => `${line}\n`).join("");
     this.queue = [];
     await this.vault.adapter.append(this.path(), data);
+  }
+
+  // Await every scheduled append — the [← back] Step-1 flush barrier.
+  async drain(): Promise<void> {
+    await this.tail;
+    await this.flush();
   }
 
   pendingCount(): number {
