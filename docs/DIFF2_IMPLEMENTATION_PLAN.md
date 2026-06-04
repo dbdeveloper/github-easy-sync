@@ -751,6 +751,50 @@ summary modal) — завжди відкривається режим Conflicts 
 sub-tabs header **приховується** для цієї сесії, видно тільки `[←]` назад і заголовок поточного режиму. Це уникає
 змішування "глобальних боргів" з "одноразовою detail-сесією".
 
+#### R2.7.6. Entry-points — implementation sequencing (E1–E6, advisor-ratified 2026-06-04)
+
+Phase-6 entry-points, decomposed у E-серію (кожен ≈ один commit; **тестоване ядро** = чисті
+формат-функції/model-builders/resolution, **Obsidian-wiring** [status-bar/ribbon/Menu/file-menu]
+= manual/Playwright, бо mock-obsidian-stub не рендерить). Порядок: **E1 → E2 → E3** (always-visible
+high-value surfaces) → **E5 → E4 → E6** (deep-link + triggers). E2 НЕ залежить від E5 (menu
+«Open diff-panel» = no-arg `activateDiffEditView()` → list; лише E4/E6 deep-link потребують E5).
+
+- **E1 — `.token_expired` marker (TODO §5).** `token-expired-flag.ts` (set/clear/read файл
+  `<manifest.dir>/.token_expired`; шлях інжектиться → fs-vault-тестовно). Деривація **у main.ts
+  per-drain** (НЕ з `DrainStatus.lastError` — той **sticky**: `emitDrainStatus` на старті drain не
+  скидає `lastError`, тож успіх після auth-error лишив би старе): **SET** на `err instanceof
+  AuthError` у catch, **CLEAR** на drain-success; non-auth error — **лишаємо** (offline ≠ expired;
+  стале expired чиститься наступним успішним drain). + settings-probe set/clear. Onload-read сидить
+  меню §7 без мережі. Owner = main.ts (нуль sync2-edge — там уже `maybeShowTokenExpiredModal`).
+
+- **E2 — Status-bar текст+меню (TODO §6-7), R2.7.3.** `updateStatusBarItem()` стає
+  **parameterless** (читає `currentQueueDepth` + `conflictCounter.getValue()` + `drainRunning`) і
+  **піггібекає наявні підписки** (`onQueueDepthChanged` main.ts:981, drain-listener:1012,
+  `refreshConflictUI`) — **без** нових підписок (double-fire + забутий teardown). Текст
+  `GitHub[(↑ N)|(↑ N | M ⁇)|(M ⁇)]` — **пробіл після стрілки** (як між M і ⁇; TODO §6 «(↑ 3)»);
+  конфлікт-гліф = `CONFLICT_GLYPH = "⁇"` (U+2047; one place,
+  тривіально на `"??"`). **Видалити** окремий `conflictStatusIndicator` (§6: 🔀 геть зі status-bar)
+  — **всередині E2** (нема вікна без conflict-surface; grep усіх `conflictStatusIndicator`/
+  `refreshConflictUI`/`openFirstSibling` [dead] перед вирізанням). Клік → `new Menu()` (перший
+  ужиток у проєкті) 3 стани: uninit (`!isConfigured()`) / token-expired (E1) / normal → Sync All,
+  Commit all, Commit current, Pull+push stored (N), Open diff-panel (M open conflicts), Settings.
+  Тестоване ядро: формат-функція + menu-model (стан→item-list).
+
+- **E3 — Ribbon + tooltips (TODO §8-9, R2.7.4).** diff-іконка (badge=conflicts, tooltip
+  «Diff-Panel (N open conflicts)») + `showDiffRibbonButton` toggle (default ON); sync-tooltip →
+  «Sync (N commits) with GitHub» (N>0). **Перевірка:** badge/tooltip/icon усі читають ОДИН
+  `currentQueueDepth`; batch==commit у цьому рушії (один batch → один commit) → tooltip не бреше.
+  Тестоване ядро: tooltip-формат (pure).
+
+- **E5 — deep-link.** `activateDiffEditView(path?)` + `DiffEditView.openConflict(path)`
+  (path→ConflictEntry→mount detail). Foundation під E4/E6. Тестоване ядро: path→entry resolution.
+
+- **E4 — file-menu `Resolve conflict…`** на `*.conflict-from-*` (`stripConflictSuffix`) →
+  `activateDiffEditView(path)`. *(Compare/History items — Phase 8/7, відкладено.)*
+
+- **E6 — post-sync modal** `[Continue]/[Go to Diff-Edit]` на **0→N EDGE** (кеш `prevCount`; fire
+  лише `prev===0 && new>0`; **виключити startup** із pre-existing conflicts). Тестоване ядро: edge-detect.
+
 ### R3. Recently deleted / Local trash
 
 > **Implementation status.** ✅ Data layer + sync2 wire-up complete on
