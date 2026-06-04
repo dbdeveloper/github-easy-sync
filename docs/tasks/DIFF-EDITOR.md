@@ -1930,29 +1930,18 @@ battery-drain; окремої "pause when backgrounded" логіки не тре
 
 ### §3.2.a Snapshot-mismatch recovery dialog
 
-**Trigger**: `currentBaseSha ≠ meta.baseShaAtStart` АБО `currentSiblingSha ≠
-meta.siblingShaAtStart`. Vault files змінились між старт сесії і її reopen
-(sync2 pull, інший device sync, або manual edit ззовні).
-
-**Розгалуження за тим, чи in-editor resolution ЗІЙШЛАСЯ.** Виявляємо replay'єм
-history на snapshots (§3.3): чи `SHA(restored(base.snapshot)) ==
-SHA(restored(sibling.snapshot))` — тобто чи всі локальні конфлікти закриті в єдиний
-результат `R`.
-
-**(I) Partial — НЕ зійшлася → лише ПОПЕРЕДЖЕННЯ (не точка рішення).** Часткове
-вирішення проти старого base нести далі немає сенсу (немає єдиного `R`). Показуємо
-non-blocking warning «base-файл змінився; ваше незавершене вирішення конфлікту буде
-відкинуто», тоді `rmdir` autosave-сесії → fresh-сесія (§2.5.a) з поточними vault-bytes
-(`newBase` vs поточний sibling).
-
-**(II) Converged — зійшлася в `R` → діалог рішення.** Типова причина: після збою
-користувач забув відновитись у diff-editor і відредагував САМ base-файл у звичайному
-редакторі Obsidian (§7 «editing while in conflict») → `newBase`; потім вирішив
-продовжити резолюцію.
+**Trigger**: на reopen перерваної сесії спершу **ЗАВЖДИ відновлюємо її** (§3.3 replay:
+`build(base.snapshot, sibling.snapshot)` + накат REDO з `history.jsonl`) і монтуємо
+відновлений DiffPane. Якщо при цьому `currentBaseSha ≠ meta.baseShaAtStart` (base-файл
+у Vault змінився під сесією — типово: після збою користувач забув відновитись у
+diff-editor і відредагував САМ base напряму, §7 «editing while in conflict» → `newBase`)
+— показуємо цей діалог **ПОВЕРХ** відновленого pane. Спрацьовує для **БУДЬ-ЯКОГО**
+перерваного редагування — стан резолюції (повне/часткове) **не має значення**. (Зміна
+лише sibling, `currentSiblingSha ≠` без base — той самий діалог; механіка нижче однакова.)
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  You have already resolved this conflict with the       │ 
+│  You have already started conflict resolving for the    │
 │          previous version of "file.ext"!                │
 │                                                         │
 │  Do you want to CONTINUE resolving the conflict with    │ 
@@ -1964,29 +1953,32 @@ non-blocking warning «base-файл змінився; ваше незаверш
 └─────────────────────────────────────────────────────────┘
 ```
 
-- **[Continue]** — нести `R` далі як один бік оновленого конфлікту:
-  1. записати `R` у ІСНУЮЧИЙ sibling через `atomicWriteFile` (sibling вільно
-     мутабельний — §4.2/§5.2);
-  2. видалити стару autosave-сесію (її `R` витягнуто);
-  3. відкрити редактор на новому конфлікті `newBase` vs `R`-sibling (нова
-     `startSession`). Закриття далі — штатне (`SHA(base)==SHA(sibling)` / видалення).
-- **[Start over]** — відкинути попереднє вирішення ПОВНІСТЮ й **НЕЗВОРОТНЬО**:
-  1. видалити стару autosave-сесію (`R` втрачено безповоротно);
-  2. оригінальний sibling **недоторканий**;
-  3. відкрити редактор на `newBase` vs `oldSibling` «з самого початку» (нова `startSession`).
-- **[Cancel]** — лишити сесію as-is; autosave-dir + sibling недоторкані; назад у list.
+**Механіка — сесія ПЕРЕСТВОРЮЄТЬСЯ (НЕ auto-merge, НЕ запис у base).** Ключове: при
+зміні base ВІДНОВЛЮЄМО **ТІЛЬКИ sibling**. `getResolved().base` **відкидається** (у
+Vault уже новий base з правками користувача); несемо далі лише `getResolved().sibling`.
 
-**Чому запис `R` у sibling БЕЗПЕЧНИЙ (PSEUDO-MERGE-MODE):** це легітимна мутація
-sibling, той самий клас, що §5.2 «rename sibling over base» / §7 «edit while in
-conflict». **auto-merge НЕ re-fire'иться** — це одноразовий detection-gate ПЕРЕД
-реєстрацією (§4.1 + §6); зареєстрований конфлікт резолвиться лише filesystem-
-операціями, Phase A `classify()` читає ПОТОЧНИЙ sibling-SHA (filesystem-authoritative).
-Тож запис `R` не тригерить auto-merge → коректно й безпечно.
+- **[Continue]** — нести перерване редагування на новий base:
+  1. `restoredSibling = getResolved().sibling` з відновленого pane;
+  2. записати `restoredSibling` у Vault на старе місце `siblingPath` (`atomicWriteFile`;
+     sibling вільно мутабельний — §4.2/§5.2). **base НЕ чіпаємо** (там нові зміни);
+  3. вбити стару autosave-сесію (`rmdir`);
+  4. `startSession(basePath, siblingPath)` → snapshots = новий base + щойно-збережений
+     sibling → нова diff-сесія порівнює **новий base vs restoredSibling**.
+- **[Start over]** — відкинути перерване редагування:
+  1. вбити стару autosave-сесію (`rmdir`); sibling у Vault **НЕ переписаний**;
+  2. `startSession(basePath, siblingPath)` → нова сесія **новий base vs оригінальний
+     (vault) sibling** «з самого початку».
+- **[Cancel]** — лишити відновлений pane as-is; на `[← back]` спрацює exit-TOCTOU
+  (§5.0 Step-1.5).
 
-> **Implementation note:** convergence — з replay'у (`getResolved().base === .sibling`),
-> НЕ окрема `.conflict-resolved` мітка (десинк на crash). W4b `SnapshotMismatchModal`
-> (restore/discard/cancel) — попередня форма; оновити під цей діалог. Кейс рідкісний
-> (повна резолюція + crash до `[← back]` + локальна правка base до reopen).
+**Чому це безпечно й просто:** обидва вибори = (опційно записати `restoredSibling`) →
+`rmdir` → `startSession` → fresh mount — **усе diff2-layer**. Нема merge-base, нема
+auto-merge: нова сесія порівнює локально, а запис sibling — легітимна §4.2-мутація, що
+auto-merge НЕ тригерить (одноразовий detection-gate, §4.1/§6). vault-UNCHANGED натомість
+→ §3.2 `ResumeRecoveryModal` (Continue/Start over), без цього діалогу.
+
+> **Implementation note:** W4b `SnapshotMismatchModal` (restore/discard/cancel) —
+> попередня форма; оновити під цей `[Continue]/[Start over]/[Cancel]` діалог + механіку.
 
 ### §3.3 Continue editing — replay algorithm
 
@@ -2103,10 +2095,9 @@ for each <conflictId>/ in .diff2-autosave/:
 
 **Важлива зміна порівняно з попереднім дизайном**: умова "SHA(vault[basePath]) ≠
 meta.baseShaAtStart" **більше НЕ cleanup-тригер**. Раніше — wipe autosave якщо
-vault змінився. Тепер: vault-mismatch — це **trigger для recovery dialog** (§3),
-де користувач сам вибирає (restore-old / discard-and-fresh / cancel), а не
-silent wipe. Завдяки snapshots ми зберегли originals — є з чим показати
-diff "stale vs current" у дiалозі.
+vault змінився. Тепер: vault-mismatch — це **trigger для recovery dialog** (§3.2.a),
+де користувач сам вибирає (Continue / Start over / Cancel), а не silent wipe.
+Завдяки snapshots ми відновлюємо роботу й несемо restored sibling далі.
 
 **Чому умова (6) — `SHA(base) === SHA(sibling)`** включена окремо: якщо файли
 зрівнялись (через sync2 auto-merge на drain, ручне зведення, чи зовнішнє
@@ -2217,12 +2208,12 @@ Step 1.5. **TOCTOU check** — verify input files не змінились ззо
     
     else: SHAs match → vault state такий самий як при openDiffPane → continue Step 2.
     
-    // Special case: якщо user обрав "Restore the previous version" у §3.2.a,
-    // DiffPane відкритий на snapshot-version. TOCTOU check тут гарантовано
-    // спрацьовує (snapshot SHA ≠ current vault SHA, бо інакше §3.2.a не
-    // тригерився б). User одразу побачить §5.0.e modal з опціями. Це
-    // правильний UX: user розуміє, що працює на stale version і має
-    // явно вибрати save-to-alt.
+    // Special case: на §3.2.a [Cancel] DiffPane лишається на ВІДНОВЛЕНОМУ
+    // (snapshot+replay) стані, хоча vault-base змінився. TOCTOU тут гарантовано
+    // спрацьовує (snapshot SHA ≠ current vault SHA — інакше §3.2.a не тригерився
+    // б), і user одразу бачить §5.0.e modal з save-to-alt. (§3.2.a [Continue] /
+    // [Start over] натомість ПЕРЕСТВОРЮЮТЬ сесію з новим base-snapshot, тож для
+    // них TOCTOU вже не спрацьовує — вони стартують чисту сесію на новому base.)
 
 Step 2. (baseBytes, siblingBytes) = split(currentEditorDoc)
         expectedBaseSha = sha(baseBytes)
@@ -2659,7 +2650,7 @@ background, CM6 буфер у пам'яті переживає, coalesce-flush +
 | `toctou-cancel.test.ts`                           | TOCTOU modal → user обирає "Cancel".                                                                                                                                                                                                                    | Modal закривається; DiffPane stays open; vault unchanged; autosave-dir unchanged; user може Ctrl+A→Ctrl+C з документа і робити reconcile вручну.                                       |
 | `session-start-protocol-ordering.test.ts`         | §2.5.a session-start: snapshots + cursor + history written BEFORE meta.json. Crash injection між кожним кроком 6-10 → next openDiffPane: якщо meta.json missing → cleanup (умова 1 §4.2); якщо meta.json exists → all other files present + SHAs match. | Strong invariant "meta exists ⇒ everything valid" дотримується.                                                                                                                        |
 | `reuse-snapshot-optimization.test.ts`             | §2.5.b: reopen після crash + vault SHA matches meta → skip re-copy snapshots; existing autosave-dir reused; recovery dialog показано (§3.2 normal).                                                                                                     | I/O on session-start значно нижче за full init.                                                                                                                                        |
-| `snapshot-mismatch-recovery-dialog.test.ts`       | §3.2.a: vault changed between session start і reopen. Modal показано з 3 опціями: restore-old (DiffPane на snapshot bytes), discard-and-fresh (wipe), cancel (no-op). Cover SHA mismatch у base alone, sibling alone, both.                             | Кожна опція веде до правильного state переходу.                                                                                                                                        |
+| `snapshot-mismatch-recovery-dialog.test.ts`       | §3.2.a: base changed under the session. Always-restore (snapshot+replay), then dialog [Continue]/[Start over]/[Cancel]. Continue → write restoredSibling to vault + recreate session (new base vs restoredSibling); Start over → recreate (new base vs original sibling); Cancel → keep restored pane (exit-TOCTOU backstop).                             | Кожна опція веде до правильного state переходу.                                                                                                                                        |
 | `snapshot-sha-corruption-cleanup.test.ts`         | §4.2 умова 5: simulate disk bit-flip у base.snapshot — `sha(read("base.snapshot")) ≠ meta.baseShaAtStart` на cleanup sweep → autosave-dir cleaned + Notice logged.                                                                                      | Defense in depth catches storage-level corruption.                                                                                                                                     |
 
 ### §7.3 Integration (`tests/integration/scenarios/diff2/`)
