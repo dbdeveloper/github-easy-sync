@@ -1905,61 +1905,68 @@ transactions — переходимо в "navigation" таймер.
 meta.siblingShaAtStart`. Vault files змінились між старт сесії і її reopen
 (sync2 pull, інший device sync, або manual edit ззовні).
 
-**Modal contract:**
+**Розгалуження за тим, чи in-editor resolution ЗІЙШЛАСЯ.** Виявляємо replay'єм
+history на snapshots (§3.3): чи `SHA(restored(base.snapshot)) ==
+SHA(restored(sibling.snapshot))` — тобто чи всі локальні конфлікти закриті в єдиний
+результат `R`.
+
+**(I) Partial — НЕ зійшлася → лише ПОПЕРЕДЖЕННЯ (не точка рішення).** Часткове
+вирішення проти старого base нести далі немає сенсу (немає єдиного `R`). Показуємо
+non-blocking warning «base-файл змінився; ваше незавершене вирішення конфлікту буде
+відкинуто», тоді `rmdir` autosave-сесії → fresh-сесія (§2.5.a) з поточними vault-bytes
+(`newBase` vs поточний sibling).
+
+**(II) Converged — зійшлася в `R` → діалог рішення.** Типова причина: після збою
+користувач забув відновитись у diff-editor і відредагував САМ base-файл у звичайному
+редакторі Obsidian (§7 «editing while in conflict») → `newBase`; потім вирішив
+продовжити резолюцію.
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  ⚠ Conflict files were changed after conflict was already resolved  │
-│                                                                     │
-│  Your unfinished session edited these files based on their state    │
-│  from <12 minutes ago> (saved 17 edits):                            │
-│    • *base:    Notes/work/meeting.md                                │
-│    • sibling: Notes/work/meeting.conflict-from-iphone-….md          │
-│  * - the Vault content was changed since last editing               │
-│                                                                     │
-│  ● Restore the previous conflict resolving session in the editor.   │
-│    Use it to review/copy your work. On [← back] the alt paths will  │
-│    be proposed for saving.                                          │
-│  ○ Discard old session, start fresh conflict resolving with new     │
-│    files                                                            │
-│                                                                     │
-│  Cancel — keep session as-is. You can resolve the conflict on the   │ 
-│           filesystem level (rename or delete conflict files)        │
-│                                                                     │
-│                 [ Proceed ]    [ Cancel ]                           │
-└─────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  You have already resolved this conflict with the       │ 
+│          previous version of "file.ext"!                │
+│                                                         │
+│  Do you want to CONTINUE resolving the conflict with    │ 
+│         the actual version of the file, or              │ 
+│       discard the previous resolution AT ALL            │ 
+│        and start over from the beginning?               │
+│                                                         │
+│         Continue ]   [ Start Over ]   [ Cancel ]        │
+└─────────────────────────────────────────────────────────┘
 ```
 
-**Опції:**
+- **[Продовжити]** — нести `R` далі як один бік оновленого конфлікту:
+  1. записати `R` у ІСНУЮЧИЙ sibling через `atomicWriteFile` (sibling вільно
+     мутабельний — §4.2/§5.2);
+  2. видалити стару autosave-сесію (її `R` витягнуто);
+  3. відкрити редактор на новому конфлікті `newBase` vs `R`-sibling (нова
+     `startSession`). Закриття далі — штатне (`SHA(base)==SHA(sibling)` / видалення).
+- **[Почати з початку]** — відкинути попереднє вирішення ПОВНІСТЮ й **НЕЗВОРОТНЬО**:
+  1. видалити стару autosave-сесію (`R` втрачено безповоротно);
+  2. оригінальний sibling **недоторканий**;
+  3. відкрити редактор на `newBase` vs `oldSibling` «з самого початку» (нова `startSession`).
+- **[Cancel]** — лишити сесію as-is; autosave-dir + sibling недоторкані; назад у list.
 
-**(1) Restore the previous version** (default):
+**Чому запис `R` у sibling БЕЗПЕЧНИЙ (PSEUDO-MERGE-MODE):** це легітимна мутація
+sibling, той самий клас, що §5.2 «rename sibling over base» / §7 «edit while in
+conflict». **auto-merge НЕ re-fire'иться** — це одноразовий detection-gate ПЕРЕД
+реєстрацією (§4.1 + §6); зареєстрований конфлікт резолвиться лише filesystem-
+операціями, Phase A `classify()` читає ПОТОЧНИЙ sibling-SHA (filesystem-authoritative).
+Тож запис `R` не тригерить auto-merge → коректно й безпечно.
 
-- Замість читання `currentBase`/`currentSibling` для побудови joined doc,
-  читаємо **snapshots** (`base.snapshot` / `sibling.snapshot`).
-- `joined = build(snapshotBase, snapshotSibling)` — точно той самий стан,
-  що користувач залишив.
-- Replay history.jsonl + apply cursor.json — як у normal §3.3 flow.
-- DiffPane показує old conflict state.
-- При `[← back]` — §5.0 Step 1.5 TOCTOU check виявить mismatch (поточний
-  vault ≠ snapshots) → §5.0.e modal з опціями save-to-alt / force / cancel.
-- Це дозволяє користувачу побачити SVOEW роботу + скопіювати її + manually
-  reconcile з новим vault.
-
-**(2) Discard old session, start fresh**:
-
-- `rmdir(.diff2-autosave/<conflictId>, recursive)` — wipe all.
-- Нова сесія через §2.5.a session-start protocol з поточними vault bytes.
-- Old edits втрачені.
-
-**(3) Cancel**:
-
-- Modal закривається; повертаємось у list view (detail-area не populate-ється).
-- Autosave-dir лишається. Користувач сам розбирається.
+> **Implementation note:** convergence — з replay'у (`getResolved().base === .sibling`),
+> НЕ окрема `.conflict-resolved` мітка (десинк на crash). W4b `SnapshotMismatchModal`
+> (restore/discard/cancel) — попередня форма; оновити під цей діалог. Кейс рідкісний
+> (повна резолюція + crash до `[← back]` + локальна правка base до reopen).
 
 ### §3.3 Continue editing — replay algorithm
 
 ```
-1. Build joined document: doc = build(currentBase, currentSibling)
+1. Build joined doc from the SESSION-START SNAPSHOTS (NOT current vault bytes):
+   doc = build(read("base.snapshot"), read("sibling.snapshot"))
+   — recorded ChangeSets are offsets into the snapshot-built clean doc; current
+   bytes may differ (cosmetic, or §3.2.a vault-changed) and mis-apply them.
+   (§3.2.a opt(1) already reads snapshots; W4a correctness pin.)
 2. Initialize EditorState with doc, history({newGroupDelay: 0}), other extensions
 3. Open file: history.jsonl (path from meta.historyFile)
 4. Read line-by-line:
@@ -1972,9 +1979,9 @@ meta.siblingShaAtStart`. Vault files змінились між старт сес
 6. If stopped mid-stream (corrupt block K) → "recovered K of N edits"
    - Show non-blocking Notice
    - State є post-block-(K-1)
-7. Apply cursor.json if present:
-   a. Read .diff2-autosave/<conflictId>/cursor.json
-   b. JSON.parse; if fails → skip cursor apply
+7. Apply cursor (§2.9 2-slot ping-pong) if present:
+   a. Read cursor-a.json + cursor-b.json; pick the valid (parseable) slot with
+      the MAX `seq`. If neither is valid → skip cursor apply.
    c. anchor = clamp(saved.anchor, 0, doc.length)
    d. head = clamp(saved.head, 0, doc.length)
    e. view.dispatch({selection: {anchor, head}})
@@ -1990,8 +1997,10 @@ crash — `Ctrl+Z` йде назад послідовно.
 ```
 1. await vault.adapter.rmdir(`.diff2-autosave/${conflictId}`, true)  // recursive
 2. Continue normal openDiffPane flow:
-   - build joined doc з current base + sibling
-   - new meta.json + new history.jsonl + new cursor.json (0,0,0)
+   - build joined doc з current base + sibling (тут current = коректно: fresh-session
+     snapshots стають = current vault)
+   - new meta.json + new history.jsonl + new base.snapshot/sibling.snapshot +
+     new cursor-a.json (seq 0)
    - DiffPane opens fresh
 ```
 
