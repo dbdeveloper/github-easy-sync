@@ -1956,6 +1956,47 @@ meta.siblingShaAtStart`. Vault files змінились між старт сес
 - Modal закривається; повертаємось у list view (detail-area не populate-ється).
 - Autosave-dir лишається. Користувач сам розбирається.
 
+#### §3.2.a-plan — PLANNED auto-fold (converged sub-case) — sync2-layer, NOT W4c
+
+**Передумова (вузький підвипадок §3.2.a):** in-editor resolution **зійшлась**
+(`getResolved().base === .sibling` ⇒ єдиний чистий результат `R`), користувач НЕ
+встиг `[← back]`, і base змінився під сесією. Тоді замість restore/discard/cancel —
+запропонувати **порівняти `R` з новим base**.
+
+**Діалог (текст, ратифіковано з користувачем):**
+> «Попередній конфлікт був розв'язаний, але не записаний, після чого base-file
+> було змінено. Бажаєте порівняти попередній розв'язок із новим base-file?»
+> `[ Compare ]   [ Discard ]   [ Cancel ]`
+
+**Семантика кнопок:**
+- **`[Compare]`** — fold `R` → `intermediate`-sibling, розв'язати `newBase` vs `R` (механізм нижче).
+- **`[Discard]`** — стерти лише autosave-сесію (`R` втрачено); **оригінальний sibling
+  ЛИШАЄТЬСЯ** у vault → конфлікт `newBase` vs original-sibling re-presents, користувач
+  розв'язує наново. (Та сама семантика, що загальна §3.2.a(2): rmdir autosave-dir,
+  sibling не чіпаємо — sync2 ним володіє.)
+- **`[Cancel]`** — лишити сесію as-is; autosave-dir + sibling недоторкані.
+
+**Механізм (за згодою користувача — НЕ silent):** на `[Compare]` — НЕ перезаписувати
+наявний `*.conflict-from-<device>-<ts>` sibling (sync2 ним володіє: Phase A/B +
+auto-merge §6 діють автономно; запис `R` у нього = forged input → silent
+auto-merge у garbage + cross-device push як «версія цього device»). Натомість
+**змінтити НОВИЙ синтетичний sibling** через `ConflictStore.create`, що тримає `R`,
+з **окремим device-label `intermediate`** (щоб (а) не видавати за версію девайса,
+(б) дати sync2 гачок **придушити auto-merge** на ньому — як §10/Scenario-E
+synthetic-batches пропускають `mergeIntoLatestPending`). Далі — звичайний конфлікт
+`newBase` vs `intermediate(R)`, який користувач розв'язує ще раз.
+
+**Чому sync2-layer, не diff2:** торкається `ConflictStore.create` semantics,
+auto-merge eligibility, cross-device attribution. Відкриті Qs (спроєктувати в
+PSEUDO-MERGE-MODE / SYNC2 ПЕРЕД кодом): чи push'иться `intermediate`-sibling на
+інші девайси (ймовірно НІ, доки не reconciled)? як Phase A/B його трактує? який у
+нього `theirsBlobSha`? Підтверджено code-review'ом: `attemptAutoMerge`
+(conflict-detection.ts) читає sibling-байти + 3-way `mergeText` автономно;
+`classify()` (conflict-classifier.ts) дропає sibling при `baseSha===siblingSha`.
+
+**W4c (зараз):** §3.2.a лишається **restore/discard/cancel**; цей auto-fold —
+заплановане покращення поверх sync2.
+
 ### §3.3 Continue editing — replay algorithm
 
 ```
