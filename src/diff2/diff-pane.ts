@@ -64,6 +64,7 @@ import {
   split,
   VER_SEPARATOR,
 } from "./joined-doc";
+import { replayHistory } from "./history-replay";
 import { siblingWinsGutter } from "./line-numbers";
 import type { MarkerWidgetCallbacks } from "./markers";
 import { selectionRules, strictVerBlockAt } from "./selection-rules";
@@ -199,6 +200,37 @@ export class DiffPane {
     const field = this.view.state.field(diffPaneStateField, false);
     if (!field) return 0;
     return field.structure.filter((s) => s.role === "ver1").length;
+  }
+
+  // §3.3 Recovery — replay a trustworthy `history.jsonl` prefix onto the
+  // CURRENT editor state. The caller MUST have built this DiffPane from the
+  // session-start SNAPSHOTS (`base.snapshot`/`sibling.snapshot`): those are the
+  // ground truth the recorded ChangeSets are offset against. `resume` is
+  // returned on a `joinedDocSha` match "regardless of cosmetic input diffs", so
+  // a current-built doc could mis-apply the offsets → corruption; §3.2.a
+  // restore also builds from snapshots. replayHistory rebuilds the undo history
+  // (each block dispatched as a history step). No-op when jsonl is empty (the
+  // per-transaction history feed is W2).
+  replayFrom(jsonl: string): { replayed: number; stoppedAtCorrupt: boolean } {
+    const result = replayHistory(this.view.state, jsonl);
+    this.view.setState(result.state);
+    return {
+      replayed: result.replayed,
+      stoppedAtCorrupt: result.stoppedAtCorrupt,
+    };
+  }
+
+  // §3.3 step 7 — restore the saved caret/scroll after replay. anchor/head are
+  // clamped to the (possibly shorter) replayed doc; selectionRules legalizes
+  // the landing spot. scrollTop is best-effort.
+  setCursor(anchor: number, head: number, scrollTop?: number): void {
+    const len = this.view.state.doc.length;
+    const a = Math.max(0, Math.min(anchor, len));
+    const h = Math.max(0, Math.min(head, len));
+    this.view.dispatch({ selection: { anchor: a, head: h } });
+    if (typeof scrollTop === "number") {
+      this.view.scrollDOM.scrollTop = scrollTop;
+    }
   }
 
   destroy(): void {
