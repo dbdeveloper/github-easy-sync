@@ -205,4 +205,32 @@ describe("W4c Step C — resume via readResumeSession + replay", () => {
     expect(sess.base).toBe(newBase);
     expect(sess.sibling).toBe(oldSibling); // original, untouched
   });
+
+  it("§3.2.a MIRROR — sibling changed: write restoredBase, recreate (restoredBase vs new sibling)", async () => {
+    const vault = fixture();
+    const oldBase = "a\nMINE\nc\n";
+    const oldSibling = "a\nTHEIRS\nc\n";
+    await vault.adapter.write("base.md", oldBase);
+    await vault.adapter.write("sibling.md", oldSibling);
+    await startSession(vault, "cid", "base.md", "sibling.md");
+
+    const sess0 = await readResumeSession(vault, "cid");
+    const pane = new DiffPane(mount(), sess0.base, sess0.sibling);
+    pane.resolveAll("theirs");
+    const restoredBase = pane.getResolved().base;
+    pane.destroy();
+
+    // sibling changed externally (base unchanged)
+    const newSibling = "a\nTHEIRS\nc\nEXTRA\n";
+    await vault.adapter.write("sibling.md", newSibling);
+
+    // Continue (sibling-changed): write restoredBase to the UNCHANGED base side.
+    await vault.adapter.write("base.md", restoredBase);
+    await vault.adapter.rmdir(autosaveDir("cid"), true);
+    await startSession(vault, "cid", "base.md", "sibling.md");
+
+    const sess = await readResumeSession(vault, "cid");
+    expect(sess.base).toBe(restoredBase); // restored base carried forward
+    expect(sess.sibling).toBe(newSibling); // NEW sibling — never restored
+  });
 });

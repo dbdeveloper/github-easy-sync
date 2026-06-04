@@ -37,24 +37,38 @@ const CASES: Array<{ status: ReopenStatus; expected: ReopenAction }> = [
   },
   { status: { kind: "resume", meta }, expected: { kind: "resume", meta } },
   {
-    // vault-changed + base CHANGED → restore (the §3.2.a dialog path).
+    // vault-changed, ONLY base changed → restore (changedSide base).
     status: {
       kind: "vault-changed",
-      meta: metaBase("OLD"),
+      meta: metaBase("B0"),
       currentBaseSha: "NEW",
-      currentSiblingSha: "sib2",
+      currentSiblingSha: "sib",
     },
-    expected: { kind: "restore", meta: metaBase("OLD") },
+    expected: { kind: "restore", meta: metaBase("B0"), changedSide: "base" },
   },
   {
-    // vault-changed + base SAME (only the sibling changed) → silent restart.
+    // vault-changed, ONLY sibling changed → restore (changedSide sibling).
     status: {
       kind: "vault-changed",
-      meta: metaBase("SAME"),
-      currentBaseSha: "SAME",
-      currentSiblingSha: "sib2",
+      meta: metaBase("B0"),
+      currentBaseSha: "B0",
+      currentSiblingSha: "NEW",
     },
-    expected: { kind: "discard-fresh", reason: "sibling-drift" },
+    expected: {
+      kind: "restore",
+      meta: metaBase("B0"),
+      changedSide: "sibling",
+    },
+  },
+  {
+    // vault-changed, BOTH changed → silent fresh restart.
+    status: {
+      kind: "vault-changed",
+      meta: metaBase("B0"),
+      currentBaseSha: "NEW",
+      currentSiblingSha: "NEW",
+    },
+    expected: { kind: "discard-fresh", reason: "both-changed" },
   },
 ];
 
@@ -62,7 +76,13 @@ describe("reopenAction — W4c Step A dispatch (all 6 statuses)", () => {
   for (const { status, expected } of CASES) {
     const label =
       status.kind === "corrupt" ? `corrupt:${status.reason}` : status.kind;
-    it(`${label} → ${expected.kind}${"reason" in expected ? `(${expected.reason})` : ""}`, () => {
+    const detail =
+      "reason" in expected
+        ? `(${expected.reason})`
+        : "changedSide" in expected
+          ? `(${expected.changedSide})`
+          : "";
+    it(`${label} → ${expected.kind}${detail}`, () => {
       expect(reopenAction(status)).toEqual(expected);
     });
   }

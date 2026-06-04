@@ -1,22 +1,20 @@
-// W4b — Recovery dialogs (DIFF-EDITOR.md §3.2 / §3.2.a).
+// Recovery dialog (DIFF-EDITOR.md §3.2 / §3.2.a).
 //
-// Two modals, both following the proven `prompt(): Promise<choice>` pattern
+// ONE modal, following the proven `prompt(): Promise<choice>` pattern
 // (PreSyncConflictModal): the promise resolves on `onClose`, default choice is
-// "cancel", explicit button clicks overwrite it before close. Designed to be
-// MAXIMALLY COMPACT (fit an average phone) yet informative enough to understand
-// the situation — short labels, the changed-side marked with `*`, no scrolling
-// on typical content.
+// "cancel", explicit button clicks overwrite it before close. MAXIMALLY COMPACT
+// (fit an average phone) yet informative — short labels, no scrolling.
 //
-//   §3.2   ResumeRecoveryModal       — vault unchanged since session start:
-//          [Continue editing] / [Start over] / ×(cancel)
-//   §3.2.a SnapshotMismatchModal     — base changed under the session (we
-//          always-restore first, then show this over it):
-//          [Continue] / [Start over] / [Cancel]
+//   §3.2   ResumeRecoveryModal — interrupted session: replay-resume vs fresh.
+//          [Continue editing] / [Start over] / ×(cancel).
+//   §3.2.a one vault side changed under the session → the SAME modal (it is just
+//          crash recovery — no scary "files changed" dialog); a "*" + footnote
+//          marks the changed file, and Continue carries the user's edit for the
+//          UNCHANGED side onto the new version (mechanics in the view).
 
 import { App, Modal } from "obsidian";
 
 export type ResumeChoice = "continue" | "start-over" | "cancel";
-export type MismatchChoice = "continue" | "start-over" | "cancel";
 
 export interface ResumeInfo {
   basePath: string;
@@ -25,15 +23,13 @@ export interface ResumeInfo {
   editCount: number;
   // Optional "Last:" clock (last edit / cursor save). Omitted if absent.
   lastEditIso?: string;
+  // Marks a side with "*" + a footnote when that vault file changed under the
+  // session. §3.2.a one-side-changed recovery REUSES this modal (no separate
+  // "files changed" dialog — it is just crash recovery). Both false on a plain
+  // resume.
+  baseChanged?: boolean;
+  siblingChanged?: boolean;
   // Injected for deterministic relative-time rendering (caller: Date.now()).
-  nowMs: number;
-}
-
-export interface MismatchInfo {
-  basePath: string;
-  siblingPath: string;
-  startedAtIso: string;
-  editCount: number;
   nowMs: number;
 }
 
@@ -78,9 +74,14 @@ export class ResumeRecoveryModal extends Modal {
       c.empty();
 
       c.createEl("p").setText("Unfinished edit session for:");
+      const star = (changed?: boolean) => (changed ? "* " : "");
       const ul = c.createEl("ul");
-      ul.createEl("li").setText(`base: ${this.info.basePath}`);
-      ul.createEl("li").setText(`sibling: ${this.info.siblingPath}`);
+      ul.createEl("li").setText(
+        `${star(this.info.baseChanged)}base: ${this.info.basePath}`,
+      );
+      ul.createEl("li").setText(
+        `${star(this.info.siblingChanged)}sibling: ${this.info.siblingPath}`,
+      );
       const meta =
         `Started ${relativeTimeFromIso(this.info.startedAtIso, this.info.nowMs)}` +
         ` · ${this.info.editCount} edit${this.info.editCount === 1 ? "" : "s"} saved` +
@@ -88,64 +89,17 @@ export class ResumeRecoveryModal extends Modal {
           ? ` · last ${clockFromIso(this.info.lastEditIso)}`
           : "");
       c.createEl("p").setText(meta);
+      if (this.info.baseChanged || this.info.siblingChanged) {
+        c.createEl("p", { cls: "diff2-recovery-footnote" }).setText(
+          "* this file changed in the vault since the last editing session.",
+        );
+      }
 
       const row = c.createDiv({ cls: "modal-button-container" });
       const cont = row.createEl("button", {
         text: "Continue editing",
         cls: "mod-cta",
       });
-      cont.addEventListener("click", () => {
-        this.choice = "continue";
-        this.close();
-      });
-      const over = row.createEl("button", { text: "Start over" });
-      over.addEventListener("click", () => {
-        this.choice = "start-over";
-        this.close();
-      });
-
-      this.open();
-    });
-  }
-}
-
-// §3.2.a — one or both vault files changed since the session started. Restore
-// the old state (review/copy, save-to-alt on exit) or discard for a fresh one.
-export class SnapshotMismatchModal extends Modal {
-  private choice: MismatchChoice = "cancel";
-
-  constructor(
-    app: App,
-    private readonly info: MismatchInfo,
-  ) {
-    super(app);
-  }
-
-  prompt(): Promise<MismatchChoice> {
-    return new Promise((resolve) => {
-      this.onClose = () => resolve(this.choice);
-      const c = this.contentEl;
-      this.titleEl.setText("Conflict base changed since you started");
-      c.empty();
-
-      const base = this.info.basePath.split("/").pop() ?? this.info.basePath;
-      c.createEl("p").setText(
-        `You have already started conflict resolving for the previous version ` +
-          `of "${base}"!`,
-      );
-      c.createEl("p").setText(
-        "Do you want to CONTINUE resolving the conflict with the actual version " +
-          "of the file, or discard the previous resolution AT ALL and start over " +
-          "from the beginning?",
-      );
-      const ago = relativeTimeFromIso(this.info.startedAtIso, this.info.nowMs);
-      c.createEl("p", { cls: "diff2-recovery-footnote" }).setText(
-        `Started ${ago} · ${this.info.editCount} edit` +
-          `${this.info.editCount === 1 ? "" : "s"} saved · base: ${this.info.basePath}`,
-      );
-
-      const row = c.createDiv({ cls: "modal-button-container" });
-      const cont = row.createEl("button", { text: "Continue", cls: "mod-cta" });
       cont.addEventListener("click", () => {
         this.choice = "continue";
         this.close();

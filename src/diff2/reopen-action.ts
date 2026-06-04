@@ -22,23 +22,24 @@ export type ReopenAction =
   //   library-drift  — inputs unchanged but build() now yields a different
   //                    joined-doc → replay offsets unsound → start fresh
   //                    (§3.1 gate / §8 #8). No restore (snapshots wouldn't help).
-  //   sibling-drift  — base unchanged but the SIBLING changed under the session.
-  //                    The old simple rule: SILENTLY restart — kill + fresh from
-  //                    the current base+sibling. §3.2.a (the dialog) is for a
-  //                    BASE change only.
+  //   both-changed   — BOTH vault sides changed under the session → the user's
+  //                    work is fully stale → silent fresh restart, no dialog
+  //                    (§3.2.a). A one-side change is `restore`, not this.
   | {
       kind: "discard-fresh";
-      reason: "corrupt" | "sentinel" | "library-drift" | "sibling-drift";
+      reason: "corrupt" | "sentinel" | "library-drift" | "both-changed";
     }
   // Valid session, vault unchanged since start → §3.2 ResumeRecoveryModal
   // (Continue = build-from-snapshots + replay; Start over; ×). `meta` is the one
   // classifyReopen already read — threaded so the execute layer never re-reads it.
   | { kind: "resume"; meta: AutosaveMeta }
-  // Vault changed under the session → §3.2.a. W4c INTERIM: restore the old work
-  // from snapshots + replay, relying on the [←] exit-TOCTOU backstop. The full
-  // §3.2.a converged/partial reopen-fork (incl. [Продовжити] sibling-write) is
-  // DEFERRED — built as one unit with the sync2 sibling-write.
-  | { kind: "restore"; meta: AutosaveMeta };
+  // EXACTLY ONE vault side changed under the session → §3.2.a. Shows the SAME
+  // §3.2 ResumeRecoveryModal (a "*" marks the changed file — it is just crash
+  // recovery, no scary "files changed" dialog). On Continue, the user's restored
+  // edit for the UNCHANGED side is written onto the new version, then the session
+  // is recreated. `changedSide` is the side that changed in the vault (so the
+  // OTHER side is written). Symmetric — no privilege of base over sibling.
+  | { kind: "restore"; meta: AutosaveMeta; changedSide: "base" | "sibling" };
 
 export function reopenAction(status: ReopenStatus): ReopenAction {
   switch (status.kind) {
@@ -52,13 +53,21 @@ export function reopenAction(status: ReopenStatus): ReopenAction {
       return { kind: "discard-fresh", reason: "library-drift" };
     case "resume":
       return { kind: "resume", meta: status.meta };
-    case "vault-changed":
-      // §3.2.a (restore + recreate via dialog) fires only on a BASE change. If
-      // only the sibling changed (base intact), the old simple rule applies:
-      // silently restart — kill + fresh from the current base+sibling.
-      return status.currentBaseSha !== status.meta.baseShaAtStart
-        ? { kind: "restore", meta: status.meta }
-        : { kind: "discard-fresh", reason: "sibling-drift" };
+    case "vault-changed": {
+      const baseChanged = status.currentBaseSha !== status.meta.baseShaAtStart;
+      const siblingChanged =
+        status.currentSiblingSha !== status.meta.siblingShaAtStart;
+      // BOTH changed → the user's work is fully stale → silent fresh restart.
+      if (baseChanged && siblingChanged) {
+        return { kind: "discard-fresh", reason: "both-changed" };
+      }
+      // Exactly one changed → restore (the §3.2 modal), recording which side.
+      return {
+        kind: "restore",
+        meta: status.meta,
+        changedSide: baseChanged ? "base" : "sibling",
+      };
+    }
     default: {
       // Exhaustiveness guard: a new ReopenStatus kind must add a branch here.
       const _never: never = status;

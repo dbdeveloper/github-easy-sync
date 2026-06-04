@@ -49,10 +49,7 @@ import {
   type ResumeSession,
 } from "./autosave-store";
 import { reopenAction } from "./reopen-action";
-import {
-  ResumeRecoveryModal,
-  SnapshotMismatchModal,
-} from "./recovery-dialog";
+import { ResumeRecoveryModal } from "./recovery-dialog";
 import { scanHistory } from "./history-replay";
 import { readCursor } from "./cursor-store";
 import { HistoryWriter } from "./history-log";
@@ -444,66 +441,74 @@ export class DiffEditView extends ItemView {
             await startFreshAndMount();
             break;
           case "restore": {
-            // §3.2.a — base changed under the session. ALWAYS restore first
-            // (mount the replayed pane so the user sees their work), then the
-            // dialog OVER it. (`restore` is returned only when the BASE changed;
-            // a sibling-only change is `discard-fresh "sibling-drift"`.)
+            // §3.2.a — EXACTLY ONE vault side changed under the session. Reuse
+            // the §3.2 ResumeRecoveryModal (a "*" marks the changed file — no
+            // scary "files changed" dialog; it is just crash recovery).
             const sess = await readResumeSession(this.deps.vault, conflictId);
-            const restoredPane = await mountReplayed(sess, action.meta);
-            const choice = await new SnapshotMismatchModal(this.app, {
+            const choice = await new ResumeRecoveryModal(this.app, {
               basePath: entry.basePath,
               siblingPath: entry.siblingPath,
               startedAtIso: action.meta.createdAt,
               editCount: scanHistory(sess.jsonl).blocks.length,
+              baseChanged: action.changedSide === "base",
+              siblingChanged: action.changedSide === "sibling",
               nowMs: Date.now(),
             }).prompt();
 
-            // ❗The modal can sit open for minutes — re-assert the stale-state
-            // guard before touching disk / re-mounting.
+            // ❗Re-assert the stale-state guard after the (minutes-long) modal.
             if (
               this.viewState.mode !== "detail" ||
               this.viewState.entry.siblingPath !== entry.siblingPath ||
               !body.isConnected
             ) {
-              restoredPane.destroy();
               return;
             }
 
             if (choice === "cancel") {
-              // Keep the restored pane as-is; the [← back] exit-TOCTOU (§5.0
-              // Step-1.5) is the backstop on save.
+              this.viewState = { mode: "list", tab: "conflicts" };
+              this.render();
+              return;
+            }
+            if (choice === "start-over") {
+              await startFreshAndMount();
               break;
             }
-            // Continue + Start over both recreate the session — tear down the
-            // restored pane first. Restore ONLY the sibling; the base is left as
-            // the user's new version (getResolved().base is discarded).
-            const restoredSibling = restoredPane.getResolved().sibling;
-            restoredPane.destroy();
-            body.empty();
-            if (choice === "continue") {
-              // Write the restored sibling onto the vault, then recreate: the new
-              // session compares the NEW base vs the just-saved restored sibling.
-              await atomicWriteFile(
-                this.deps.vault,
-                entry.siblingPath,
-                new TextEncoder().encode(restoredSibling).buffer as ArrayBuffer,
-              );
-              if (await adapter.exists(dir)) await adapter.rmdir(dir, true);
-              const meta = await startSession(
-                this.deps.vault,
-                conflictId,
-                entry.basePath,
-                entry.siblingPath,
-              );
-              this.activeSession = { conflictId, meta };
-              const recreated = new DiffPane(body, ours, restoredSibling, opts);
-              this.activeDiffPane = recreated;
-              attachWriter(recreated, 0); // recreated fresh session
-              break;
-            }
-            // "start-over": discard the interrupted work — recreate with the
-            // ORIGINAL (untouched) vault sibling.
-            await startFreshAndMount();
+            // "Continue": replay (in a DETACHED pane) to extract the user's
+            // resolved content, write the restored content of the UNCHANGED side
+            // onto the vault (the changed side keeps its new content), then
+            // recreate the session. Symmetric — file1/file2, no privilege.
+            const tmp = new DiffPane(
+              document.createElement("div"),
+              sess.base,
+              sess.sibling,
+              opts,
+            );
+            tmp.replayFrom(sess.jsonl);
+            const resolved = tmp.getResolved();
+            tmp.destroy();
+            const writePath =
+              action.changedSide === "base"
+                ? entry.siblingPath
+                : entry.basePath;
+            const writeStr =
+              action.changedSide === "base" ? resolved.sibling : resolved.base;
+            await atomicWriteFile(
+              this.deps.vault,
+              writePath,
+              new TextEncoder().encode(writeStr).buffer as ArrayBuffer,
+            );
+            if (await adapter.exists(dir)) await adapter.rmdir(dir, true);
+            const meta = await startSession(
+              this.deps.vault,
+              conflictId,
+              entry.basePath,
+              entry.siblingPath,
+            );
+            this.activeSession = { conflictId, meta };
+            const fresh = await readResumeSession(this.deps.vault, conflictId);
+            const recreated = new DiffPane(body, fresh.base, fresh.sibling, opts);
+            this.activeDiffPane = recreated;
+            attachWriter(recreated, 0);
             break;
           }
           case "resume": {
