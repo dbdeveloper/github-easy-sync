@@ -216,34 +216,12 @@ Stage 2.1 та Stage 3 спираються на 2.0; порядок між ни
   non-converged→both written; base-rewritten→TOCTOU mismatch+dir survives).
 - **Наївний `exit-protocol.ts` ВИДАЛЕНО** (W1 swap замінив єдиного викликача).
 
-**Лишилось у Phase 6 (revised order W1→W4→W2→W3→W5):** W4 recovery-dialog **перед** W2
-(інакше W1-shortcut «discard+fresh» нищив би записану history); W2 HistoryWriter-feed
-per-transaction (потребує `EditorView.updateListener` у DiffPane — ще нема); W3 cursor-timer
-(2.5/6s, §2.9 ping-pong); W5 §5.0.e TOCTOU-modal; + Step-0 committing-guard / Step-8 detach.
-
-**W4: W4a ✅ (`replayFrom`/`setCursor`), W4b ✅ (модалки §3.2/§3.2.a) — пушено. W4c (wiring) —
-свіжа сесія.**
-
-> **W4c — HANDOFF CHECKLIST (cut 2026-06-04, advisor — це checklist, НЕ re-spec; деталі канонічні
-> в §3.2/§3.2.a/§2.9/W4a/W4b).** Замінити W1 discard+fresh shortcut у `mountDiffPane` на
-> `classifyReopen`-гілку. Тест на КОЖНОМУ кроці.
-> - **A.** Витягти ЧИСТУ `reopenAction(status) → action` (exhaustive 6 статусів:
->   fresh/resume/library-drift/vault-changed/corrupt/sentinel), без wiring, нуль зміни поведінки.
->   Test: повна unit-таблиця. ← testable spine, найвищий важіль.
-> - **B.** Wire для rmdir+fresh-гілок (fresh/library-drift/corrupt/sentinel) — поведінка
->   **ІДЕНТИЧНА W1** (структурний swap). Test: поведінка збережена (regression-guard рефактору).
-> - **C.** `resume` → DiffPane з **snapshots** + `replayFrom`(W4a) + `setCursor` + `ResumeRecoveryModal`(W4b).
->   **Єдина реальна regression-поверхня — ізолювати.** Test: W4a twin-патерн на snapshot-build entry;
->   модалка — manual. **Покликати advisor ОДИН раз ПЕРЕД цим кроком.**
-> - **D.** `vault-changed` ІНТЕРИМ = restore-from-snapshots + replay (non-lossy) + наявний `[←]`
->   exit-TOCTOU як backstop. §3.2.a converged/partial reopen-fork (вкл. `[Продовжити]` sibling-write)
->   **ВІДКЛАДЕНО** — будується як ОДНЕ ціле з sync2 sibling-write. W4b `SnapshotMismatchModal` лишити
->   (auto-fold переюзає scaffolding; «не wired W4c-інтеримом»). НЕ shippити half-dialog (тільки
->   discard-опції для converged-роботи = гірше за ніщо).
-> - **❗Ключовий факт:** W2 не wired → `history.jsonl` порожній → resume-replay сьогодні **реплеїть НІЩО**
->   (correct але inert до W2 — саме тому W4 перед W2). Manual «resume нічого не робить» = ОЧІКУВАНО;
->   верифікація — synthetic-history тести, не live-capture.
-> - Pure-логіка (reopenAction, replay) = unit; модалки + ItemView glue = manual (mock Modal — stub).
+**Phase 6 — стан (2026-06-04):** W1 ✅ (onload recovery + 7-step commit), W4 ✅
+(W4a replay-core; W4b модаль; W4c `classifyReopen`-wiring A–D + **симетричний §3.2.a**),
+W2 ✅ (per-transaction history-feed → recovery-replay тепер **ЖИВИЙ**). **Лишилось:**
+W3 cursor-timer (2.5/6s ping-pong §2.9 — код `cursor-store` ще atomic single-file);
+W5 §5.0.e TOCTOU-modal; + Step-0 committing-guard / Step-8 detach polish; далі
+entry-points (file-menu, diff-ribbon, post-sync modal) + Phase 7/8/9b/10/11.
 
 **Manual/Playwright покриття** (layout-залежне + mobile + наскрізний UI, чого не ловлять
 автотести) — у [`docs/MANUAL-TEST-CHECKLIST.md`](../MANUAL-TEST-CHECKLIST.md) (English, для всього плагіна).
@@ -1502,10 +1480,10 @@ constant ім'я (§2.4).
     > Вони можуть РОЗХОДИТИСЬ: whitespace-only зміна входу, яку `diffLines` згортає,
     > лишає `joinedDocSha` рівним, хоча input-SHA інші → replay реально валідний, і
     > керує саме `joinedDocSha`. Зберігаємо ОБИДВА; `joinedDocSha` замінює лише версію.
-> - **§3.2.a "restore previous version" теж під gate'ом:** при library-drift
-    > `build(base.snapshot, sibling.snapshot)` ТЕЖ ≠ `joinedDocSha` → restore зі
-    > snapshot'ів так само зіпсує replay. Перевіряти `SHA(build(snapshot)) ===
->   joinedDocSha` і в restore-шляху; якщо ні → snapshot не врятує → start fresh.
+> - **§3.2.a restore (Continue) теж під gate'ом:** при library-drift
+    > `build(snapshot, snapshot)` ТЕЖ ≠ `joinedDocSha` → replay зі snapshot'ів так
+    > само несоундний. Gate `SHA(build(snapshot)) === joinedDocSha` і в restore-шляху;
+>   якщо ні → snapshot не врятує → start fresh.
 > - **Детермінізм + trade:** працює, бо `build` — чиста детермінована функція
     > `(base, sibling)` + бібліотеки. Gate міняє рідкісний *спекулятивний* start-over
     > (якби build колись став недетермінованим) на *ніколи не псувати replay тихо* —
@@ -1902,87 +1880,72 @@ battery-drain; окремої "pause when backgrounded" логіки не тре
          → §3.2.a snapshot-mismatch recovery dialog
 ```
 
-### §3.2 Modal — контракт UX
+### §3.2 Modal — контракт UX (ЄДИНИЙ recovery-modal)
+
+`ResumeRecoveryModal` — один модаль для будь-якої перерваної сесії (resume І §3.2.a
+one-side-changed). `*` маркує файл, що змінився у Vault під сесією (на чистому resume `*` нема).
 
 ```
 ┌───────────────────────────────────────────────────────────────────┐
 │  Resume previous edit session?                              [×]   │
 │                                                                   │
 │  We found an unfinished edit session for:                         │
-│  base:    Notes/work/meeting.md                                   │
+│  * base:  Notes/work/meeting.md                                   │
 │  sibling: Notes/work/meeting.conflict-from-iphone-….md            │
 │                                                                   │
 │  Started:   12 minutes ago                                        │
 │  Edits:     17 saved                                              │
 │  Last:      14:32:15                                              │
 │                                                                   │
-│              [ Continue editing ]      [ Start over ]             │
+│  * this file changed in the vault since the last editing session. │
+│                                                                   │
+│       [ Continue editing ]   [ Start over ]   [ Cancel ]          │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
 **Кнопки:**
 
-- **[Continue editing]** — primary, recommended. Replay REDO-log + apply cursor.
-- **[Start over]** — secondary. Wipe `.diff2-autosave/<conflictId>/`, fresh
-  session з vault-state.
-- **[×]** (close без вибору) — трактується як "скасування відкриття": повертаємось
-  у list view; autosave **лишається** на диску.
+- **[Continue editing]** — primary. Дія залежить від reopen-стану: resume → replay
+  REDO-log + cursor (§3.3, KEEP dir); §3.2.a one-side → перенести правку (механіка §3.2.a).
+- **[Start over]** — wipe `.diff2-autosave/<conflictId>/`, fresh session з vault-state.
+- **[Cancel]** / **[×]** — назад у list view; autosave **лишається** на диску.
 
-### §3.2.a Snapshot-mismatch recovery dialog
+`*`-маркер + зноска з'являються лише коли сторона змінилась (§3.2.a one-side); на чистому
+resume їх нема.
 
-**Trigger**: на reopen перерваної сесії спершу **ЗАВЖДИ відновлюємо її** (§3.3 replay:
-`build(base.snapshot, sibling.snapshot)` + накат REDO з `history.jsonl`) і монтуємо
-відновлений DiffPane. Якщо при цьому `currentBaseSha ≠ meta.baseShaAtStart` (base-файл
-у Vault змінився під сесією — типово: після збою користувач забув відновитись у
-diff-editor і відредагував САМ base напряму, §7 «editing while in conflict» → `newBase`)
-— показуємо цей діалог **ПОВЕРХ** відновленого pane. Спрацьовує для **БУДЬ-ЯКОГО**
-перерваного редагування — стан резолюції (повне/часткове) **не має значення**.
+### §3.2.a Vault-changed recovery — СИМЕТРИЧНО, реюзає §3.2 modal
 
-**Зміна ЛИШЕ sibling (base незмінний)** — це **НЕ** цей діалог, а старе просте правило:
-`SHA(sibling) ≠ meta.siblingShaAtStart` при незмінному base → **тихо перестартувати**
-сесію (kill + fresh `startSession` з поточних base+sibling). Без діалогу. (`reopenAction`:
-vault-changed з незмінним base → `discard-fresh "sibling-drift"`.)
+Редактор працює і з парою base+sibling, і з **довільними file1/file2** (напр. Compare) —
+**жодна сторона не привілейована**, тож відновлення симетричне. На reopen дивимось, ЯКІ
+vault-файли змінились під сесією (`SHA(side) ≠ meta`):
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  You have already started conflict resolving for the    │
-│          previous version of "file.ext"!                │
-│                                                         │
-│  Do you want to CONTINUE resolving the conflict with    │ 
-│         the actual version of the file, or              │ 
-│       discard the previous resolution AT ALL            │ 
-│        and start over from the beginning?               │
-│                                                         │
-│       [ Continue ]   [ Start over ]   [ Cancel ]        │
-└─────────────────────────────────────────────────────────┘
-```
+- **Жодна не змінилась** (resume) → §3.2 `ResumeRecoveryModal`; Continue = replay-resume.
+- **Рівно ОДНА сторона змінилась** → **той самий §3.2 modal** (`*` маркує змінений файл —
+  без окремого лякливого «files changed»-діалогу: це просто відновлення від збою). Типово:
+  після збою користувач відредагував САМ один файл напряму (§7). Стан резолюції
+  (повне/часткове) **не має значення**. Дія Continue — нижче.
+- **ОБИДВІ змінились** → **тихо нова сесія, без діалогу** (`reopenAction`:
+  `discard-fresh "both-changed"`): правки повністю застаріли, зберігати нема що.
 
-**Механіка — сесія ПЕРЕСТВОРЮЄТЬСЯ (НЕ auto-merge, НЕ запис у base).** Ключове: при
-зміні base ВІДНОВЛЮЄМО **ТІЛЬКИ sibling**. `getResolved().base` **відкидається** (у
-Vault уже новий base з правками користувача); несемо далі лише `getResolved().sibling`.
+**Continue-механіка (one-side) — СЕСІЯ ПЕРЕСТВОРЮЄТЬСЯ (НЕ auto-merge), СИМЕТРИЧНО:**
+записуємо відновлений вміст у сторону, чий **vault-файл НЕ змінився** (зберігаємо там
+правку); за зміненою стороною лишаємо новий vault-вміст (її restored-вміст відкидається).
 
-- **[Continue]** — нести перерване редагування на новий base:
-  1. `restoredSibling = getResolved().sibling` з відновленого pane;
-  2. записати `restoredSibling` у Vault на старе місце `siblingPath` (`atomicWriteFile`;
-     sibling вільно мутабельний — §4.2/§5.2). **base НЕ чіпаємо** (там нові зміни);
-  3. вбити стару autosave-сесію (`rmdir`);
-  4. `startSession(basePath, siblingPath)` → snapshots = новий base + щойно-збережений
-     sibling → нова diff-сесія порівнює **новий base vs restoredSibling**.
-- **[Start over]** — відкинути перерване редагування:
-  1. вбити стару autosave-сесію (`rmdir`); sibling у Vault **НЕ переписаний**;
-  2. `startSession(basePath, siblingPath)` → нова сесія **новий base vs оригінальний
-     (vault) sibling** «з самого початку».
-- **[Cancel]** — лишити відновлений pane as-is; на `[← back]` спрацює exit-TOCTOU
-  (§5.0 Step-1.5).
+1. `resolved = getResolved()` — реплей у **DETACHED** pane (`{base, sibling}` / `{file1, file2}`);
+2. перезаписати **незмінну** сторону її restored-вмістом (`atomicWriteFile`; вільно
+   мутабельна §4.2/§5.2); змінену **НЕ чіпаємо**:
+   - змінився base → пишемо `resolved.sibling` у `siblingPath`;
+   - змінився sibling → **дзеркально** `resolved.base` у `basePath`;
+3. `rmdir` стару сесію → `startSession` → нова diff-сесія: нова версія зміненої сторони vs
+   restored-вміст незмінної.
 
-**Чому це безпечно й просто:** обидва вибори = (опційно записати `restoredSibling`) →
-`rmdir` → `startSession` → fresh mount — **усе diff2-layer**. Нема merge-base, нема
-auto-merge: нова сесія порівнює локально, а запис sibling — легітимна §4.2-мутація, що
-auto-merge НЕ тригерить (одноразовий detection-gate, §4.1/§6). vault-UNCHANGED натомість
-→ §3.2 `ResumeRecoveryModal` (Continue/Start over), без цього діалогу.
+- **[Start over]** → `rmdir` (нічого не пишемо) → `startSession` з поточного vault.
+- **[Cancel]** → назад у list (dialog-first: нічого не змонтовано); autosave лишається.
 
-> **Implementation note:** W4b `SnapshotMismatchModal` (restore/discard/cancel) —
-> попередня форма; оновити під цей `[Continue]/[Start over]/[Cancel]` діалог + механіку.
+**Чому безпечно й просто:** усе **diff2-layer** — нема merge-base, нема auto-merge (нова
+сесія порівнює локально; запис у незмінну сторону — легітимна §4.2-мутація, що auto-merge
+НЕ тригерить, §4.1/§6). Recreate'нута сесія має snapshots == поточний vault, тож на
+`[← back]` exit-TOCTOU (§5.0) у §3.2.a-шляху **не спрацьовує**.
 
 ### §3.3 Continue editing — replay algorithm
 
@@ -2101,7 +2064,7 @@ for each <conflictId>/ in .diff2-autosave/:
 meta.baseShaAtStart" **більше НЕ cleanup-тригер**. Раніше — wipe autosave якщо
 vault змінився. Тепер: vault-mismatch — це **trigger для recovery dialog** (§3.2.a),
 де користувач сам вибирає (Continue / Start over / Cancel), а не silent wipe.
-Завдяки snapshots ми відновлюємо роботу й несемо restored sibling далі.
+Завдяки snapshots ми відновлюємо роботу й несемо restored-вміст незмінної сторони далі (§3.2.a).
 
 **Чому умова (6) — `SHA(base) === SHA(sibling)`** включена окремо: якщо файли
 зрівнялись (через sync2 auto-merge на drain, ручне зведення, чи зовнішнє
@@ -2212,12 +2175,11 @@ Step 1.5. **TOCTOU check** — verify input files не змінились ззо
     
     else: SHAs match → vault state такий самий як при openDiffPane → continue Step 2.
     
-    // Special case: на §3.2.a [Cancel] DiffPane лишається на ВІДНОВЛЕНОМУ
-    // (snapshot+replay) стані, хоча vault-base змінився. TOCTOU тут гарантовано
-    // спрацьовує (snapshot SHA ≠ current vault SHA — інакше §3.2.a не тригерився
-    // б), і user одразу бачить §5.0.e modal з save-to-alt. (§3.2.a [Continue] /
-    // [Start over] натомість ПЕРЕСТВОРЮЮТЬ сесію з новим base-snapshot, тож для
-    // них TOCTOU вже не спрацьовує — вони стартують чисту сесію на новому base.)
+    // Note: §3.2.a (vault-changed reopen) НЕ лишає stale-сесію відкритою — усі три
+    // вибори dialog-first (Cancel → list; Continue/Start over → `startSession` →
+    // нова сесія, snapshots == поточний vault). Тож у §3.2.a-шляху Step-1.5 TOCTOU
+    // вже не спрацьовує. Цей check ловить ЛИШЕ зовнішню зміну base/sibling під ЖИВОЮ
+    // сесією (sync2 pull / інший device) між openDiffPane і `[← back]`.
 
 Step 2. (baseBytes, siblingBytes) = split(currentEditorDoc)
         expectedBaseSha = sha(baseBytes)
@@ -2634,6 +2596,9 @@ background, CM6 буфер у пам'яті переживає, coalesce-flush +
 | `recovery-dialog-trigger.test.ts`              | §3.1 decision tree — усі edge cases §3.5.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `autosave-id-stable-and-symmetric.test.ts`     | §2.4.1 invariant: `deriveAutosaveId(k, a, b)` deterministic (same args twice → same id; немає timestamps) ТА order-independent (`deriveAutosaveId(k, a, b) === deriveAutosaveId(k, b, a)`). Покриває `kind="synthetic"` і `kind="compare"`.                                                                                                                                                                                                                                                                                                                                     |
 | `single-tab-enforcement.test.ts`               | §2.4 invariant: openDiffPane(id) поверх existing tab → focus existing, no second tab.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `reopen-action.test.ts`                       | W4c §3.1: pure `reopenAction` matrix over all 6 classifyReopen statuses (fresh / corrupt / sentinel / resume / library-drift / vault-changed → base-only / sibling-only / both-changed). |
+| `w4c-resume.test.ts`                           | W4c §3.2/§3.2.a: `readResumeSession` + replay round-trip; session-recreation outcomes (Continue writes the UNCHANGED side, mirror; Start over). happy-dom + fs-vault. |
+| `w2-history-feed.test.ts`                      | W2 §2.6–§2.8: DiffPane `onRecord` → `HistoryWriter` → `history.jsonl` production round-trip; replay-not-recorded guards; resolution-records / selection-doesnt. |
 
 ### §7.2 Crash injection (`tests/diff2/crash-resilience/`)
 
@@ -2654,7 +2619,7 @@ background, CM6 буфер у пам'яті переживає, coalesce-flush +
 | `toctou-cancel.test.ts`                           | TOCTOU modal → user обирає "Cancel".                                                                                                                                                                                                                    | Modal закривається; DiffPane stays open; vault unchanged; autosave-dir unchanged; user може Ctrl+A→Ctrl+C з документа і робити reconcile вручну.                                       |
 | `session-start-protocol-ordering.test.ts`         | §2.5.a session-start: snapshots + cursor + history written BEFORE meta.json. Crash injection між кожним кроком 6-10 → next openDiffPane: якщо meta.json missing → cleanup (умова 1 §4.2); якщо meta.json exists → all other files present + SHAs match. | Strong invariant "meta exists ⇒ everything valid" дотримується.                                                                                                                        |
 | `reuse-snapshot-optimization.test.ts`             | §2.5.b: reopen після crash + vault SHA matches meta → skip re-copy snapshots; existing autosave-dir reused; recovery dialog показано (§3.2 normal).                                                                                                     | I/O on session-start значно нижче за full init.                                                                                                                                        |
-| `snapshot-mismatch-recovery-dialog.test.ts`       | §3.2.a: base changed under the session. Always-restore (snapshot+replay), then dialog [Continue]/[Start over]/[Cancel]. Continue → write restoredSibling to vault + recreate session (new base vs restoredSibling); Start over → recreate (new base vs original sibling); Cancel → keep restored pane (exit-TOCTOU backstop).                             | Кожна опція веде до правильного state переходу.                                                                                                                                        |
+| `snapshot-mismatch-recovery-dialog.test.ts`       | §3.2.a: ONE vault side changed → §3.2 `ResumeRecoveryModal` (`*` on the changed file). Continue → write restored content to the UNCHANGED side + recreate (mirror: base changed → write sibling; sibling changed → write base); Start over → fresh; Cancel → list. BOTH changed → silent fresh, no modal.                             | Кожен веде до правильного state переходу.                                                                                                                                        |
 | `snapshot-sha-corruption-cleanup.test.ts`         | §4.2 умова 5: simulate disk bit-flip у base.snapshot — `sha(read("base.snapshot")) ≠ meta.baseShaAtStart` на cleanup sweep → autosave-dir cleaned + Notice logged.                                                                                      | Defense in depth catches storage-level corruption.                                                                                                                                     |
 
 ### §7.3 Integration (`tests/integration/scenarios/diff2/`)
