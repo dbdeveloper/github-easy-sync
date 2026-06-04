@@ -46,6 +46,7 @@ import {
   readResumeSession,
   startSession,
   type AutosaveMeta,
+  type ResumeSession,
 } from "./autosave-store";
 import { reopenAction } from "./reopen-action";
 import { ResumeRecoveryModal } from "./recovery-dialog";
@@ -384,16 +385,48 @@ export class DiffEditView extends ItemView {
         this.activeDiffPane = new DiffPane(body, ours, theirs, opts);
       };
 
+      // Non-lossy mount: rebuild from the session-start SNAPSHOTS, replay the
+      // recorded history, restore the cursor. KEEPS the dir and REUSES the
+      // session — never calls startSession (which would overwrite the snapshots
+      // / history being replayed). Shared by resume "Continue" (§3.2) and the
+      // restore interim (§3.2.a).
+      const mountReplayed = async (
+        sess: ResumeSession,
+        meta: AutosaveMeta,
+      ): Promise<void> => {
+        const pane = new DiffPane(body, sess.base, sess.sibling, opts);
+        pane.replayFrom(sess.jsonl);
+        const cursor = await readCursor(this.deps.vault, conflictId);
+        if (cursor) {
+          pane.setCursor(cursor.anchor, cursor.head, cursor.scrollTop);
+        }
+        this.activeSession = { conflictId, meta };
+        this.activeDiffPane = pane;
+      };
+
       try {
         switch (action.kind) {
           case "fresh":
           case "discard-fresh":
-          // Step D will give `restore` its own restore-from-snapshots + replay;
-          // until then it falls back to clear+fresh (still non-lossy — the
-          // snapshots remain on disk for a later restore).
-          case "restore":
             await startFreshAndMount();
             break;
+          case "restore": {
+            // §3.2.a W4c INTERIM — vault changed under the session. Non-lossy:
+            // restore the old work from snapshots + replay so the user sees and
+            // keeps it; the [← back] exit-TOCTOU (classifyToctou, §5.0 Step-1.5)
+            // catches the vault mismatch on save. The full §3.2.a converged /
+            // partial reopen-fork (incl. [Продовжити] sibling-write) is DEFERRED
+            // — built as one unit with the sync2 sibling-write.
+            new Notice(
+              "The conflict files changed in the vault since you started — your " +
+                "previous edits are restored below; [← back] will reconcile them.",
+            );
+            await mountReplayed(
+              await readResumeSession(this.deps.vault, conflictId),
+              action.meta,
+            );
+            break;
+          }
           case "resume": {
             // §3.2 — vault unchanged since session start. Offer replay-resume
             // vs fresh. editCount = the trustworthy-prefix block count, i.e.
@@ -429,18 +462,9 @@ export class DiffEditView extends ItemView {
               await startFreshAndMount();
               break;
             }
-            // "continue": rebuild from the session-start SNAPSHOTS, replay the
-            // recorded history, restore the cursor. KEEP the dir and REUSE the
-            // existing session — calling startSession here would overwrite the
-            // snapshots/history we are replaying.
-            const pane = new DiffPane(body, sess.base, sess.sibling, opts);
-            pane.replayFrom(sess.jsonl);
-            const cursor = await readCursor(this.deps.vault, conflictId);
-            if (cursor) {
-              pane.setCursor(cursor.anchor, cursor.head, cursor.scrollTop);
-            }
-            this.activeSession = { conflictId, meta: action.meta };
-            this.activeDiffPane = pane;
+            // "continue": rebuild from the session-start SNAPSHOTS + replay
+            // (KEEP the dir, REUSE the session — see mountReplayed).
+            await mountReplayed(sess, action.meta);
             break;
           }
         }
