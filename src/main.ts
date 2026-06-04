@@ -40,6 +40,7 @@ import { DiffEditView, DIFF2_EDIT_VIEW_TYPE } from "./diff2/diff-edit-view";
 import { TokenExpiredModal } from "./sync2/views/token-expired-modal";
 import { CancelSyncModal } from "./sync2/views/cancel-sync-modal";
 import { AuthError } from "./errors";
+import { TokenExpiredFlag } from "./token-expired-flag";
 import {
   runSelfUpdateBootloader,
   extractAffectedPluginId,
@@ -136,6 +137,10 @@ export default class GitHubSyncPlugin extends Plugin {
   trashStore!: TrashStore;
   private trashWatcher: TrashWatcher | null = null;
   logger!: Logger;
+  // E1 (TODO §5) — persistent ".token_expired" marker; in-memory authoritative,
+  // file best-effort. Set/cleared per-drain (note()) + on the settings probe;
+  // read by the §7 status-bar menu (isExpiredCached) + Settings.
+  tokenExpiredFlag: TokenExpiredFlag | null = null;
   // Shared Worker orchestra controller — lazy-init at onload, kept
   // alive for the plugin lifetime, terminated on onunload. Stage 4
   // routes hot-path CPU operations (SHA computation, base64 decode,
@@ -267,6 +272,12 @@ export default class GitHubSyncPlugin extends Plugin {
         this.settings.enableLogging,
       );
       await this.logger.init();
+      // E1 — seed the persistent token-expired marker from disk (one exists()).
+      this.tokenExpiredFlag = new TokenExpiredFlag(
+        this.app.vault,
+        `${this.app.vault.configDir}/plugins/${manifest.id}`,
+      );
+      await this.tokenExpiredFlag.init();
       this.logger.info("Plugin onload start", {
         version: manifest.version,
         deviceLabel: this.settings.deviceLabel,
@@ -1081,8 +1092,13 @@ export default class GitHubSyncPlugin extends Plugin {
       // for enqueueing when the master toggle is false.
       if (this.settings.syncStartsWithCommit ?? true) {
         await this.sync2Manager.syncAll();
+        this.tokenExpiredFlag?.note(null); // E1: syncAll always pulls → auth OK
       } else {
         await this.sync2Manager.resumeQueue();
+        // E1: resumeQueue is drain-only — an empty queue makes NO authed call
+        // (drain only does bootstrapIfNeeded, O(1) no-op once adopted), so a
+        // success here does NOT prove auth. Never clear on a drain-only path,
+        // or an empty interval tick would wipe a real expired marker.
       }
     } catch (err) {
       // Log BEFORE the Notice so the user-visible toast and the
@@ -1094,6 +1110,7 @@ export default class GitHubSyncPlugin extends Plugin {
       // Stage 7: surface in the Settings drain-status section so
       // the user sees "Last error: …" without opening the log.
       this.sync2Manager.recordDrainError(err);
+      this.tokenExpiredFlag?.note(err); // E1: auth outcome → marker (AuthError → set)
       this.maybeShowTokenExpiredModal(err);
       new Notice(`Error syncing. ${err}`);
     }
@@ -1113,9 +1130,12 @@ export default class GitHubSyncPlugin extends Plugin {
     if (!this.isConfigured()) return;
     try {
       await this.sync2Manager.resumeQueue();
+      // E1: drain-only path — never CLEAR here (an empty queue makes no authed
+      // call; see sync()'s resumeQueue branch). SET on an auth error below.
     } catch (err) {
       void this.logger.error("Interval drain failed", `${err}`);
       this.sync2Manager.recordDrainError(err);
+      this.tokenExpiredFlag?.note(err); // E1: auth outcome → marker (set on AuthError)
       this.maybeShowTokenExpiredModal(err);
     }
   }
@@ -1133,9 +1153,11 @@ export default class GitHubSyncPlugin extends Plugin {
     if (!(await this.confirmPendingConflictsBeforeSync())) return;
     try {
       await this.sync2Manager.syncFile(path);
+      this.tokenExpiredFlag?.note(null); // E1: authed sync succeeded → clear
     } catch (err) {
       // Log BEFORE the Notice — see sync() rationale above.
       this.logger.error("syncFile click failed", { path, err: describeError(err) });
+      this.tokenExpiredFlag?.note(err); // E1: auth outcome → marker
       new Notice(`Error syncing. ${err}`);
     }
     // See markDirty rationale in sync() above.
@@ -1486,11 +1508,14 @@ export default class GitHubSyncPlugin extends Plugin {
     if (!(await this.confirmPendingConflictsBeforeSync())) return;
     try {
       await this.sync2Manager.resumeQueue();
+      // E1: drain-only path — never CLEAR here (an empty queue makes no authed
+      // call; see sync()'s resumeQueue branch). SET on an auth error below.
     } catch (err) {
       this.logger?.error("Upload-only command failed", {
         err: describeError(err),
       });
       this.sync2Manager.recordDrainError(err);
+      this.tokenExpiredFlag?.note(err); // E1: auth outcome → marker (set on AuthError)
       this.maybeShowTokenExpiredModal(err);
       new Notice(`Upload failed: ${err}`, 10000);
     }

@@ -83,3 +83,14 @@
    Він побачить однакове число і на іконці і в alt-підказці і зрозуміє що "3" - це не число файлів, а число комітів.
 9. Схожа на (п.8) ситуація з іконкою "diff-panel", на якій також може показуватись число, і це число незакритих 
    конфліктів. alt-текст-підказки має для неї зображати "Diff-Panel" чи "Diff-Panel ({N} open conflicts)".
+10. Для мене важливо: в Settings з самого зверху писати назву нашого плагіну і версію, щоб відкривши Settings було 
+    видно чиї це Settings, і версію. Може ще бути посилання на гithub repo десь маленьким лінком типу "(repo)"
+    Брати такі значення з manifest.json:
+    ```
+      "name": "GitHub Easy Sync",
+      "version": "2.0.2-beta",
+      "authorUrl": "https://github.com/dbdeveloper/github-easy-sync",
+    ```
+    "{name} {version} ([repo]({authorUrl}))"
+    буде щось таке:
+    "GitHub Easy Sync 2.0.2-beta (repo)"

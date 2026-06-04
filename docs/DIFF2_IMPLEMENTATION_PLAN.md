@@ -759,13 +759,25 @@ Phase-6 entry-points, decomposed у E-серію (кожен ≈ один commit
 high-value surfaces) → **E5 → E4 → E6** (deep-link + triggers). E2 НЕ залежить від E5 (menu
 «Open diff-panel» = no-arg `activateDiffEditView()` → list; лише E4/E6 deep-link потребують E5).
 
-- **E1 — `.token_expired` marker (TODO §5).** `token-expired-flag.ts` (set/clear/read файл
-  `<manifest.dir>/.token_expired`; шлях інжектиться → fs-vault-тестовно). Деривація **у main.ts
-  per-drain** (НЕ з `DrainStatus.lastError` — той **sticky**: `emitDrainStatus` на старті drain не
-  скидає `lastError`, тож успіх після auth-error лишив би старе): **SET** на `err instanceof
-  AuthError` у catch, **CLEAR** на drain-success; non-auth error — **лишаємо** (offline ≠ expired;
-  стале expired чиститься наступним успішним drain). + settings-probe set/clear. Onload-read сидить
-  меню §7 без мережі. Owner = main.ts (нуль sync2-edge — там уже `maybeShowTokenExpiredModal`).
+- **E1 — `.token_expired` marker (TODO §5). ✅ DONE (2026-06-05).** `src/token-expired-flag.ts`
+  (top-level, як `logger.ts`): **in-memory authoritative** `expired` + best-effort file-mirror
+  `<configDir>/plugins/<id>/.token_expired` — `init()` seed з диска (onload), `set()/clear()`
+  оновлюють пам'ять **синхронно** + fire-and-forget запис, `isExpiredCached()` (sync, для §7 menu)
+  + async `isExpired()`. Деривація **у main.ts per-drain** через `note(err)` (НЕ з
+  `DrainStatus.lastError` — той **sticky**, успіх після auth-error лишив би старе): pure
+  `classifyAuthOutcome(err)` → null/undefined→**clear**, `AuthError`→**set**, інше→**noop**
+  (offline ≠ expired). **CLEAR (`note(null)`) ЛИШЕ на always-auth шляхах** — `syncAll` (sync()
+  true-гілка) + `syncFile` (syncCurrentFile) + probe — бо `drain()` сам pull НЕ робить (лише
+  `bootstrapIfNeeded`, O(1) no-op після adoption; pull живе в body `syncAll`/`syncFile`). Тож
+  drain-only `resumeQueue` (backgroundDrain / uploadOnly / sync() false-гілка) на порожній черзі =
+  нуль authed-викликів → там **ТІЛЬКИ SET** (`note(err)` у catch), **ніколи CLEAR** (інакше холостий
+  interval-tick стер би коректний expired). early-returns (`!isConfigured`/drain-running) marker не
+  чіпають. **НЕ** у `maybeShowTokenExpiredModal` (throttle once-per-hour → SET губився б). +
+  settings-probe (set на 401/403, clear на 2 success-гілках). Owner = main.ts (нуль sync2-edge).
+  Gitignored: self-plugin `<configDir>/plugins/<self>/.gitignore` = `*` + allow main.js/manifest.json/
+  styles.css/.gitignore → `.token_expired` матчиться `*` (як `.conflicts/`) → НЕ синкається. Тести:
+  `token-expired-flag` 10 (`classifyAuthOutcome` mapping + flag set/clear/init/cache/idempotent/note/
+  out-of-band-delete).
 
 - **E2 — Status-bar текст+меню (TODO §6-7), R2.7.3.** `updateStatusBarItem()` стає
   **parameterless** (читає `currentQueueDepth` + `conflictCounter.getValue()` + `drainRunning`) і

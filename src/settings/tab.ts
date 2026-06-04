@@ -223,6 +223,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
                     "Generate a new token on GitHub → Settings → Developer settings.",
                 );
                 this.tokenHelpAuthError = true;
+                this.plugin.tokenExpiredFlag?.set(); // E1: probe confirmed expired
                 return;
               }
               if (repoRes.status === 403) {
@@ -233,6 +234,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
                     "Classic PAT needs: repo.",
                 );
                 this.tokenHelpAuthError = true;
+                this.plugin.tokenExpiredFlag?.set(); // E1: probe confirmed expired
                 return;
               }
               if (repoRes.status === 404) {
@@ -276,6 +278,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
                     `Default branch: ${defaultBranch}.\n` +
                     "Branch field is empty — no branch check performed.",
                 );
+                this.plugin.tokenExpiredFlag?.clear(); // E1: probe confirmed auth OK
                 return;
               }
               const branchRes = await requestUrl({
@@ -312,6 +315,7 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
                   `branch \`${githubBranch}\` exists, HEAD ${branchSha}.\n` +
                   "Plugin is ready to sync.",
               );
+              this.plugin.tokenExpiredFlag?.clear(); // E1: probe confirmed auth OK
             } catch (err) {
               setProbeResult(
                 "err",
