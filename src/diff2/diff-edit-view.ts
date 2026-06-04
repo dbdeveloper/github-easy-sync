@@ -133,6 +133,11 @@ export class DiffEditView extends ItemView {
   // (best-effort signal — skip, don't queue).
   private cursorScheduler: CursorScheduler | null = null;
   private cursorFlushing = false;
+  // Step-0 (§5.0) — re-entrancy guard for the `[←]` commit. Set true on entry to
+  // exitDetailView, reset in its finally. A second click while a commit (or its
+  // §5.0.e modal) is in flight is rejected — two concurrent commit7Step runs on
+  // the same dir would leave undefined vault state (the race between steps 2–7).
+  private committing = false;
 
   constructor(leaf: WorkspaceLeaf, deps: DiffEditViewDeps) {
     super(leaf);
@@ -607,75 +612,90 @@ export class DiffEditView extends ItemView {
   // promotes both → drops backups → §6.5 proactive sibling cleanup
   // (SHA(base)==SHA(sibling)) → rmdir's the autosave dir. Pair-atomic:
   // crash ⇒ both sides or neither, and recoverCommit at onload finishes
-  // or rolls back any interrupted commit. (Step 0 `committing` UI guard +
-  // Step 8 detach are Phase-6 polish.)
+  // or rolls back any interrupted commit.
+  //
+  // Step-0 (§5.0): the `committing` re-entrancy guard below. Step-8 (history
+  // clear + → list view): the return-to-list IS the success tail, and the CM6
+  // history is cleared by `view.destroy()` when render() disposes the DiffPane
+  // (there is no `historyClear` API, and the view is torn down anyway).
   //
   // §5.0.e TOCTOU (W5): when classifyToctou finds the vault changed under the
   // session, the SAME symmetric rule as §3.2.a-reopen applies — see
   // resolveToctouExit. We NEVER overwrite an externally-changed file.
   private async exitDetailView(entry: ConflictEntry): Promise<void> {
-    // W3 — cancel any pending cursor flush as the FIRST synchronous statement,
-    // before any commit await. The commit awaits disk I/O and rmdir's the dir;
-    // a timer firing mid-commit would persistCursor into a dir being staged /
-    // removed → torn write or a phantom dir after a clean save. We only stop()
-    // (not null) so a failed commit that keeps the user in the editor can keep
-    // autosaving — the next edit reschedules.
+    // Step-0 (§5.0) — reject a re-entrant `[←]` while a commit is in flight
+    // (the common path is ms-scale; the §5.0.e modal can sit open for minutes,
+    // during which `committing` stays true on purpose — the modal blocks the UI,
+    // and a Cancel resets the flag via the finally so the user can click again).
+    if (this.committing) return;
+    this.committing = true;
+    // W3 — cancel any pending cursor flush BEFORE the first commit await (the
+    // commit rmdir's the dir; a timer firing mid-commit would persistCursor into
+    // a dir being staged/removed). This runs only on the non-re-entrant path
+    // (the guard above already returned for a second click); we stop() (not
+    // null) so a failed commit that stays in the editor keeps autosaving.
     this.cursorScheduler?.stop();
 
-    const pane = this.activeDiffPane;
-    const session = this.activeSession;
-    if (!pane || !session) {
+    try {
+      const pane = this.activeDiffPane;
+      const session = this.activeSession;
+      if (!pane || !session) {
+        this.viewState = { mode: "list", tab: "conflicts" };
+        this.render();
+        return;
+      }
+
+      try {
+        // W2 Step 1 (§5.0) — flush queued history before the commit. commit7Step
+        // Step 7 removes the dir on success; drain() awaits the serialized chain.
+        await this.activeWriter?.drain();
+        // getResolved() runs the commit-boundary fail-closed checks (tiling
+        // assertion) and applies the empty→"\n" guard to BOTH sides — its bytes
+        // are exactly what commit7Step hashes into done.json. Keep it INSIDE the
+        // try so a thrown corruption guard means "save failed, stay in editor".
+        const resolved = pane.getResolved();
+        // TOCTOU (§5.0 Step 1.5): a sync may have rewritten base/sibling under
+        // us since startSession.
+        const toctou = await classifyToctou(this.deps.vault, session.meta);
+        if (toctou.kind === "mismatch") {
+          // §5.0.e symmetric resolution. Returns false when the user cancels (or
+          // the view moved on during the modal) → stay in the editor.
+          const proceed = await this.resolveToctouExit(
+            entry,
+            session,
+            resolved,
+            toctou,
+          );
+          if (!proceed) return;
+        } else {
+          const result = await commit7Step(
+            this.deps.vault,
+            session.conflictId,
+            session.meta,
+            resolved,
+          );
+          const suffix = result.siblingRemoved
+            ? " (redundant sibling cleaned)"
+            : "";
+          new Notice(`Saved ${result.basePath}${suffix}`);
+        }
+      } catch (err) {
+        new Notice(`Failed to save ${entry.basePath}: ${String(err)}`);
+        // Commit failed — stay in detail view so the user doesn't lose work.
+        // commit7Step is pair-atomic; recoverCommit at onload reconciles any
+        // partially-applied commit on the next launch.
+        return;
+      }
+
+      // Success — Step-8: return to list (render disposes the DiffPane, whose
+      // view.destroy() clears its CM6 history).
+      this.activeSession = null;
+      this.activeWriter = null;
       this.viewState = { mode: "list", tab: "conflicts" };
       this.render();
-      return;
+    } finally {
+      this.committing = false;
     }
-
-    try {
-      // W2 Step 1 (§5.0) — flush queued history before the commit. commit7Step
-      // Step 7 removes the dir on success; drain() awaits the serialized chain.
-      await this.activeWriter?.drain();
-      // getResolved() runs the commit-boundary fail-closed checks (tiling
-      // assertion) and applies the empty→"\n" guard to BOTH sides — its bytes
-      // are exactly what commit7Step hashes into done.json. Keep it INSIDE the
-      // try so a thrown corruption guard means "save failed, stay in editor".
-      const resolved = pane.getResolved();
-      // TOCTOU (§5.0 Step 1.5): a sync may have rewritten base/sibling under us
-      // since startSession.
-      const toctou = await classifyToctou(this.deps.vault, session.meta);
-      if (toctou.kind === "mismatch") {
-        // §5.0.e symmetric resolution. Returns false when the user cancels (or
-        // the view moved on during the modal) → stay in the editor.
-        const proceed = await this.resolveToctouExit(
-          entry,
-          session,
-          resolved,
-          toctou,
-        );
-        if (!proceed) return;
-      } else {
-        const result = await commit7Step(
-          this.deps.vault,
-          session.conflictId,
-          session.meta,
-          resolved,
-        );
-        const suffix = result.siblingRemoved
-          ? " (redundant sibling cleaned)"
-          : "";
-        new Notice(`Saved ${result.basePath}${suffix}`);
-      }
-    } catch (err) {
-      new Notice(`Failed to save ${entry.basePath}: ${String(err)}`);
-      // Commit failed — stay in detail view so the user doesn't lose work.
-      // commit7Step is pair-atomic; recoverCommit at onload reconciles any
-      // partially-applied commit on the next launch.
-      return;
-    }
-
-    this.activeSession = null;
-    this.activeWriter = null;
-    this.viewState = { mode: "list", tab: "conflicts" };
-    this.render();
   }
 
   // §5.0.e — the vault changed under the session (classifyToctou → mismatch).
