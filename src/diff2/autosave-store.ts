@@ -7,7 +7,8 @@
 //   meta.json        — written LAST at session start (§2.5.a commit point)
 //   base.snapshot    — byte-exact copy of basePath at session start
 //   sibling.snapshot — byte-exact copy of siblingPath
-//   cursor.json      — init (0,0,0); timer-rewritten in Stage 3
+//   cursor-a/b.json  — 2-slot ping-pong (§2.9); cursor-a (seq 0) at start,
+//                      timer-rewritten in Stage 3 / W3 (cursor-store.ts)
 //   history.jsonl    — empty at start; append-only REDO-log in Stage 3
 //   done.json        — added by the Stage 2.1 commit only
 //
@@ -97,7 +98,11 @@ export function autosaveDir(conflictId: string): string {
 const metaPath = (id: string) => `${autosaveDir(id)}/meta.json`;
 const baseSnapshotPath = (id: string) => `${autosaveDir(id)}/base.snapshot`;
 const siblingSnapshotPath = (id: string) => `${autosaveDir(id)}/sibling.snapshot`;
-const cursorPath = (id: string) => `${autosaveDir(id)}/cursor.json`;
+// Cursor slot helpers — THE single source of truth for the §2.9 ping-pong slot
+// names (cursor-store.ts + classifySweep import these so naming can't drift).
+export type CursorSlot = "a" | "b";
+export const cursorSlotPath = (id: string, slot: CursorSlot): string =>
+  `${autosaveDir(id)}/cursor-${slot}.json`;
 const historyPath = (id: string) => `${autosaveDir(id)}/history.jsonl`;
 
 // ── meta.json (§2.5) ─────────────────────────────────────────────────
@@ -160,9 +165,18 @@ export async function startSession(
   await atomicWriteFile(vault, siblingSnapshotPath(conflictId), siblingBytes); // 7
   await atomicWriteFile(
     vault,
-    cursorPath(conflictId),
-    utf8(JSON.stringify({ v: 1, anchor: 0, head: 0, scrollTop: 0, savedAt: nowIso })),
-  ); // step 8
+    cursorSlotPath(conflictId, "a"),
+    utf8(
+      JSON.stringify({
+        v: 1,
+        seq: 0,
+        anchor: 0,
+        head: 0,
+        scrollTop: 0,
+        savedAt: nowIso,
+      }),
+    ),
+  ); // step 8 — §2.9 ping-pong slot A, seq 0
   await atomicWriteFile(vault, historyPath(conflictId), new ArrayBuffer(0)); // 9 (empty)
 
   const meta: AutosaveMeta = {

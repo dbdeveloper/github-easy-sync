@@ -70,10 +70,21 @@ describe("classifySweep — §4.2 conditions", () => {
     expect(await classify()).toEqual({ action: "sweep", reason: "no-history" });
   });
 
-  it("no cursor → sweep", async () => {
+  it("no cursor (NEITHER ping-pong slot) → sweep", async () => {
     await seed(fx.vault, id);
-    await fx.vault.adapter.remove(file(id, "cursor.json"));
+    await fx.vault.adapter.remove(file(id, "cursor-a.json")); // only slot at start
     expect(await classify()).toEqual({ action: "sweep", reason: "no-cursor" });
+  });
+
+  it("only cursor-b present (slot A swept by ping-pong) → keep", async () => {
+    await seed(fx.vault, id);
+    // simulate a live session that has ping-ponged onto slot B then lost A.
+    await fx.vault.adapter.write(
+      file(id, "cursor-b.json"),
+      JSON.stringify({ v: 1, seq: 1, anchor: 0, head: 0, scrollTop: 0, savedAt: "x" }),
+    );
+    await fx.vault.adapter.remove(file(id, "cursor-a.json"));
+    expect(await classify()).toEqual({ action: "keep" });
   });
 
   it("missing snapshot → sweep", async () => {
@@ -138,7 +149,7 @@ describe("sweepAll — list, rmdir condemned, defer commits, keep valid", () => 
   it("idempotent: a second sweep keeps the survivors (§4.3)", async () => {
     await seed(fx.vault, "keep-me");
     await seed(fx.vault, "doomed");
-    await fx.vault.adapter.remove(file("doomed", "cursor.json"));
+    await fx.vault.adapter.remove(file("doomed", "cursor-a.json"));
     await sweepAll(fx.vault);
     const second = await sweepAll(fx.vault);
     expect(second.map((r) => r.conflictId)).toEqual(["keep-me"]);

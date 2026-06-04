@@ -75,18 +75,18 @@ const SCENARIOS: Scenario[] = [
   },
   {
     name: "after snapshots, before cursor (step 8)",
-    marker: "cursor.sync-tmp",
+    marker: "cursor-a.sync-tmp",
     present: ["base.snapshot", "sibling.snapshot"],
   },
   {
     name: "after cursor, before history (step 9)",
     marker: "history.sync-tmp",
-    present: ["base.snapshot", "sibling.snapshot", "cursor.json"],
+    present: ["base.snapshot", "sibling.snapshot", "cursor-a.json"],
   },
   {
     name: "after history, before meta (step 10 — the commit point)",
     marker: "meta.sync-tmp",
-    present: ["base.snapshot", "sibling.snapshot", "cursor.json", "history.jsonl"],
+    present: ["base.snapshot", "sibling.snapshot", "cursor-a.json", "history.jsonl"],
   },
 ];
 
@@ -109,7 +109,7 @@ describe("crash: session-start protocol, meta-last invariant", () => {
       ).rejects.toThrow(/simulated crash/);
 
       const dir = autosaveDir(ID);
-      const all = ["base.snapshot", "sibling.snapshot", "cursor.json", "history.jsonl", "meta.json"];
+      const all = ["base.snapshot", "sibling.snapshot", "cursor-a.json", "history.jsonl", "meta.json"];
       for (const f of all) {
         const expected = sc.present.includes(f);
         expect(await fx.vault.adapter.exists(`${dir}/${f}`)).toBe(expected);

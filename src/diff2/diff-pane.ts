@@ -79,6 +79,11 @@ export interface DiffPaneOpts {
   // recovery replay consumes. Fires ONLY while recording is enabled (see
   // enableRecording): live user edits, never construct / replay / setCursor.
   onRecord?: (change: unknown, structure: Segment[]) => void;
+  // W3 — invoked on a PURE caret/selection move (selectionSet && !docChanged),
+  // for the cursor-flush timer (§2.9). Doc changes go through onRecord (which
+  // also schedules a flush, on the typing cadence). Same recording gate as
+  // onRecord, so a restore-time setCursor never triggers a spurious flush.
+  onSelectionChange?: (anchor: number, head: number, scrollTop: number) => void;
 }
 
 const DEFAULT_OPTS: DiffPaneOpts = {
@@ -158,17 +163,30 @@ export class DiffPane {
           // replay uses view.setState (a ViewUpdate with empty `transactions`,
           // so this loop body never runs) AND `recording` is false during it.
           EditorView.updateListener.of((u) => {
-            if (!this.recording || !this.opts.onRecord) return;
-            for (const tr of u.transactions) {
-              if (
-                !tr.docChanged &&
-                !tr.effects.some((e) => e.is(setDiffPaneState))
-              ) {
-                continue;
+            if (!this.recording) return;
+            if (this.opts.onRecord) {
+              for (const tr of u.transactions) {
+                if (
+                  !tr.docChanged &&
+                  !tr.effects.some((e) => e.is(setDiffPaneState))
+                ) {
+                  continue;
+                }
+                this.opts.onRecord(
+                  tr.changes.toJSON(),
+                  u.state.field(diffPaneStateField)!.structure,
+                );
               }
-              this.opts.onRecord(
-                tr.changes.toJSON(),
-                u.state.field(diffPaneStateField)!.structure,
+            }
+            // W3 — a PURE caret move (no doc change) feeds the cursor timer on
+            // the nav cadence; doc changes already scheduled a flush via
+            // onRecord (typing cadence). scrollTop from u.view (always live).
+            if (this.opts.onSelectionChange && u.selectionSet && !u.docChanged) {
+              const sel = u.state.selection.main;
+              this.opts.onSelectionChange(
+                sel.anchor,
+                sel.head,
+                u.view.scrollDOM.scrollTop,
               );
             }
           }),

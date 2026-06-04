@@ -51,7 +51,8 @@ import {
 import { reopenAction } from "./reopen-action";
 import { ResumeRecoveryModal, SaveToAltModal } from "./recovery-dialog";
 import { scanHistory } from "./history-replay";
-import { readCursor } from "./cursor-store";
+import { persistCursor, readCursor } from "./cursor-store";
+import { CursorScheduler } from "./cursor-timer";
 import { HistoryWriter } from "./history-log";
 import type { Segment } from "./editor-model";
 import type Logger from "../logger";
@@ -125,6 +126,13 @@ export class DiffEditView extends ItemView {
   // (its `record` is what the DiffPane's onRecord calls); drained at the `[←]`
   // commit (Step 1) so the last edits land before the dir is removed.
   private activeWriter: HistoryWriter | null = null;
+  // W3 — cursor-flush throttle for the active session (§2.9). Reassigned on
+  // every mount; its pending timer is cancelled at the TOP of exitDetailView
+  // (before any commit await) so a fired timer can't persistCursor into a dir
+  // the commit is staging/removing. `cursorFlushing` drops an overlapping flush
+  // (best-effort signal — skip, don't queue).
+  private cursorScheduler: CursorScheduler | null = null;
+  private cursorFlushing = false;
 
   constructor(leaf: WorkspaceLeaf, deps: DiffEditViewDeps) {
     super(leaf);
@@ -186,6 +194,10 @@ export class DiffEditView extends ItemView {
   }
 
   private disposeActiveDiffPane(): void {
+    // W3 — cancel + drop the cursor timer first (a pending flush must not write
+    // into a dir that's about to be torn down / re-mounted).
+    this.cursorScheduler?.stop();
+    this.cursorScheduler = null;
     if (this.activeDiffPane) {
       this.activeDiffPane.destroy();
       this.activeDiffPane = null;
@@ -390,20 +402,31 @@ export class DiffEditView extends ItemView {
         // W2 — the live history feed. onRecord fires only while the mounted pane
         // has recording enabled (post-mount/replay) and routes to whichever
         // writer the current mount path attached. Append errors are swallowed
-        // inside HistoryWriter, never reaching CM6.
+        // inside HistoryWriter, never reaching CM6. W3 — an edit also pokes the
+        // cursor timer on the typing cadence.
         onRecord: (change: unknown, structure: Segment[]) => {
           this.activeWriter?.record(change, structure, new Date().toISOString());
+          this.cursorScheduler?.schedule("typing");
+        },
+        // W3 — a pure caret move pokes the cursor timer on the nav cadence. The
+        // flush re-reads the LIVE selection, so we ignore the passed position.
+        onSelectionChange: () => {
+          this.cursorScheduler?.schedule("nav");
         },
       };
 
-      // Bind a fresh HistoryWriter to a just-mounted pane and turn recording on
-      // (the owner calls this AFTER any replay/setCursor, so only live edits
-      // record). startSeq lets a resumed history.jsonl continue its seq.
+      // Bind a fresh HistoryWriter + cursor scheduler to a just-mounted pane and
+      // turn recording on (the owner calls this AFTER any replay/setCursor, so
+      // only live edits record / poke the timer). startSeq continues a resumed
+      // history.jsonl's seq.
       const attachWriter = (pane: DiffPane, startSeq: number): void => {
         this.activeWriter = new HistoryWriter(
           this.deps.vault,
           conflictId,
           startSeq,
+        );
+        this.cursorScheduler = new CursorScheduler(() =>
+          this.flushCursor(conflictId),
         );
         pane.enableRecording();
       };
@@ -591,6 +614,14 @@ export class DiffEditView extends ItemView {
   // session, the SAME symmetric rule as §3.2.a-reopen applies — see
   // resolveToctouExit. We NEVER overwrite an externally-changed file.
   private async exitDetailView(entry: ConflictEntry): Promise<void> {
+    // W3 — cancel any pending cursor flush as the FIRST synchronous statement,
+    // before any commit await. The commit awaits disk I/O and rmdir's the dir;
+    // a timer firing mid-commit would persistCursor into a dir being staged /
+    // removed → torn write or a phantom dir after a clean save. We only stop()
+    // (not null) so a failed commit that keeps the user in the editor can keep
+    // autosaving — the next edit reschedules.
+    this.cursorScheduler?.stop();
+
     const pane = this.activeDiffPane;
     const session = this.activeSession;
     if (!pane || !session) {
@@ -713,5 +744,29 @@ export class DiffEditView extends ItemView {
       { base: session.meta.basePath, sibling: session.meta.siblingPath },
     );
     return true;
+  }
+
+  // W3 — the cursor scheduler's flush thunk (§2.9). Re-reads the LIVE selection
+  // from the active pane and ping-pong-persists it. Fire-and-forget: errors are
+  // logged, never propagated (cursor is a best-effort UX signal). `cursorFlushing`
+  // drops an overlapping flush rather than queueing it.
+  private flushCursor(conflictId: string): void {
+    if (this.cursorFlushing) return;
+    const pane = this.activeDiffPane;
+    if (!pane) return;
+    const view = pane.getView();
+    const sel = view.state.selection.main;
+    this.cursorFlushing = true;
+    void persistCursor(this.deps.vault, conflictId, {
+      anchor: sel.anchor,
+      head: sel.head,
+      scrollTop: view.scrollDOM.scrollTop,
+    })
+      .catch((e) =>
+        this.deps.logger?.warn("diff2 cursor flush failed", { err: String(e) }),
+      )
+      .finally(() => {
+        this.cursorFlushing = false;
+      });
   }
 }

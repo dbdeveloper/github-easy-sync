@@ -49,7 +49,7 @@ describe("startSession — §2.5.a", () => {
   it("writes all five files and returns the meta", async () => {
     const meta = await startSession(fx.vault, id, "base.md", "sibling.md", NOW);
     const dir = autosaveDir(id);
-    for (const f of ["meta.json", "base.snapshot", "sibling.snapshot", "cursor.json", "history.jsonl"]) {
+    for (const f of ["meta.json", "base.snapshot", "sibling.snapshot", "cursor-a.json", "history.jsonl"]) {
       expect(await fx.vault.adapter.exists(`${dir}/${f}`)).toBe(true);
     }
     expect(meta.conflictId).toBe(id);
@@ -75,12 +75,14 @@ describe("startSession — §2.5.a", () => {
     expect(meta.siblingShaAtStart).toBe(await calculateGitBlobSHA(sibSnap));
   });
 
-  it("cursor.json initialises to (0,0,0); history.jsonl is empty", async () => {
+  it("cursor-a.json initialises to (seq 0, 0,0,0); cursor-b absent; history empty", async () => {
     await startSession(fx.vault, id, "base.md", "sibling.md", NOW);
     const dir = autosaveDir(id);
 
-    const cursor = JSON.parse(await fx.vault.adapter.read(`${dir}/cursor.json`));
-    expect(cursor).toMatchObject({ v: 1, anchor: 0, head: 0, scrollTop: 0, savedAt: NOW });
+    // §2.9 ping-pong: slot A is seeded at seq 0; slot B does not exist yet.
+    const cursor = JSON.parse(await fx.vault.adapter.read(`${dir}/cursor-a.json`));
+    expect(cursor).toMatchObject({ v: 1, seq: 0, anchor: 0, head: 0, scrollTop: 0, savedAt: NOW });
+    expect(await fx.vault.adapter.exists(`${dir}/cursor-b.json`)).toBe(false);
 
     const history = await fx.vault.adapter.readBinary(`${dir}/history.jsonl`);
     expect(history.byteLength).toBe(0);

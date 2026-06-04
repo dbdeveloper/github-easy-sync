@@ -7,7 +7,7 @@
 //                        (NOT §4.2). Only if recovery falls through to its
 //                        default fallback does §4.2 then apply.
 //   else, sweep if ANY of (§4.2 conditions 1–7):
-//     1 no meta.json (or unparseable)   2 no history.jsonl   3 no cursor.json
+//     1 no meta.json (or unparseable)   2 no history.jsonl   3 no cursor-a/b.json (neither slot)
 //     4 no base.snapshot / sibling.snapshot
 //     5 snapshot SHA ≠ meta (sha(read snapshot) ≠ meta.*ShaAtStart) — corruption
 //     6 an input file (basePath / siblingPath) missing in the vault
@@ -24,7 +24,12 @@
 
 import type { Vault } from "obsidian";
 import { calculateGitBlobSHA } from "../utils";
-import { AUTOSAVE_ROOT, autosaveDir, readMeta } from "./autosave-store";
+import {
+  AUTOSAVE_ROOT,
+  autosaveDir,
+  cursorSlotPath,
+  readMeta,
+} from "./autosave-store";
 
 export type SweepDecision =
   | { action: "keep" }
@@ -56,8 +61,12 @@ export async function classifySweep(
   if (!(await a.exists(p(conflictId, "history.jsonl")))) {
     return { action: "sweep", reason: "no-history" }; // cond 2
   }
-  if (!(await a.exists(p(conflictId, "cursor.json")))) {
-    return { action: "sweep", reason: "no-cursor" }; // cond 3
+  // cond 3 — §2.9 ping-pong: sweep only when NEITHER slot exists (a live
+  // session always has at least the survivor slot).
+  const hasCursorA = await a.exists(cursorSlotPath(conflictId, "a"));
+  const hasCursorB = await a.exists(cursorSlotPath(conflictId, "b"));
+  if (!hasCursorA && !hasCursorB) {
+    return { action: "sweep", reason: "no-cursor" };
   }
   const hasBaseSnap = await a.exists(p(conflictId, "base.snapshot"));
   const hasSibSnap = await a.exists(p(conflictId, "sibling.snapshot"));
