@@ -1976,46 +1976,46 @@ meta.siblingShaAtStart`. Vault files змінились між старт сес
   sibling не чіпаємо — sync2 ним володіє.)
 - **`[Cancel]`** — лишити сесію as-is; autosave-dir + sibling недоторкані.
 
-**Механізм (за згодою користувача — НЕ silent):** на `[Compare]`:
-1. **Захопити oldSibling → trash** через `trashHooks.captureForDelete(oldSiblingPath)`
-   ПЕРЕД заміною — санкціонований **R3.4**-шлях (sync2 уже так робить на pull-delete:
-   «captureForDelete ПЕРЕД adapter.remove, так само як user-driven»; rule 819
-   «explicit-контракт > implicit-bypass»). Restore = Phase 9b. Закриває «а раптом?».
-2. **Змінтити НОВИЙ синтетичний sibling** через `ConflictStore.create`, що тримає `R`,
-   з окремим label `intermediate` + оновити record `theirsBlobSha → SHA(R)`.
-3. Користувач розв'язує `newBase` vs `R` у редакторі.
+**Механізм (на `[Compare]`):** записати `R` у **ІСНУЮЧИЙ** sibling-файл, лишивши
+`newBase` базою. Існуючий конфлікт просто **триває** як `newBase` vs `R`; користувач
+довирішує його штатно (→ `SHA(base)==SHA(sibling)` або видалення sibling, §7).
+Опційно: захопити `oldSibling` → trash через `trashHooks.captureForDelete` ПЕРЕД
+перезаписом (R3.4) — recoverability, якщо хочемо «а раптом?»; інакше відкинуті при
+резолюції частини `oldSibling` втрачаються (вони й так відкинуті користувачем).
 
-**❗КРУкс — merge-base (вирішальний constraint, code-verified):** auto-merge — 3-way
-(`ours`, `theirs`, `base`). Движок джерелить `base` з **last-synced ancestor**
-(sync2-manager: рядок 962 «base = lastSyncCommitSha», 989 `base: expectedHead`, 1862
-fetched) — що для синтезованого `newBase` vs `R` **ХИБНО**: `R` — артефакт без чесної
-історії; merge НЕ bail'иться (base є) і НЕ conflict-mark'иться (hunks можуть не
-перетинатись) → **тихий семантично-неправильний результат**. Саме «99% схожі» — це
-failure-case, не safe. Два виходи:
-  - **(A)** провести `base.snapshot`(=oldBase) як merge-base → `merge(newBase, oldBase, R)`
-    коректно поєднує (oldBase→newBase нові правки)+(oldBase→R резолюція). Але движок
-    так НЕ вміє для синтетичних siblings — потрібна нова гілка джерелення base.
-  - **(B) SUPPRESS auto-merge** на `intermediate`-sibling (label-гачок, як §10
-    synthetic-batches) → користувач розв'язує `newBase` vs `R` ВРУЧНУ. Оминає пастку
-    повністю. **Рекомендовано.**
-  Suppress/correct-base МУСИТЬ бути **атомарним зі створенням** sibling: auto-merge
-  стріляє на drain автономно, міг би розв'язати (хибно) ДО reopen/діалогу.
+**Чому це БЕЗПЕЧНО (підтверджено PSEUDO-MERGE-MODE):** запис `R` у sibling — це
+**легітимна мутація sibling**, рівно той самий клас операції, що §5.2 «rename the
+sibling over base» / §7 «edit while in conflict». Sibling **вільно мутабельний**
+(§4.2: «user can open it, read it, copy parts, delete it, or rename it»). Ключове:
+**auto-merge НЕ re-fire'иться** — це одноразовий **detection-gate ПЕРЕД реєстрацією**
+(§4.1 + §6 dispatch-table: на divergent path → success=main / failure=register+sibling;
+code Case 3 sync2-manager:1844). Зареєстрований конфлікт резолвиться **виключно
+filesystem-операціями користувача**; Phase A `classify()` читає ПОТОЧНИЙ sibling-SHA
+(filesystem-authoritative) → drop при SHA-match/gone. Тож запис `R` НЕ тригерить
+жодного auto-merge → **merge-base корупції НЕМАЄ**.
 
-**Виправлено в реконсиляції (2026-06-04, advisor+code):** cross-device «підробка» —
-**ХИБНА теза**: `*.conflict-from-*` force-gitignored, **local-only**
-(gitignore-invariants.ts:98,333) — нікуди не пушиться. Auto-trash — **НЕ виняток**:
-R3.4 `captureForDelete` уже авто-капче system-delete'и. Лишилось реальне: merge-base
-крукс (вище), record `theirsBlobSha` bookkeeping, Phase-9b restore-UI.
+> ⚠ **Самокорекція (2026-06-04):** попередній аналіз цього файлу — «merge-base крукс»,
+> «suppress-гачок», «synthetic-intermediate sibling», «ownership-boundary зсув» (коміт
+> `0b205ab`) — був **ХИБНИЙ**, бо припускав, що auto-merge перезапускається на існуючому
+> sibling. **Не перезапускається** (§4.1/§6). Same-sibling — коректний і найпростіший.
 
-**Termination:** `newBase` vs `R` → resolve → якщо base знову зміниться → синтез `R2`
-(кожен крок = звичайний конфлікт «current sibling») → завершується. ОК.
+**Семантика кнопок (підтверджено):**
+- **`[Compare]`** — записати `R` у sibling → конфлікт триває `newBase` vs `R` → редактор.
+- **`[Discard]`** — стерти лише autosave-сесію; **оригінальний sibling лишається** →
+  конфлікт `newBase` vs original-sibling re-presents для нового розв'язку.
+- **`[Cancel]`** — лишити сесію as-is; autosave-dir + sibling недоторкані.
 
-**Чому sync2-layer, не diff2 / не W4c:** торкається `ConflictStore.create`, auto-merge
-eligibility/suppression, merge-base джерелення. Спроєктувати в SYNC2 /
-PSEUDO-MERGE-MODE ПЕРЕД кодом.
+**Дрібне (build-time):** record `theirsBlobSha` стає stale після запису `R` — але Phase A
+filesystem-authoritative, тож benign; оновити для чистоти. CLAUDE.md-інваріант «diff2
+пише лише base» отримає санкціонований виняток «diff2 пише sibling як мутацію §4.2».
 
-**W4c (зараз):** §3.2.a лишається **restore/discard/cancel**; цей auto-fold —
-заплановане покращення поверх sync2.
+**Termination:** `newBase` vs `R` → resolve → якщо base знову зміниться → той самий
+sibling-mutation крок повторюється → завершується (кожен крок = звичайний конфлікт). ОК.
+
+**Worth-building?** Рідкість (3 «чуда»: повна резолюція + crash до `[←]` + base змінився
+до reopen) + безпечний W4c-fallback ⇒ cost/benefit тонкий. Явно вирішити «чи будувати»
+ПЕРЕД інвестиціями. Convergence-детект — з `getResolved().base === .sibling` (без
+окремої мітки). Усе ще future, design-before-code, **НЕ W4c**.
 
 ### §3.3 Continue editing — replay algorithm
 
