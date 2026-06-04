@@ -42,9 +42,11 @@ import {
 } from "./events";
 import {
   autosaveDir,
+  classifyReopen,
   startSession,
   type AutosaveMeta,
 } from "./autosave-store";
+import { reopenAction } from "./reopen-action";
 import { classifyToctou, commit7Step } from "./exit-commit";
 import { findSentinelCollision } from "./joined-doc";
 import {
@@ -330,33 +332,51 @@ export class DiffEditView extends ItemView {
         return;
       }
 
-      // Autosave session (DIFF-EDITOR.md §2.5.a). startSession creates
-      // .diff2-autosave/<id>/ (snapshots + cursor + empty history + meta LAST).
-      // W1: no resume dialog yet — discard any prior session dir and start
-      // fresh (no history to lose until W2's feed). But NEVER nuke a dir with
-      // an in-flight commit (done.json): onload recovery clears those first
-      // (§5.0.a precedence), so its presence here means recovery hasn't run —
-      // bail rather than destroy a recoverable commit.
+      // Autosave session lifecycle (DIFF-EDITOR.md §3.1 / §3.2 / §3.2.a). An
+      // in-flight commit (done.json) is NEVER touched here — onload recoverCommit
+      // finishes it before any mount (§5.0.a precedence); bail defensively if one
+      // is present.
       const conflictId = autosaveIdForEntry(entry);
       const dir = autosaveDir(conflictId);
-      if (await adapter.exists(dir)) {
-        if (await adapter.exists(`${dir}/done.json`)) {
-          new Notice(
-            "A previous save for this conflict is still recovering. " +
-              "Reload the plugin and reopen.",
-          );
-          return;
-        }
-        await adapter.rmdir(dir, true);
+      if (await adapter.exists(`${dir}/done.json`)) {
+        new Notice(
+          "A previous save for this conflict is still recovering. " +
+            "Reload the plugin and reopen.",
+        );
+        return;
       }
-      let meta: AutosaveMeta;
-      try {
-        meta = await startSession(
+      // Classify the reopen → action (pure dispatch, W4c Step A).
+      const action = reopenAction(
+        await classifyReopen(
           this.deps.vault,
           conflictId,
           entry.basePath,
           entry.siblingPath,
-        );
+        ),
+      );
+
+      let meta: AutosaveMeta;
+      try {
+        // W4c Step B: every action currently clears any prior dir + starts a
+        // fresh session — behaviour IDENTICAL to W1. `resume` (Step C) and
+        // `restore` (Step D) will instead KEEP the dir and replay; until those
+        // land they fall back through to clear+fresh here.
+        switch (action.kind) {
+          case "fresh":
+          case "discard-fresh":
+          case "resume": // TODO Step C — keep dir + replayFrom + ResumeRecoveryModal
+          case "restore": // TODO Step D — keep dir + restore-from-snapshots + replay
+            if (await adapter.exists(dir)) {
+              await adapter.rmdir(dir, true);
+            }
+            meta = await startSession(
+              this.deps.vault,
+              conflictId,
+              entry.basePath,
+              entry.siblingPath,
+            );
+            break;
+        }
       } catch (err) {
         body.createEl("p", {
           cls: "diff2-detail-error",
