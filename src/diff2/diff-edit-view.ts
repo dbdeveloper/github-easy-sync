@@ -49,13 +49,21 @@ import {
   type ResumeSession,
 } from "./autosave-store";
 import { reopenAction } from "./reopen-action";
-import { ResumeRecoveryModal } from "./recovery-dialog";
+import { ResumeRecoveryModal, SaveToAltModal } from "./recovery-dialog";
 import { scanHistory } from "./history-replay";
 import { readCursor } from "./cursor-store";
 import { HistoryWriter } from "./history-log";
 import type { Segment } from "./editor-model";
+import type Logger from "../logger";
 import { atomicWriteFile } from "../sync2/atomic-write";
-import { classifyToctou, commit7Step } from "./exit-commit";
+import {
+  classifyToctou,
+  commit7Step,
+  commitToAlt,
+  commitUnchangedSide,
+  type ResolvedSides,
+  type ToctouStatus,
+} from "./exit-commit";
 import { findSentinelCollision } from "./joined-doc";
 import {
   autosaveIdForEntry,
@@ -78,6 +86,10 @@ export interface DiffEditViewDeps {
   // Local device label for the top-marker / "Keep all local
   // (<label>)" button text. Falls back to "local" when undefined.
   localDeviceLabel?: () => string;
+  // Plugin logger — the §5.0.e one-side-silent exit logs here instead of
+  // nagging the user with a Notice (no-op when logging is disabled). Optional
+  // in test fixtures.
+  logger?: Logger;
 }
 
 // Phase 1 owns the navigation state machine inside the view: which
@@ -573,8 +585,11 @@ export class DiffEditView extends ItemView {
   // (SHA(base)==SHA(sibling)) → rmdir's the autosave dir. Pair-atomic:
   // crash ⇒ both sides or neither, and recoverCommit at onload finishes
   // or rolls back any interrupted commit. (Step 0 `committing` UI guard +
-  // Step 8 detach are Phase-6 polish; the §5.0.e TOCTOU resolution modal
-  // is W5 — W1 aborts-and-stays on mismatch.)
+  // Step 8 detach are Phase-6 polish.)
+  //
+  // §5.0.e TOCTOU (W5): when classifyToctou finds the vault changed under the
+  // session, the SAME symmetric rule as §3.2.a-reopen applies — see
+  // resolveToctouExit. We NEVER overwrite an externally-changed file.
   private async exitDetailView(entry: ConflictEntry): Promise<void> {
     const pane = this.activeDiffPane;
     const session = this.activeSession;
@@ -593,27 +608,31 @@ export class DiffEditView extends ItemView {
       // are exactly what commit7Step hashes into done.json. Keep it INSIDE the
       // try so a thrown corruption guard means "save failed, stay in editor".
       const resolved = pane.getResolved();
-      // TOCTOU (§5.0 Step 1.5): a sync may have rewritten base/sibling under
-      // us since startSession. W1 aborts-and-stays on a mismatch (the §5.0.e
-      // resolution modal is W5); the user reopens to pick up the new bytes.
+      // TOCTOU (§5.0 Step 1.5): a sync may have rewritten base/sibling under us
+      // since startSession.
       const toctou = await classifyToctou(this.deps.vault, session.meta);
       if (toctou.kind === "mismatch") {
-        new Notice(
-          `${entry.basePath} changed on disk since you opened it — ` +
-            "save aborted. Reopen to merge the new version.",
+        // §5.0.e symmetric resolution. Returns false when the user cancels (or
+        // the view moved on during the modal) → stay in the editor.
+        const proceed = await this.resolveToctouExit(
+          entry,
+          session,
+          resolved,
+          toctou,
         );
-        return;
+        if (!proceed) return;
+      } else {
+        const result = await commit7Step(
+          this.deps.vault,
+          session.conflictId,
+          session.meta,
+          resolved,
+        );
+        const suffix = result.siblingRemoved
+          ? " (redundant sibling cleaned)"
+          : "";
+        new Notice(`Saved ${result.basePath}${suffix}`);
       }
-      const result = await commit7Step(
-        this.deps.vault,
-        session.conflictId,
-        session.meta,
-        resolved,
-      );
-      const suffix = result.siblingRemoved
-        ? " (redundant sibling cleaned)"
-        : "";
-      new Notice(`Saved ${result.basePath}${suffix}`);
     } catch (err) {
       new Notice(`Failed to save ${entry.basePath}: ${String(err)}`);
       // Commit failed — stay in detail view so the user doesn't lose work.
@@ -626,5 +645,73 @@ export class DiffEditView extends ItemView {
     this.activeWriter = null;
     this.viewState = { mode: "list", tab: "conflicts" };
     this.render();
+  }
+
+  // §5.0.e — the vault changed under the session (classifyToctou → mismatch).
+  // Symmetric, the SAME rule as §3.2.a-reopen: the resolved content lands ONLY
+  // on the side whose vault file did NOT change; we never overwrite a file that
+  // was modified externally. Returns true if the exit should proceed (session
+  // torn down by the helper), false to stay in the editor (cancel / view moved
+  // on). Runs inside exitDetailView's try — a thrown write/guard surfaces as
+  // "Failed to save" and keeps the user in the editor.
+  private async resolveToctouExit(
+    entry: ConflictEntry,
+    session: { conflictId: string; meta: AutosaveMeta },
+    resolved: ResolvedSides,
+    toctou: Extract<ToctouStatus, { kind: "mismatch" }>,
+  ): Promise<boolean> {
+    // Exactly one side changed (XOR) → SILENT single-side write to the unchanged
+    // side; log, no Notice (DIFF-EDITOR.md §5.0.e). The conflict simply
+    // continues with the changed side's new bytes.
+    if (toctou.baseChanged !== toctou.siblingChanged) {
+      const changedSide = toctou.baseChanged ? "base" : "sibling";
+      const { writtenPath } = await commitUnchangedSide(
+        this.deps.vault,
+        session.conflictId,
+        session.meta,
+        resolved,
+        changedSide,
+      );
+      this.deps.logger?.info(
+        "diff2 [←] exit: one input changed externally; wrote resolved " +
+          "unchanged side, conflict continues",
+        { changedSide, writtenPath },
+      );
+      return true;
+    }
+
+    // BOTH sides changed → the only place the exit asks anything. Save the
+    // resolution under a fresh name, or discard. The modal fail-closes on a
+    // colliding name (the prefill IS the changed original).
+    const choice = await new SaveToAltModal(this.app, {
+      defaultName: session.meta.basePath,
+      exists: (name) => this.deps.vault.adapter.exists(name),
+    }).prompt();
+
+    // The modal can sit open for minutes — bail if the view moved on (onClose
+    // nulls activeSession) before we touch disk.
+    if (this.activeSession !== session) return false;
+
+    if (choice.choice === "cancel") return false; // stay in the editor
+    if (choice.choice === "save") {
+      const res = await commitToAlt(
+        this.deps.vault,
+        session.conflictId,
+        choice.name,
+        resolved,
+        entry.deviceLabel,
+        Date.now(),
+      );
+      const suffix = res.siblingPath ? ` (+ ${res.siblingPath})` : "";
+      new Notice(`Saved your resolution as ${res.basePath}${suffix}`);
+      return true;
+    }
+    // discard
+    await this.deps.vault.adapter.rmdir(autosaveDir(session.conflictId), true);
+    this.deps.logger?.info(
+      "diff2 [←] exit: both inputs changed externally; user discarded resolution",
+      { base: session.meta.basePath, sibling: session.meta.siblingPath },
+    );
+    return true;
   }
 }

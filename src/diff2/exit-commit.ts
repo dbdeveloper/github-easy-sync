@@ -14,18 +14,20 @@
 // recovery. WIRED into the view as of W1: `commit7Step` is the `[←]` save
 // (DiffEditView.exitDetailView), `classifyToctou` gates it, and `recoverCommit`
 // runs at onload via `onload-recovery.ts` (before AtomicWriteRecovery.sweep).
-// Still Phase-6 polish: the §5.0.e resolution MODAL (W5), the `committing` UI
-// guard (Step 0), and Step 8 (detachLeaf + historyClear). The naive
-// `exit-protocol.ts` is deleted — W1's swap replaced it.
+// The §5.0.e symmetric exit-TOCTOU is WIRED as of W5: commitUnchangedSide
+// (one side changed → silent) + commitToAlt (both changed → SaveToAltModal).
+// Still Phase-6 polish: the `committing` UI guard (Step 0) and Step 8
+// (detachLeaf + historyClear). The naive `exit-protocol.ts` is deleted.
 //
 // Canonical spec: docs/tasks/DIFF-EDITOR.md §5.0 (7 steps), §5.0.a/b
 // (recovery sweep + A–K matrix), §5.0.c (orphan discrimination), §5.0.e
 // (TOCTOU). atomic-write.ts staging-path convention (SYNC2 §2.4 / PSEUDO-
 // MERGE-MODE §9.2/§9.3).
 
-import type { Vault } from "obsidian";
+import { normalizePath, type Vault } from "obsidian";
 import { atomicWriteFile, stagingPathFor } from "../sync2/atomic-write";
 import { safeRename } from "../sync2/cross-platform";
+import { buildSiblingPath } from "../sync2/conflict-store";
 import { calculateGitBlobSHA } from "../utils";
 import { autosaveDir, readMeta, type AutosaveMeta } from "./autosave-store";
 
@@ -47,12 +49,13 @@ export interface DoneJson {
 
 // ── Step 1.5 — TOCTOU detection (§5.0 Step 1.5) ──────────────────────
 
-// Did the input files change externally since session start? DETECTION ONLY —
-// the §5.0.e resolution modal is Phase 6. The caller runs this before
-// commit7Step; on "mismatch" it shows the modal and only then calls
-// commit7Step (default paths for "force overwrite", or alt paths for "save to
-// alternative"). Throws if a file was deleted externally (readBinary rejects);
-// the Phase-6 caller handles that like classifyReopen's input-missing case.
+// Did the input files change externally since session start? DETECTION ONLY.
+// The caller (DiffEditView.exitDetailView) runs this before commit7Step; on
+// "mismatch" it applies the §5.0.e symmetric rule via commitUnchangedSide
+// (exactly one side changed → silent) or commitToAlt (both changed → modal).
+// `baseChanged`/`siblingChanged` are exactly the discriminant the caller needs.
+// Throws if a file was deleted externally (readBinary rejects); the caller
+// handles that like classifyReopen's input-missing case.
 export type ToctouStatus =
   | { kind: "ok" }
   | {
@@ -94,10 +97,11 @@ export interface ResolvedSides {
 
 export interface Commit7Options {
   // Target paths default to the conflict's real paths (meta.basePath /
-  // siblingPath). The §5.0.e "save to alternative paths" branch passes fresh
-  // paths here; Step 4 self-skips for any target that doesn't pre-exist, so
-  // new-file and save-to-alt are handled uniformly. (Alt-path NAMING is the
-  // Phase-6 caller's job — this core stays naming-agnostic.)
+  // siblingPath); Step 4 self-skips for any target that doesn't pre-exist, so a
+  // brand-new file commits uniformly. NOTE: the §5.0.e save-to-alt branch does
+  // NOT use these — it goes through commitToAlt (plain atomicWriteFile), because
+  // recoverCommit classifies by meta paths and can't roll an alt-path commit
+  // forward. These options remain for new-file commits onto the real paths.
   targetBasePath?: string;
   targetSiblingPath?: string;
   now?: string; // injectable for deterministic tests
@@ -191,6 +195,101 @@ export async function commit7Step(
     expectedSiblingSha,
     siblingRemoved,
   };
+}
+
+// ── §5.0.e — symmetric exit-TOCTOU writers ───────────────────────────
+//
+// When `[← back]` finds the vault changed under the session (classifyToctou →
+// mismatch), the SAME symmetric rule as §3.2.a-reopen applies: the resolved
+// content lands ONLY on the side whose vault file did NOT change. Two shapes:
+//   - exactly ONE side changed  → commitUnchangedSide (silent, single write)
+//   - BOTH sides changed        → commitToAlt (user picks a fresh name)
+// Neither routes through commit7Step: there is no pair to keep atomic (one
+// write each), and the both-changed alt path CANNOT use commit7Step because
+// recoverCommit classifies by meta.basePath/siblingPath, so an alt-path commit
+// is structurally unrecoverable (it'd treat the external originals as foreign
+// and clean the wrong staging slots). Plain atomicWriteFile is independently
+// crash-safe, and the externally-changed originals are untouched either way.
+
+// §5.0.e one-side-changed: write the resolved content of the UNCHANGED side
+// onto its (unchanged) vault path — a legitimate §4.2 sibling mutation — then
+// tear the session down. The changed side keeps its new bytes; the conflict
+// simply continues (the caller logs; no Notice). No done.json barrier: a single
+// atomicWriteFile is already crash-safe. Step-6.5 is NOT duplicated here — if
+// the write makes SHA(base)==SHA(sibling), the next Phase A drops the conflict.
+export async function commitUnchangedSide(
+  vault: Vault,
+  autosaveId: string,
+  meta: AutosaveMeta,
+  resolved: ResolvedSides,
+  changedSide: "base" | "sibling",
+): Promise<{ writtenPath: string }> {
+  // changed base → keep the user's edit on the (unchanged) sibling, and vice
+  // versa. The path we write is always the side that did NOT change.
+  const writtenPath =
+    changedSide === "base" ? meta.siblingPath : meta.basePath;
+  const writeStr =
+    changedSide === "base" ? resolved.sibling : resolved.base;
+  await atomicWriteFile(vault, writtenPath, utf8(writeStr));
+  await vault.adapter.rmdir(autosaveDir(autosaveId), true);
+  return { writtenPath };
+}
+
+// Thrown by commitToAlt when the chosen name (or its derived sibling) already
+// exists. FAIL-CLOSED: the §5.0.e editbox prefill IS meta.basePath, so an
+// un-edited Save would otherwise clobber the externally-changed original —
+// exactly the force-overwrite §5.0.e removed. The modal pre-validates for UX;
+// this is the load-bearing invariant ("we NEVER overwrite a changed original").
+export class AltTargetExistsError extends Error {
+  constructor(public readonly path: string) {
+    super(`Save-to-alt target already exists: ${path}`);
+    this.name = "AltTargetExistsError";
+  }
+}
+
+// §5.0.e both-changed save-to-alt: both inputs changed externally; the user
+// chose to save the resolution under a fresh name. Converged resolution
+// (base==sibling) → ONE file at newBasePath. Partial → newBasePath PLUS a
+// sibling derived from it (so the synthetic conflict-pair continues under the
+// new name). The externally-changed originals are NEVER touched. base is
+// written FIRST so a crash leaves the named file, not an orphan sibling.
+export async function commitToAlt(
+  vault: Vault,
+  autosaveId: string,
+  newBasePath: string,
+  resolved: ResolvedSides,
+  deviceLabel: string,
+  ts: number,
+): Promise<{ basePath: string; siblingPath?: string }> {
+  // Single disk boundary — the user's typed name must be normalizePath'd before
+  // it touches the adapter (CLAUDE.md path rule; mobile pastes stray slashes).
+  // The modal normalizes too, so its collision pre-check and this write agree.
+  const target = normalizePath(newBasePath);
+  // String equality ⟺ byte equality ⟺ SHA equality (utf8 is injective here);
+  // both sides already carry getResolved()'s empty→"\n" guard.
+  const converged = resolved.base === resolved.sibling;
+
+  // Fail-closed: resolve + check BOTH targets BEFORE any write — never overwrite
+  // an existing file, and never leave an orphan base if the derived sibling
+  // collides (both checks, then both writes).
+  if (await vault.adapter.exists(target)) {
+    throw new AltTargetExistsError(target);
+  }
+  let siblingPath: string | undefined;
+  if (!converged) {
+    siblingPath = buildSiblingPath(target, deviceLabel, ts, "modify-vs-modify");
+    if (await vault.adapter.exists(siblingPath)) {
+      throw new AltTargetExistsError(siblingPath);
+    }
+  }
+
+  // base FIRST — a crash leaves the named file, not an orphan sibling.
+  await atomicWriteFile(vault, target, utf8(resolved.base));
+  if (siblingPath) {
+    await atomicWriteFile(vault, siblingPath, utf8(resolved.sibling));
+  }
+  await vault.adapter.rmdir(autosaveDir(autosaveId), true);
+  return { basePath: target, siblingPath };
 }
 
 // ── §5.0.a / §5.0.b — per-dir crash recovery ─────────────────────────

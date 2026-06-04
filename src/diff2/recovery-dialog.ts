@@ -1,6 +1,11 @@
-// Recovery dialog (DIFF-EDITOR.md §3.2 / §3.2.a).
+// Recovery / exit-TOCTOU dialogs (DIFF-EDITOR.md §3.2 / §3.2.a / §5.0.e).
 //
-// ONE modal, following the proven `prompt(): Promise<choice>` pattern
+// ResumeRecoveryModal — interrupted-session resume (§3.2, reused by §3.2.a).
+// SaveToAltModal       — both vault inputs changed under the session, on `[←]`
+//                        exit (§5.0.e): save the resolution under a fresh name
+//                        (fail-closed on a colliding name) or discard.
+//
+// Both follow the proven `prompt(): Promise<choice>` pattern
 // (PreSyncConflictModal): the promise resolves on `onClose`, default choice is
 // "cancel", explicit button clicks overwrite it before close. MAXIMALLY COMPACT
 // (fit an average phone) yet informative — short labels, no scrolling.
@@ -12,9 +17,15 @@
 //          marks the changed file, and Continue carries the user's edit for the
 //          UNCHANGED side onto the new version (mechanics in the view).
 
-import { App, Modal } from "obsidian";
+import { App, Modal, normalizePath } from "obsidian";
 
 export type ResumeChoice = "continue" | "start-over" | "cancel";
+
+// §5.0.e both-changed save-to-alt result.
+export type SaveAltChoice =
+  | { choice: "save"; name: string }
+  | { choice: "discard" }
+  | { choice: "cancel" };
 
 export interface ResumeInfo {
   basePath: string;
@@ -112,6 +123,90 @@ export class ResumeRecoveryModal extends Modal {
       const cancel = row.createEl("button", { text: "Cancel" });
       cancel.addEventListener("click", () => {
         this.choice = "cancel";
+        this.close();
+      });
+
+      this.open();
+    });
+  }
+}
+
+export interface SaveAltInfo {
+  // Prefill for the name box. §5.0.e seeds it with the conflict's base path so
+  // the user has a sensible starting point to edit.
+  defaultName: string;
+  // Collision predicate (caller: vault.adapter.exists). Save is blocked on a
+  // truthy result — the FAIL-CLOSED invariant "never overwrite a changed
+  // original" (the prefill IS the changed original's path). Async because the
+  // adapter check is.
+  exists: (name: string) => Promise<boolean>;
+}
+
+// §5.0.e — BOTH inputs changed in the vault under the session. The only place
+// the exit asks anything: save the resolution under a fresh name, or discard.
+// An empty / colliding name keeps the modal open with an inline error (so the
+// default action — un-edited Save onto the changed original — can't go through).
+export class SaveToAltModal extends Modal {
+  private result: SaveAltChoice = { choice: "cancel" };
+
+  constructor(
+    app: App,
+    private readonly info: SaveAltInfo,
+  ) {
+    super(app);
+  }
+
+  prompt(): Promise<SaveAltChoice> {
+    return new Promise((resolve) => {
+      this.onClose = () => resolve(this.result);
+      const c = this.contentEl;
+      this.titleEl.setText("Saved files changed — keep your resolution?");
+      c.empty();
+
+      c.createEl("p").setText(
+        "The files you were reconciling changed in the vault since you opened " +
+          "them. Save your resolution under a different name, or discard it. " +
+          "The changed files are left untouched.",
+      );
+
+      const input = c.createEl("input", { type: "text" });
+      input.value = this.info.defaultName;
+      input.style.width = "100%";
+
+      const error = c.createEl("p", { cls: "diff2-recovery-footnote" });
+      error.style.display = "none";
+
+      const showError = (msg: string) => {
+        error.setText(msg);
+        error.style.display = "";
+      };
+
+      const row = c.createDiv({ cls: "modal-button-container" });
+      const save = row.createEl("button", { text: "Save", cls: "mod-cta" });
+      save.addEventListener("click", async () => {
+        const raw = input.value.trim();
+        if (!raw) {
+          showError("Enter a file name.");
+          return;
+        }
+        // normalize AFTER the empty-check (normalizePath("") → "/") so the
+        // collision check and the path commitToAlt writes are the same.
+        const name = normalizePath(raw);
+        if (await this.info.exists(name)) {
+          showError(`"${name}" already exists — choose another name.`);
+          return;
+        }
+        this.result = { choice: "save", name };
+        this.close();
+      });
+      const discard = row.createEl("button", { text: "Discard" });
+      discard.addEventListener("click", () => {
+        this.result = { choice: "discard" };
+        this.close();
+      });
+      const cancel = row.createEl("button", { text: "Cancel" });
+      cancel.addEventListener("click", () => {
+        this.result = { choice: "cancel" };
         this.close();
       });
 
