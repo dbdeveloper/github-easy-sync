@@ -619,8 +619,9 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Show status bar item")
       .setDesc(
-        "Show 'GitHub' label in the status bar (plus the 🔀 conflict counter " +
-          "when there are pending conflicts).",
+        "Show the 'GitHub' status-bar item — it displays the pending-commit " +
+          "count (↑ N) and the open-conflict count (N ⁇), and clicking it opens " +
+          "a menu (Sync / Commit / Open diff-panel / Settings).",
       )
       .addToggle((toggle) => {
         toggle
@@ -648,6 +649,24 @@ export default class GitHubSyncSettingsTab extends PluginSettingTab {
             await this.plugin.saveSettings();
             if (value) this.plugin.showSyncRibbonIcon();
             else this.plugin.hideSyncRibbonIcon();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Show Diff-Panel ribbon button")
+      .setDesc(
+        "Display a separate [Diff-Panel] ribbon button (distinct from Sync). " +
+          "It opens the conflict / deleted / compare views and carries a badge " +
+          "with the number of unresolved conflicts.",
+      )
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.showDiffRibbonButton ?? true)
+          .onChange(async (value) => {
+            this.plugin.settings.showDiffRibbonButton = value;
+            await this.plugin.saveSettings();
+            if (value) this.plugin.showDiffRibbonIcon();
+            else this.plugin.hideDiffRibbonIcon();
           });
       });
 

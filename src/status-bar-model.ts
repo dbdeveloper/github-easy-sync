@@ -116,3 +116,19 @@ export function buildStatusMenu(input: StatusMenuInput): StatusMenuItem[] {
   items.push({ key: "settings", label: "Settings", separatorBefore: true });
   return items;
 }
+
+// ── E3 ribbon tooltips (TODO §8–§9) ──────────────────────────────────
+
+// §8 — the sync ribbon tooltip surfaces the pending-COMMIT count so the badge
+// number's meaning is unambiguous: the SAME N appears on the icon badge and in
+// the hover tooltip (one batch → one commit, so "commits" is honest).
+export function syncTooltip(queueDepth: number): string {
+  if (queueDepth <= 0) return "Sync with GitHub";
+  return `Sync (${queueDepth} commit${queueDepth === 1 ? "" : "s"}) with GitHub`;
+}
+
+// §9 — the diff ribbon tooltip surfaces the open-conflict count, reusing the §7
+// "open-diff" suffix so the tooltip and the menu's "Open diff-panel (N…)" agree.
+export function diffTooltip(conflictCount: number): string {
+  return `Diff-Panel${openDiffSuffix(conflictCount)}`;
+}

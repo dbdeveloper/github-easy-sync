@@ -4,8 +4,10 @@ import { describe, it, expect } from "vitest";
 import {
   CONFLICT_GLYPH,
   buildStatusMenu,
+  diffTooltip,
   statusBarSuffix,
   statusMenuState,
+  syncTooltip,
   type StatusMenuItem,
 } from "../src/status-bar-model";
 
@@ -118,5 +120,18 @@ describe("buildStatusMenu — §7 three states", () => {
     expect(mk(0)).toBe("Open diff-panel");
     expect(mk(1)).toBe("Open diff-panel (1 open conflict)");
     expect(mk(5)).toBe("Open diff-panel (5 open conflicts)");
+  });
+});
+
+describe("ribbon tooltips — §8 sync / §9 diff", () => {
+  it("syncTooltip surfaces the commit count (singular/plural/none)", () => {
+    expect(syncTooltip(0)).toBe("Sync with GitHub");
+    expect(syncTooltip(1)).toBe("Sync (1 commit) with GitHub");
+    expect(syncTooltip(3)).toBe("Sync (3 commits) with GitHub");
+  });
+  it("diffTooltip surfaces the open-conflict count (matches the menu suffix)", () => {
+    expect(diffTooltip(0)).toBe("Diff-Panel");
+    expect(diffTooltip(1)).toBe("Diff-Panel (1 open conflict)");
+    expect(diffTooltip(5)).toBe("Diff-Panel (5 open conflicts)");
   });
 });

@@ -55,6 +55,9 @@ export interface GitHubSyncSettings {
   //   - syncStartsWithCommit:false + this:false → unusable shape;
   //     Settings tab surfaces a warning.
   showCommitRibbonButton?: boolean;
+  // E3 (R2.7.4) — separate diff-panel ribbon icon (conflict-count badge +
+  // always-available Conflicts/Deleted/Compare entry). Default ON.
+  showDiffRibbonButton?: boolean;
 
   enableLogging: boolean;
 
@@ -177,6 +180,7 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
   showStatusBarItem: true,
   showSyncRibbonButton: true,
   showCommitRibbonButton: false,
+  showDiffRibbonButton: true,
   enableLogging: false,
   consolidateCommits: false,
   deviceLabel: "Obsidian",

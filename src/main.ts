@@ -10,6 +10,7 @@ import {
   Plugin,
   WorkspaceLeaf,
   Notice,
+  setTooltip,
 } from "obsidian";
 import { GitHubSyncSettings, DEFAULT_SETTINGS } from "./settings/settings";
 import GitHubSyncSettingsTab from "./settings/tab";
@@ -31,8 +32,10 @@ import { ConflictCounter } from "./sync2/conflict-counter";
 import { ConflictWatcher } from "./sync2/conflict-watcher";
 import {
   buildStatusMenu,
+  diffTooltip,
   statusBarSuffix,
   statusMenuState,
+  syncTooltip,
   type MenuActionKey,
 } from "./status-bar-model";
 import WorkerClient from "./worker/worker-client";
@@ -187,6 +190,11 @@ export default class GitHubSyncPlugin extends Plugin {
   // hidden but [Commit] is shown, the user still sees the queue
   // depth on the icon they CAN see. See refreshRibbonPendingBatchesBadge.
   commitRibbonPendingBatchesBadge: HTMLElement | null = null;
+  // E3 (R2.7.4) — separate diff-panel ribbon icon + its own conflict-count
+  // badge (red; unresolved conflicts). Independent of the sync/commit badge
+  // routing — green=outgoing commits, red=conflicts needing attention.
+  diffRibbonIcon: HTMLElement | null = null;
+  diffRibbonConflictBadge: HTMLElement | null = null;
   // 2.0.2-beta2: latest known queue depth, kept here so a settings
   // toggle that hides one icon and shows another can repaint the
   // badge without re-querying the on-disk queue.
@@ -312,6 +320,8 @@ export default class GitHubSyncPlugin extends Plugin {
         if (this.settings.showSyncRibbonButton) this.showSyncRibbonIcon();
         if (this.settings.showCommitRibbonButton)
           this.showCommitRibbonIcon();
+        if (this.settings.showDiffRibbonButton ?? true)
+          this.showDiffRibbonIcon();
 
         // Delay BOTH the interval scheduler AND the startup sync past the
         // STARTUP_SYNC_DELAY_MS window — so NO timer (periodic tick, watchdog,
@@ -1218,6 +1228,7 @@ export default class GitHubSyncPlugin extends Plugin {
   // (E3, R2.7.4) will carry the conflict badge.
   refreshConflictUI(): void {
     this.updateStatusBarItem();
+    this.refreshDiffRibbonBadge();
   }
 
   // Subtle absolute-positioned numeric pill in a ribbon icon's
@@ -1260,6 +1271,9 @@ export default class GitHubSyncPlugin extends Plugin {
   // call on every settings toggle.
   private applyPendingBatchesBadge(): void {
     const depth = this.currentQueueDepth;
+    // E3 (§8) — keep the sync icon's tooltip showing the commit count (same N as
+    // the badge), so hovering explains the number. Runs on every depth change.
+    if (this.syncRibbonIcon) setTooltip(this.syncRibbonIcon, syncTooltip(depth));
     // Pick the target icon per the routing rule. The chosen icon
     // owns the badge; the other gets cleared.
     let target: HTMLElement | null = null;
@@ -1298,7 +1312,7 @@ export default class GitHubSyncPlugin extends Plugin {
         ? this.ribbonPendingBatchesBadge
         : this.commitRibbonPendingBatchesBadge;
     const badge =
-      existing ?? this.createPendingBatchesBadgeOn(target);
+      existing ?? this.createRibbonBadgeOn(target);
     if (targetField === "sync") {
       this.ribbonPendingBatchesBadge = badge;
     } else {
@@ -1314,7 +1328,10 @@ export default class GitHubSyncPlugin extends Plugin {
   // 2.0.2-beta2: build the absolute-positioned numeric pill node.
   // Style stays inline here so the same look applies whether the
   // host is [Sync] or [Commit].
-  private createPendingBatchesBadgeOn(parent: HTMLElement): HTMLElement {
+  private createRibbonBadgeOn(
+    parent: HTMLElement,
+    bg = "var(--color-green, #16a34a)",
+  ): HTMLElement {
     const el = parent.createSpan({
       cls: "github-easy-sync-ribbon-pending-batches-badge",
     });
@@ -1325,7 +1342,7 @@ export default class GitHubSyncPlugin extends Plugin {
     el.style.height = "14px";
     el.style.padding = "0 3px";
     el.style.borderRadius = "7px";
-    el.style.background = "var(--color-green, #16a34a)";
+    el.style.background = bg;
     el.style.color = "white";
     el.style.fontSize = "10px";
     el.style.lineHeight = "14px";
@@ -1527,6 +1544,54 @@ export default class GitHubSyncPlugin extends Plugin {
     this.commitRibbonIcon = null;
     // 2.0.2-beta2: ensure no stale badge sticks around.
     this.applyPendingBatchesBadge();
+  }
+
+  // ── diff-panel ribbon (E3, R2.7.4 / TODO §9) ─────────────────────────
+
+  // Separate ribbon icon (NOT the sync icon) — always-available entry to the
+  // diff-panel (Conflicts / Deleted / Compare), independent of whether there
+  // are conflicts. Carries a red conflict-count badge + a count-aware tooltip.
+  showDiffRibbonIcon(): void {
+    if (this.diffRibbonIcon) return;
+    this.diffRibbonIcon = this.addRibbonIcon(
+      "git-merge", // distinct from the sync icon's refresh-cw
+      diffTooltip(this.conflictCounter?.getValue() ?? 0),
+      () => void this.activateDiffEditView(),
+    );
+    // Seed badge + tooltip on creation (correct on a cold onload AND when the
+    // settings toggle creates this icon mid-session — ConflictCounter is live).
+    this.refreshDiffRibbonBadge();
+  }
+
+  hideDiffRibbonIcon(): void {
+    this.diffRibbonConflictBadge?.remove();
+    this.diffRibbonConflictBadge = null;
+    this.diffRibbonIcon?.remove();
+    this.diffRibbonIcon = null;
+  }
+
+  // Repaint the diff icon's conflict badge + tooltip. The ICON stays visible at
+  // 0 conflicts (its value is Deleted/Compare access, R2.7.4) — only the badge
+  // is removed. Called from refreshConflictUI (ConflictCounter subscribe).
+  private refreshDiffRibbonBadge(): void {
+    const icon = this.diffRibbonIcon;
+    if (!icon) return;
+    const count = this.conflictCounter?.getValue() ?? 0;
+    setTooltip(icon, diffTooltip(count)); // tooltip tracks the count even at 0
+    if (count <= 0) {
+      this.diffRibbonConflictBadge?.remove();
+      this.diffRibbonConflictBadge = null;
+      return;
+    }
+    if (!this.diffRibbonConflictBadge) {
+      this.diffRibbonConflictBadge = this.createRibbonBadgeOn(
+        icon,
+        // red — conflicts need attention (mirrors the pending badge's
+        // --color-green; --color-red is the background-intent token + hex fallback).
+        "var(--color-red, #dc2626)",
+      );
+    }
+    this.diffRibbonConflictBadge.setText(String(count));
   }
 
   // Click handler for [Commit]: enqueue local changes to .push-queue

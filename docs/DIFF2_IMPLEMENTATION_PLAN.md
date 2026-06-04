@@ -800,11 +800,18 @@ high-value surfaces) → **E5 → E4 → E6** (deep-link + triggers). E2 НЕ з
   пробіл). **+ TODO §10** (окремо, у тому ж commit): заголовок Settings зверху —
   «{name} {version} ([repo]({authorUrl}))» з `manifest.json` (`settings/tab.ts` `display()`).
 
-- **E3 — Ribbon + tooltips (TODO §8-9, R2.7.4).** diff-іконка (badge=conflicts, tooltip
-  «Diff-Panel (N open conflicts)») + `showDiffRibbonButton` toggle (default ON); sync-tooltip →
-  «Sync (N commits) with GitHub» (N>0). **Перевірка:** badge/tooltip/icon усі читають ОДИН
-  `currentQueueDepth`; batch==commit у цьому рушії (один batch → один commit) → tooltip не бреше.
-  Тестоване ядро: tooltip-формат (pure).
+- **E3 — Ribbon + tooltips (TODO §8-9, R2.7.4). ✅ DONE (2026-06-05).** Pure `syncTooltip(depth)`
+  + `diffTooltip(count)` (status-bar-model.ts, реюз `openDiffSuffix`; tests 2). main.ts:
+  `showDiffRibbonIcon` (`git-merge`, відмінна від sync `refresh-cw`) → `activateDiffEditView`;
+  **окреме** поле `diffRibbonConflictBadge` (червоний `--text-error`, count≤0→badge геть, **іконка
+  лишається** R2.7.4) — `createPendingBatchesBadgeOn`→узагальнено `createRibbonBadgeOn(parent, bg)`
+  (green=outgoing / red=conflicts); `refreshDiffRibbonBadge` з `refreshConflictUI` (піггібек,
+  seed-at-creation для live-toggle); sync-tooltip у `applyPendingBatchesBadge`. Tooltip через
+  **`setTooltip(el, text)`** (нативний obsidian-API, перший ужиток; не setAttribute). onload-gating
+  `showDiffRibbonButton ?? true`. **settings:** `showDiffRibbonButton:boolean`=true; tab.ts toggle
+  **«Show Diff-Panel ribbon button»** (Interface) + **fix** «Show status bar item» desc (прибрано
+  старий 🔀, описано E2 «(↑ N | M ⁇)» + клік-меню). badge/tooltip/icon з одного `currentQueueDepth`/
+  `conflictCounter` → не розходяться.
 
 - **E5 — deep-link.** `activateDiffEditView(path?)` + `DiffEditView.openConflict(path)`
   (path→ConflictEntry→mount detail). Foundation під E4/E6. Тестоване ядро: path→entry resolution.
