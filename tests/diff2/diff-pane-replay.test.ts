@@ -93,7 +93,10 @@ describe("DiffPane.replayFrom — §3.3 (W4a)", () => {
     const sibling = "x\nTHEIRS\ny\nZZZ\n";
     const { jsonl, liveResolved } = recordJsonl(base, sibling, (pane, view) => {
       pane.resolveAll("theirs");
-      // a free edit on top of the resolution
+      // a free edit on top of the resolution. TODO §9 — resolveAll now parks the
+      // caret at the first resolved group; a real free edit happens AT the caret
+      // (growIndexFor reads selection.main.head), so click at 0 THEN type.
+      view.dispatch({ selection: { anchor: 0 } });
       view.dispatch({ changes: { from: 0, insert: "HEADER\n" } });
     });
 

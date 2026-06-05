@@ -108,6 +108,21 @@ describe("ConflictWatcher (counter-only listener)", () => {
     expect(f.markDirty).not.toHaveBeenCalled();
   });
 
+  it("handle(): SYNTHETIC sibling path (no store record) → markDirty called (TODO #7)", async () => {
+    await f.store.load();
+    const watcher = new ConflictWatcher({
+      vault: f.vault as unknown as import("obsidian").Vault,
+      store: f.store,
+      counter: f.conflictCounter,
+    });
+
+    // A `*.conflict-from-*` sibling the store does NOT know about — without the
+    // synthetic check the badge would stay stale vs the diff-panel.
+    watcher.handle("Notes/note.conflict-from-Phone-2026-06-05T00-00-00Z.md");
+
+    expect(f.markDirty).toHaveBeenCalledTimes(1);
+  });
+
   it("handle(): base path with active conflict → markDirty called", async () => {
     writeVaultFile(f.root, "Notes/note.md", "local\n");
     await f.store.load();

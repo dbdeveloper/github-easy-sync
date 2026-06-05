@@ -141,6 +141,30 @@ describe("ConflictCounter", () => {
     expect(f.counter.getValue()).toBe(1);
   });
 
+  it("TODO #7 — injected countConflicts OVERRIDES the store-only walk", async () => {
+    // main.ts wires this to findAllConflicts().entries.length so the badge counts
+    // tracked + SYNTHETIC siblings. Here a spy returns a fixed value; the counter
+    // must use it and ignore the (empty) store.
+    const scheduler = makeScheduler();
+    let synthetic = 4;
+    const counter = new ConflictCounter({
+      vault: f.vault as unknown as import("obsidian").Vault,
+      store: f.store, // empty store → store-only walk would give 0
+      scheduleMicrotask: scheduler.schedule,
+      countConflicts: () => synthetic,
+    });
+    await f.store.load();
+
+    counter.markDirty();
+    await counter.flush();
+    expect(counter.getValue()).toBe(4); // injected, not the store's 0
+
+    synthetic = 7; // a new synthetic sibling appeared
+    counter.markDirty();
+    await counter.flush();
+    expect(counter.getValue()).toBe(7);
+  });
+
   // ─── subscribe semantics ────────────────────────────────────────────
 
   it("subscribe callback fires only on a value CHANGE, never on a no-op recompute", async () => {

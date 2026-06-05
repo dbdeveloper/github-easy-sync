@@ -188,7 +188,14 @@ describe("undo-after-replay — Ctrl+Z walks the per-block trajectory (§2.3/§3
     const { blocks } = record(BASE, SIB, (pane, view) => {
       view.dispatch({ changes: { from: 1, insert: "Z" } }); // free edit
       pane.applyToChunk(1, "theirs"); // chunk action (setDiffPaneState)
-      view.dispatch({ changes: { from: 0, insert: "Q" } }); // free edit
+      // TODO §9 — after a chunk action the caret now lands at the resolved
+      // group, not 0,0. Real free edits ALWAYS occur at the caret (collapseGuard
+      // → growIndexFor reads selection.main.head), so model that: click at 0,
+      // THEN type. (A docChanged edit whose position ≠ caret would mis-tile —
+      // but no production path does that; this used to "pass" only because the
+      // chunk action left the caret at 0.)
+      view.dispatch({ selection: { anchor: 0 } });
+      view.dispatch({ changes: { from: 0, insert: "Q" } }); // free edit at caret
     });
     expect(blocks.length).toBeGreaterThanOrEqual(3);
 

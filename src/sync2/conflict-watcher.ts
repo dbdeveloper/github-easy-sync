@@ -84,10 +84,18 @@ export class ConflictWatcher {
     this.counter.markDirty();
   }
 
-  // O(1) fast-path: is `path` either a base file with active
-  // conflicts OR a known sibling? Both checks go through
-  // ConflictStore's in-memory indexes — no disk I/O.
+  // O(1) fast-path: is `path` either a base file with active conflicts, a known
+  // (tracked) sibling, OR a `*.conflict-from-*` sibling that the store does NOT
+  // know about (a SYNTHETIC conflict — TODO #7)? The store checks use its
+  // in-memory indexes; the synthetic check is a cheap substring on the name.
+  // Without the synthetic check, creating/deleting a synthetic sibling (e.g. the
+  // user moves a conflict pair into a new folder, or deletes a synthetic sibling)
+  // would not re-fire the counter, leaving the badge stale vs the diff-panel.
   private isRelevant(path: string): boolean {
-    return this.store.hasPending(path) || this.store.hasSibling(path);
+    return (
+      this.store.hasPending(path) ||
+      this.store.hasSibling(path) ||
+      path.includes(".conflict-from-")
+    );
   }
 }

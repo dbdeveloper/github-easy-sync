@@ -62,6 +62,23 @@ describe("DiffPane actions (1b.1 model)", () => {
     });
   });
 
+  describe("TODO §9 — caret lands at the resolved group, not 0,0", () => {
+    it("applyToChunk parks the caret at the START of the resolved line", () => {
+      pane = new DiffPane(container, "common\nMINE\ntail\n", "common\nTHEIRS\ntail\n");
+      const view = pane.getView();
+      view.requestMeasure();
+      view.dispatch({ selection: { anchor: 0 } }); // caret elsewhere first
+
+      pane.applyToChunk(0, "ours"); // resolve the only group to ver1
+
+      const head = view.state.selection.main.head;
+      expect(head).not.toBe(0); // NOT dumped at 0,0
+      const line = view.state.doc.lineAt(head);
+      expect(line.text).toBe("MINE"); // sits on the resolved line…
+      expect(head).toBe(line.from); // …at column 0
+    });
+  });
+
   describe("applyToChunk", () => {
     it("ours: resolves the group to ver1, drops markers", () => {
       pane = new DiffPane(

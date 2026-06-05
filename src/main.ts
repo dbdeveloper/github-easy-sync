@@ -46,6 +46,7 @@ import { sweepOnload as trashSweepOnload } from "./diff2/trash-recovery";
 import { recoverAutosaveDirs } from "./diff2/onload-recovery";
 import { setAutosaveRoot } from "./diff2/autosave-store";
 import { DiffEditView, DIFF2_EDIT_VIEW_TYPE } from "./diff2/diff-edit-view";
+import { findAllConflicts } from "./diff2/synthetic-detector";
 import { TokenExpiredModal } from "./sync2/views/token-expired-modal";
 import { CancelSyncModal } from "./sync2/views/cancel-sync-modal";
 import { AuthError } from "./errors";
@@ -881,6 +882,12 @@ export default class GitHubSyncPlugin extends Plugin {
     const conflictCounter = new ConflictCounter({
       vault: this.app.vault,
       store: conflictStore,
+      // TODO #7 — count EXACTLY what the diff-panel lists (tracked + synthetic
+      // siblings) so the ribbon badge / status bar / menu can't undercount. Same
+      // source as the panel (findAllConflicts); main.ts bridges sync2's counter
+      // to diff2's detector so neither module imports across the layer boundary.
+      countConflicts: () =>
+        findAllConflicts(this.app.vault, conflictStore).entries.length,
     });
     conflictCounter.subscribe(() => this.refreshConflictUI());
     this.conflictCounter = conflictCounter;

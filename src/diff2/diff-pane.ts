@@ -232,9 +232,11 @@ export class DiffPane {
     this.recording = true;
   }
 
-  // Resolve ONE diff group. Public API for marker-widget action buttons.
+  // Resolve ONE diff group. Public API for marker-widget action buttons + the
+  // hotkeys (both routes land here).
   applyToChunk(group: number, choice: ChunkChoice): void {
-    const items = currentItems(this.modelNow());
+    const model = this.modelNow();
+    const items = currentItems(model);
     const resolved = resolveGroupInItems(
       items,
       group,
@@ -242,14 +244,52 @@ export class DiffPane {
       this.opts.joinContext,
     );
     if (!resolved) return; // group not found / not a diff
+    // TODO §9 — land the caret at the START of the resolved text instead of
+    // letting the full-doc replace collapse it to 0,0. The group occupied
+    // [groupStart, …]; the text BEFORE it is unchanged, so the resolved content
+    // begins at the same offset in the new doc (clamped in dispatchModel for the
+    // "neither"/shorter cases).
+    const groupStart = model.structure
+      .filter((s) => s.group === group)
+      .reduce((min, s) => Math.min(min, s.from), Infinity);
     this.dispatchModel(relayout(resolved));
+    // TODO §9 — position the caret in a SEPARATE selection-only transaction.
+    // Folding it into the chunk-action dispatch perturbed the filter pipeline
+    // (collapseGuard re-tiling) and changed the RECORDED block, breaking
+    // replay/undo. A selection-only tx is not recorded (no doc/structure change)
+    // and leaves the history block untouched.
+    //
+    // Subtlety: the caret position DOES influence the structure recorded for the
+    // user's NEXT free edit (collapseGuard → growIndexFor reads selection.main.
+    // head → mapStructure grows that segment). That is correct — real edits land
+    // at the caret. Replay is unaffected: it sets structure DIRECTLY via
+    // setDiffPaneState and never re-runs growIndexFor, so it is faithful
+    // regardless of where the caret sat at record time.
+    if (Number.isFinite(groupStart)) {
+      const pos = Math.max(0, Math.min(groupStart, this.view.state.doc.length));
+      this.view.dispatch({ selection: { anchor: pos } });
+    }
   }
 
   // Resolve EVERY diff group with one choice (toolbar bulk actions).
   resolveAll(choice: ChunkChoice): void {
-    const items = currentItems(this.modelNow());
+    const model = this.modelNow();
+    const items = currentItems(model);
     const resolved = resolveAllItems(items, choice, this.opts.joinContext);
+    // TODO §9 — bulk-resolve parks the caret at the FIRST resolved conflict's
+    // start (the earliest ver segment), not 0,0. Separate selection-only tx, see
+    // applyToChunk.
+    const firstGroupStart = model.structure
+      .filter((s) => s.role !== "normal")
+      .reduce((min, s) => Math.min(min, s.from), Infinity);
     this.dispatchModel(relayout(resolved));
+    if (Number.isFinite(firstGroupStart)) {
+      const pos = Math.max(
+        0,
+        Math.min(firstGroupStart, this.view.state.doc.length),
+      );
+      this.view.dispatch({ selection: { anchor: pos } });
+    }
   }
 
   // Commit-side reconstruction (DIFF-EDITOR.md §5.0 Step 2 will split

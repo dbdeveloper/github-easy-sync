@@ -70,7 +70,7 @@ export function renderConflictsToolbar(
 
   const applyBtn = middle.createEl("button", {
     cls: "diff2-btn diff2-btn-apply-remote",
-    text: "Keep all GREEN changes",
+    text: "Apply all GREEN changes",
   });
   applyBtn.title = `Apply all remote (${labels.remoteLabel}) changes`;
   applyBtn.addEventListener("click", () => callbacks.onApplyAllRemote());

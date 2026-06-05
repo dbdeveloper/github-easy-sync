@@ -237,6 +237,77 @@
 
    8. В normal-strings - глів `↵` не малювати. Я не побачив у ньому якусь користь. Малюємо тільки в ver1/ver2-блоках 
       кольором номерів рядків і +/- в glitter
-7. Підрахунок конфліктів в іконках і меню (3) - підраховує тільки tracked conflicts і не враховують synthetic, тоді як
+7. ✅ ВИПРАВЛЕНО (2026-06-05). Підрахунок конфліктів в іконках і меню (3) - підраховує тільки tracked conflicts і не враховують synthetic, тоді як
    в diff-panel їх може бути більше і це може конфузити користувача.
+
+   **Root cause:** `ConflictCounter.computeCount` (sync2) ітерував лише `store.getAll()` (tracked), а diff-panel —
+   `findAllConflicts(vault, store)` (diff2), що повертає tracked **+ synthetic** (`*.conflict-from-*` siblings без
+   record). Лічильник годує ribbon-badge + status-bar + меню → вони недораховували. **Обмеження:** sync2 НЕ сміє
+   імпортити diff2 (CLAUDE.md), а `findAllConflicts`/`parseSiblingFilename` — у diff2.
+   **Fix (ін'єкція через main.ts — поважає шар):**
+   - `conflict-counter.ts`: опціональний `countConflicts?: () => number` у deps; `computeCount` використовує його якщо
+     заданий (інакше — стара store-логіка, для тестів). `main.ts` передає
+     `() => findAllConflicts(vault, store).entries.length` → count **==** diff-panel.
+   - `conflict-watcher.ts`: `isRelevant` += `path.includes(".conflict-from-")` — інакше створення/видалення SYNTHETIC
+     sibling (юзер перемістив пару в нову теку / видалив synthetic) НЕ тригерило recompute → badge ставав stale.
+   **Тести:** `conflict-counter.test.ts` (injected countConflicts override), `conflict-watcher.test.ts` (synthetic-path →
+   markDirty). **1383 unit + build зелені.** drain-логіка (`consumeSweepRequest`) не зачеплена — count і sweep незалежні.
+
 8. ESC закриває diff-editor — це неприпустимо! З клавіатури закривати це вікно... поки що взагалі НЕ БУДЕМО. 
+
+9. ✅ ВИПРАВЛЕНО (2026-06-05, підтверджено на реальному файлі). Цікаве спостереження: коли розв'язуєш конфлікт через кнопки чи hotkey (Ctrl+Enter, наприклад) - збивається позиція
+   курсора. Він знову вказує на позицію 0,0. А (на мою думку), мав би вказувати) або на той самий символ де стояв до
+   вирішення конфлікту, або (навпевне краще і легше реалізувати) - на перший символ вирішеного конфлікту. Тобто:
+   1. якщо конфлікт вирішено на користь ver1-block -тоді стояти в позиції 0 першого нормального рядка, отриманого з ver1
+   2. якщо конфлікт вирішено на користь ver2-block -тоді стояти в позиції 0 першого нормального рядка, отриманого з ver2
+   3. якщо конфлікт вирішено на користь apply both чи join  - те ж що і п.9.1
+   4. якщо конфлікт виріщено на користь delete both - тоді на позиції 0 першого нормального рядка ЗА вирішеним методом 
+      видалення diff-string
+
+   **РЕАЛІЗОВАНО (з /advisor).** Курсор → **початок вирішеної групи** (offset першого сегмента групи; текст ДО групи
+   незмінний → offset зберігається в новому doc; clamp). Це покриває всі підпункти 9.1-9.4 одним правилом (початок
+   вирішеного контенту). `diff-pane.ts`:
+   - `applyToChunk` (per-chunk: marker `[Keep]`/`[Apply]`-кнопки + hotkeys) — курсор на `min(from)` сегментів групи.
+   - `resolveAll` (bulk toolbar `Keep all RED/GREEN`) — курсор на ПЕРШУ вирішену групу (`min from` усіх ver-сегментів).
+   - **Окрема selection-only транзакція** ПІСЛЯ `dispatchModel`: inline-selection збурював filter-pipeline (collapseGuard
+     re-tiling) і міняв ЗАПИСАНИЙ блок. **Insight (advisor):** структура в history-блоці залежить від курсора при record
+     (collapseGuard→growIndexFor→mapStructure), АЛЕ replay ставить структуру НАПРЯМУ через setDiffPaneState і не
+     перезапускає growIndexFor → replay faithful незалежно від курсора.
+   - **Safety-check (advisor):** жодна production docChanged-без-setDiffPaneState транзакція не диспатчиться НЕ на
+     курсорі (free-typing/paste — на курсорі; `normalizeGuard` редагує `left.to`, але collapseGuard бере oldHead
+     **усередині** `left` → той самий сегмент). Тести `history-replay`/`diff-pane-replay` оновлено на click-then-type
+     (реалістично: edit завжди на курсорі). **1384 unit + build зелені.**
+10. Ця ж проблема є і при UNDO/REDO цих розв'язків. Курсор веде себе безладно, і часто знову опиняється в позиції 0,0.
+    Потрібно продумати якесь чітке правило, як це має працювати. Наприклад:
+    При Undo такого блоку ставати на останній символ цього блоку, а якщо REDO - на перший символ блоку? Чи там якісь 
+    інші проблеми виникають?
+11. Пошук змін між фрагментами ver1/ver2 працює не точно. Дивись приклад:
+    ![приклад некоректного sub-diff в межах одного diff-string (ver1-block vs ver2-block)](./imgs/bug-8.png)
+    наприклад:
+    - в ver1 маємо рядок `26 -    "syncConfigDir": True,"`
+    - в ver2 маємо рядок `26 -    "syncConfigDir": true,"`
+    Виділено в ver1 УСЕ СЛОВО "True", а в ver2 - УСЕ СЛОВО "true", однак між цими двома рядками різниця тільки на
+    одну букву! - "Т" vs "t"!  Чи можна налаштувати цей алгоритм виявлення змін так, щоб він точніше визначав 
+    різницю між рядками?
+    Ще один приклад з цього ж скриншоту:
+    - в ver1 маємо рядок `27 -    "autoCanonicalizeTextFiles": false"`
+    - в ver2 маємо рядок `27 -    "autoCanonicalizeTextFiles": true"`
+    Різниця в "fals" vs "tru" (фінальне "e" в них спільне). Однак тут ще дивніша ситуація, бо до цих змінених зон
+    чомусь ще й потрапив гліф `↵`.
+12. Хочу напис на кнопці в diff-string (`==== ... [ Join ({remote deviceLabel}) ]`) замінити на коротшу: `[ Join ↓↓ ]`  
+13. вирішення конфлікту через `[join]` створює такий рядок: (див. [скриншот](./imgs/bug-9.png)):
+    ```
+    > Changes from `VladPixel 6 Pro` at `2026-06-05T10-31-30Z`:
+    >
+    >     "githubOwner": "dbdeveloper",
+    >     "githubRepo": "dbdeveloper",
+    ```
+    я б хотів внести певні зміни:
+    1. забрати порожній другий рядок (якщо фізично він буде присутній в ver2, тоді й з'явиться).
+    2. дату писати не в ``, а як нормальну дату: 
+    ```
+    > Changes from `VladPixel 6 Pro` at 2026-06-05 10:31:30:
+    >     "githubOwner": "dbdeveloper",
+    >     "githubRepo": "dbdeveloper",
+    ```
+     

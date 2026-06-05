@@ -45,6 +45,13 @@ export interface ConflictCounterDeps {
   // Override microtask scheduler for deterministic tests (default
   // queueMicrotask). Tests inject a synchronous flushable scheduler.
   scheduleMicrotask?: (fn: () => void) => void;
+  // TODO #7 — override the count formula. When provided (main.ts wires it to
+  // the diff-panel's findAllConflicts), the badge/status-bar/menu count matches
+  // EXACTLY what the diff-panel lists — tracked AND SYNTHETIC siblings — instead
+  // of only the store's tracked records. Kept as an injected callback so this
+  // sync2 module never imports the diff2 detector (the sync2 ↛ diff2 rule). The
+  // default (no override) is the store-only count, used by the unit suite.
+  countConflicts?: () => number;
 }
 
 export type CountChangeCallback = (count: number) => void;
@@ -53,6 +60,7 @@ export class ConflictCounter {
   private readonly vault: Vault;
   private readonly store: ConflictStore;
   private readonly scheduleMicrotask: (fn: () => void) => void;
+  private readonly countConflicts?: () => number;
 
   private cachedValue: number = 0;
   private dirty: boolean = false;
@@ -78,6 +86,7 @@ export class ConflictCounter {
     this.store = deps.store;
     this.scheduleMicrotask =
       deps.scheduleMicrotask ?? ((fn) => queueMicrotask(fn));
+    this.countConflicts = deps.countConflicts;
   }
 
   // O(1). Sets the dirty flag (for UI counter recompute) AND the
@@ -179,6 +188,10 @@ export class ConflictCounter {
   }
 
   private async computeCount(): Promise<number> {
+    // TODO #7 — when wired (main.ts), count EXACTLY what the diff-panel lists
+    // (tracked + synthetic siblings, via findAllConflicts) so the badge / status
+    // bar / menu can't undercount. The store-only walk below is the default.
+    if (this.countConflicts) return this.countConflicts();
     let count = 0;
     for (const record of this.store.getAll()) {
       const siblingExists = await this.vault.adapter.exists(
