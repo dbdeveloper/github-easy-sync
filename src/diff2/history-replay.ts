@@ -83,11 +83,41 @@ export function replayHistory(startState: EditorState, jsonl: string): ReplayRes
   const { blocks, stoppedAtCorrupt } = scanHistory(jsonl);
   let state = startState;
   for (const block of blocks) {
+    const cs = ChangeSet.fromJSON(block.change);
+    // TODO #10 — give each replayed block a SYNTHETIC caret so post-recovery
+    // undo/redo doesn't dump the cursor at 0,0. Rule (user): land at the char
+    // right after the change (`toB`); if that char is a newline, drop to column
+    // 0 of the next line. Derived from the change alone — no caret is stored in
+    // the block (keeps the §2.6 format + checksum untouched, so a cursor value
+    // can never affect crash-recovery trustworthiness). A chunk action is a
+    // full-doc replace, so its `toB` is the doc end — deterministic, not 0,0.
     state = state.update({
-      changes: ChangeSet.fromJSON(block.change),
+      changes: cs,
+      selection: { anchor: syntheticCaret(cs, cs.apply(state.doc)) },
       effects: setDiffPaneState.of({ structure: block.structure, opts, activeEmptyVer: null }),
       annotations: replayDispatch.of(true),
     }).state;
   }
   return { state, replayed: blocks.length, stoppedAtCorrupt };
+}
+
+// #10 — the synthetic caret offset for a replayed change: the position just
+// after the LAST changed region (`toB`), nudged past a trailing newline to
+// column 0 of the next line. Clamped to the new doc. Empty change → 0.
+function syntheticCaret(
+  change: ChangeSet,
+  newDoc: import("@codemirror/state").Text,
+): number {
+  let pos = 0;
+  let saw = false;
+  change.iterChanges((_fromA, _toA, _fromB, toB) => {
+    saw = true;
+    pos = toB;
+  });
+  if (!saw) return 0;
+  pos = Math.max(0, Math.min(pos, newDoc.length));
+  if (pos < newDoc.length && newDoc.sliceString(pos, pos + 1) === "\n") {
+    pos += 1; // next char is \n → column 0 of the next line
+  }
+  return pos;
 }

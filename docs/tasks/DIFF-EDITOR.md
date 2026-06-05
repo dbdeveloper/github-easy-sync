@@ -2061,7 +2061,9 @@ vault-файли змінились під сесією (`SHA(side) ≠ meta`):
    b. JSON.parse(line) → block; if fails → "corrupt", break
    c. Validate: recompute(block.change) === block.sum; if false → break
    d. ChangeSet.fromJSON(view.state, block.change) → cs
-   e. view.dispatch(view.state.update({changes: cs, sequential: true}))
+   e. view.dispatch(view.state.update({changes: cs, selection: SYNTHETIC, ...}))
+      — SYNTHETIC = syntheticCaret(cs) (§3.3.a / TODO #10): кожен replayed-блок
+      дістає курсор, тож після recovery undo/redo не падає в 0,0.
 5. If reached EOF без corrupt → "all N edits restored"
 6. If stopped mid-stream (corrupt block K) → "recovered K of N edits"
    - Show non-blocking Notice
@@ -2078,6 +2080,30 @@ vault-файли змінились під сесією (`SHA(side) ≠ meta`):
 **Чому `view.dispatch` (не direct state mutation):** dispatch автоматично пише
 undoable step у CM6 historyField. Після replay історія undo така ж, як перед
 crash — `Ctrl+Z` йде назад послідовно.
+
+#### §3.3.a Synthetic caret per replayed block (TODO #10)
+
+Блоки `history.jsonl` НЕ зберігають позицію курсора (формат §2.6 + checksum
+свідомо лишаються лише про `change`+`structure` — косметичне значення курсора
+не сміє труїти crash-recovery довіру, яку гартує §5; битий/відсутній курсор
+має деградувати до 0, ніколи не зупиняти replay). Тому кожен replayed-блок
+дістає **синтетичний** курсор, деривований з самого `change`:
+
+- **`syntheticCaret(cs, newDoc)`** = позиція одразу ПІСЛЯ останньої зміненої
+  ділянки (`toB`); якщо там `\n` → 0-та позиція наступного рядка (`toB+1`).
+  Порожній change → 0.
+- Курсор кладеться у `selection` тієї ж replay-транзакції → потрапляє у CM6-undo-
+  стек (кожен `state.update` = крок). Тож після recovery: **REDO** → синтетична
+  позиція, **UNDO** → selection попереднього кроку. Більше нема «безладного 0,0».
+- **Фінальний** курсор: `cursor.json` (primary, крок 7 / §2.9) перекриває
+  синтетичний останнього блоку; якщо `cursor.json` нема/невалідний — лишається
+  синтетичний (fallback: «курсор зупиняється після останньої зміни, де б вона не
+  була»).
+- Chunk-action (резолюція) = full-doc-replace → `toB` = кінець doc (детерміновано;
+  НЕ resolved-group як у живому #9 — наслідок derive-from-change підходу).
+
+Oracle (`history-replay.test.ts`): undo-after-replay перевіряє doc+structure+
+**`selection.main.head`** через всю траєкторію (`replay N → undo k == replay N−k`).
 
 ### §3.4 Start over — wipe + fresh
 

@@ -202,13 +202,20 @@ describe("undo-after-replay — Ctrl+Z walks the per-block trajectory (§2.3/§3
     const full = replayHistory(replayStartState(BASE, SIB), toJsonl(blocks));
     const view = new EditorView({ state: full.state });
 
-    // Undo step-by-step; after k undos the state must equal replay of N-k blocks.
+    // Undo step-by-step; after k undos the state must equal replay of N-k blocks
+    // — doc, structure, resolved, AND the caret (TODO #10: the synthetic caret
+    // set during replay lands in the CM6 undo stack, so undo restores it).
     for (let k = 1; k <= blocks.length; k++) {
       expect(undo(view)).toBe(true);
       const oracle = replayHistory(replayStartState(BASE, SIB), toJsonl(blocks.slice(0, blocks.length - k)));
       expect(view.state.doc.toString()).toBe(oracle.state.doc.toString());
       expect(structOf(view.state)).toEqual(structOf(oracle.state));
       expect(resolvedOf(view.state)).toEqual(resolvedOf(oracle.state));
+      // #10 oracle: undoing past block (N-k) shows the caret as it was AFTER
+      // block (N-k-1) — exactly what replay of (N-k) blocks ends on.
+      expect(view.state.selection.main.head).toBe(
+        oracle.state.selection.main.head,
+      );
     }
     view.destroy();
   });
