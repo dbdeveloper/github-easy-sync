@@ -28,7 +28,7 @@
 //   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R2.7.5 (default sub-tab)
 //   - docs/DIFF2_IMPLEMENTATION_PLAN.md §R7 (DiffPane form — Phase 2)
 
-import { ItemView, Notice, type Vault, WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, Scope, type Vault, WorkspaceLeaf } from "obsidian";
 import type SnapshotStore from "../sync2/snapshot-store";
 import type { ConflictCounter } from "../sync2/conflict-counter";
 import type ConflictStore from "../sync2/conflict-store";
@@ -112,6 +112,11 @@ export class DiffEditView extends ItemView {
   // Unsubscribe handle from ConflictCounter.subscribe — set on open,
   // called on close.
   private unsubscribeCounter: (() => void) | null = null;
+  // TODO #8 — a keymap Scope that swallows ESC (so Obsidian's default "ESC →
+  // focus the markdown editor" can't pull focus out of the diff-editor). Pushed
+  // only while THIS view is the active leaf (so ESC still works in other tabs).
+  private escScope: Scope | null = null;
+  private escScopePushed = false;
   // Active DiffPane lives only while detail-mode is shown. Replaced
   // on every detail-open; destroyed when leaving detail-mode or on
   // view close.
@@ -194,8 +199,38 @@ export class DiffEditView extends ItemView {
       });
     });
 
+    // TODO #8 — ESC must NOT move focus out of the diff-editor (Obsidian's
+    // default ESC jumps focus to the last markdown editor). A keymap Scope
+    // intercepts ESC through Obsidian's OWN dispatch (so it fires BEFORE the
+    // built-in handler regardless of DOM phase); `() => false` swallows it. The
+    // scope is pushed only while this view is the active leaf, so ESC keeps
+    // working in other tabs. (A DOM capture listener was tried first but lost to
+    // Obsidian's earlier-phase handler.)
+    this.escScope = new Scope(this.app.scope);
+    this.escScope.register([], "Escape", () => false);
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", (leaf) =>
+        this.syncEscScope(leaf),
+      ),
+    );
+    this.syncEscScope(this.app.workspace.activeLeaf ?? null);
+
     this.viewState = initialState();
     this.render();
+  }
+
+  // TODO #8 — push the ESC-swallowing scope iff this view is the active leaf;
+  // pop it otherwise. Idempotent (guarded by escScopePushed).
+  private syncEscScope(activeLeaf: WorkspaceLeaf | null): void {
+    if (!this.escScope) return;
+    const shouldBlock = activeLeaf === this.leaf;
+    if (shouldBlock && !this.escScopePushed) {
+      this.app.keymap.pushScope(this.escScope);
+      this.escScopePushed = true;
+    } else if (!shouldBlock && this.escScopePushed) {
+      this.app.keymap.popScope(this.escScope);
+      this.escScopePushed = false;
+    }
   }
 
   async onClose(): Promise<void> {
@@ -203,6 +238,12 @@ export class DiffEditView extends ItemView {
       this.unsubscribeCounter();
       this.unsubscribeCounter = null;
     }
+    // TODO #8 — pop the ESC scope if it's still on the keymap stack.
+    if (this.escScope && this.escScopePushed) {
+      this.app.keymap.popScope(this.escScope);
+      this.escScopePushed = false;
+    }
+    this.escScope = null;
     this.disposeActiveDiffPane();
   }
 
