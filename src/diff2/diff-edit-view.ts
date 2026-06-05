@@ -209,9 +209,14 @@ export class DiffEditView extends ItemView {
     this.escScope = new Scope(this.app.scope);
     this.escScope.register([], "Escape", () => false);
     this.registerEvent(
-      this.app.workspace.on("active-leaf-change", (leaf) =>
-        this.syncEscScope(leaf),
-      ),
+      this.app.workspace.on("active-leaf-change", (leaf) => {
+        this.syncEscScope(leaf);
+        // TODO #8b — re-focus the editor when this leaf becomes active again
+        // (e.g. user clicked another markdown tab, then back). Obsidian
+        // re-focuses a MarkdownView's editor on activation but does nothing for
+        // our custom ItemView, so the caret would vanish until a manual click.
+        if (leaf === this.leaf) this.activeDiffPane?.focus();
+      }),
     );
     this.syncEscScope(this.app.workspace.activeLeaf ?? null);
 
