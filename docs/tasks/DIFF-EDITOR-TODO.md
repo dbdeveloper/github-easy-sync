@@ -260,6 +260,10 @@
    (`register([], "Escape", () => false)`), pushed/popped за `active-leaf-change` (активний ЛИШЕ коли diff-editor —
    активний leaf, тож ESC в інших табах працює). Scope перехоплює через ВЛАСНИЙ keymap-dispatch Obsidian → раніше за
    вбудований handler (DOM-capture listener програв його фазі — відкинуто). Device-only (нема юніт-харнесу для keymap).
+   **#8b (виявлено при тестуванні, виправлено):** після перемикання diff-editor → markdown-таб → назад курсор зникав
+   (Obsidian ре-фокусує MarkdownView при активації leaf, але не наш ItemView). Fix: у тому ж `active-leaf-change` хендлері
+   — `if (leaf === this.leaf) this.activeDiffPane?.focus()`. Підтверджено на пристрої. (Box-курсор як у Obsidian —
+   зʼясувалось, це Vim navigation-mode, не дефолт; запит знято.)
 
 9. ✅ ВИПРАВЛЕНО (2026-06-05, підтверджено на реальному файлі). Цікаве спостереження: коли розв'язуєш конфлікт через кнопки чи hotkey (Ctrl+Enter, наприклад) - збивається позиція
    курсора. Він знову вказує на позицію 0,0. А (на мою думку), мав би вказувати) або на той самий символ де стояв до
