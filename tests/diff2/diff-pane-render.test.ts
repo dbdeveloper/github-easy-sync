@@ -92,6 +92,95 @@ describe("DiffPane render", () => {
     expect((theirsLines[0] as HTMLElement).textContent).toContain("theirs");
   });
 
+  it("normal line after a diff group keeps its line-decoration (no phantom line)", () => {
+    // Regression (DIFF-EDITOR-TODO §1): the bottom `>>>>>` marker was a block
+    // widget anchored at the next line's START with side:1, which made CM6
+    // split off a PHANTOM empty `diff2-line-common` line before the marker and
+    // stole the Decoration.line from the real normal line that follows — the
+    // line then rendered with NO class, its gutter number shifted by one, and
+    // keyboard nav skipped it. Both ver-blocks use the same data; only the
+    // bottom marker was wrong (it used side:1, top/middle correctly use -1).
+    pane = new DiffPane(
+      container,
+      "ours-line\nafter the group\n",
+      "theirs-line\nafter the group\n",
+    );
+    pane.getView().requestMeasure();
+
+    const children = Array.from(
+      container.querySelector(".cm-content")!.children,
+    ) as HTMLElement[];
+    const bottomIdx = children.findIndex((c) =>
+      c.classList.contains("diff2-marker-bottom"),
+    );
+    expect(bottomIdx).toBeGreaterThanOrEqual(0);
+
+    // No phantom: the line immediately BEFORE the bottom marker must be the
+    // last `theirs` line, not an empty common line.
+    const beforeMarker = children[bottomIdx - 1];
+    expect(beforeMarker.classList.contains("diff2-line-theirs")).toBe(true);
+
+    // The line immediately AFTER the bottom marker is the real normal line,
+    // and it carries the common class (was unclassed before the fix).
+    const afterMarker = children[bottomIdx + 1];
+    expect(afterMarker.textContent).toContain("after the group");
+    expect(afterMarker.classList.contains("diff2-line-common")).toBe(true);
+
+    // And there is exactly ONE common-classed line with that text — the bug
+    // produced a second, empty common line.
+    const emptyCommon = children.filter(
+      (c) =>
+        c.classList.contains("diff2-line-common") &&
+        c.classList.contains("cm-line") &&
+        c.textContent === "",
+    );
+    expect(emptyCommon.length).toBe(0);
+  });
+
+  it("a legitimate sibling-only trailing blank line stays green + numbered (no phantom)", () => {
+    // DIFF-EDITOR-TODO §1 reconciliation: when the SIBLING genuinely has a
+    // trailing blank line the diff didn't share (ver2 = `theirs\n\n`), that
+    // blank is real sibling-only content → it belongs in ver2 (green) and gets
+    // a sibling-wins number. The fix must NOT delete it (it is not the phantom);
+    // it must only stop the bottom marker from spawning the WHITE phantom +
+    // stealing the next normal line's decoration.
+    pane = new DiffPane(
+      container,
+      "ours\nafter\n",
+      "theirs\n\nafter\n", // sibling has a blank line after `theirs`
+    );
+    pane.getView().requestMeasure();
+
+    const children = Array.from(
+      container.querySelector(".cm-content")!.children,
+    ) as HTMLElement[];
+
+    // The blank line just before the bottom marker is GREEN (theirs), not a
+    // white common phantom.
+    const bottomIdx = children.findIndex((c) =>
+      c.classList.contains("diff2-marker-bottom"),
+    );
+    const blankBeforeMarker = children[bottomIdx - 1];
+    // Empty content, but it carries the ghost `↵` glyph (a real doc line, so
+    // §1.6.a.1 renders the newline glyph); the white phantom had no glyph ("").
+    expect(blankBeforeMarker.textContent).toBe("↵");
+    expect(blankBeforeMarker.classList.contains("diff2-line-theirs")).toBe(true);
+
+    // The normal line after the marker still carries the common class.
+    const afterMarker = children[bottomIdx + 1];
+    expect(afterMarker.textContent).toContain("after");
+    expect(afterMarker.classList.contains("diff2-line-common")).toBe(true);
+
+    // No WHITE empty common phantom anywhere.
+    const emptyCommon = children.filter(
+      (c) =>
+        c.classList.contains("diff2-line-common") &&
+        c.classList.contains("cm-line") &&
+        c.textContent === "",
+    );
+    expect(emptyCommon.length).toBe(0);
+  });
+
   it("applies word-changed mark decorations within diff lines", () => {
     pane = new DiffPane(container, "line from local file\n", "line from github repo\n");
     pane.getView().requestMeasure();
@@ -122,6 +211,56 @@ describe("DiffPane render", () => {
       base: "ours-only\n",
       sibling: "theirs-only\n",
     });
+  });
+
+  it("focus() focuses the editor (TODO §6.1: the owner calls it on mount → caret + Ctrl+Z, no click)", () => {
+    pane = new DiffPane(container, "a\nMINE\nc\n", "a\nTHEIRS\nc\n");
+    const view = pane.getView();
+    view.requestMeasure();
+    const stealer = document.body.appendChild(document.createElement("button"));
+    stealer.focus();
+    expect(view.hasFocus).toBe(false);
+    pane.focus(); // mountDiffPane calls this after every mount path
+    expect(view.hasFocus).toBe(true);
+    stealer.remove();
+  });
+
+  it("setCursor restores the caret in a FOCUSED editor (TODO §6.2)", () => {
+    pane = new DiffPane(container, "a\nMINE\nc\nmore\n", "a\nTHEIRS\nc\nmore\n");
+    const view = pane.getView();
+    view.requestMeasure();
+    const stealer = document.body.appendChild(document.createElement("button"));
+    stealer.focus();
+    expect(view.hasFocus).toBe(false);
+
+    pane.setCursor(5, 5);
+    expect(view.hasFocus).toBe(true); // restored caret lives in a focused editor
+    expect(view.state.selection.main.anchor).toBe(5);
+    stealer.remove();
+  });
+
+  it("gutter shows − for ours / + for theirs and tints the cell (TODO §6.5/§6.7)", () => {
+    pane = new DiffPane(
+      container,
+      "common\nours-line\ncommon2\n",
+      "common\ntheirs-line\ncommon2\n",
+    );
+    pane.getView().requestMeasure();
+
+    const oursCell = container.querySelector(".cm-gutterElement.diff2-gutter-ours");
+    const theirsCell = container.querySelector(".cm-gutterElement.diff2-gutter-theirs");
+    expect(oursCell).not.toBeNull();
+    expect(theirsCell).not.toBeNull();
+    expect(oursCell?.querySelector(".diff2-gutter-glyph")?.textContent).toBe("−");
+    expect(theirsCell?.querySelector(".diff2-gutter-glyph")?.textContent).toBe("+");
+    // Common lines get a number cell but no side glyph and no tint class.
+    const common = container.querySelector(
+      ".cm-gutterElement:not(.diff2-gutter-ours):not(.diff2-gutter-theirs) .diff2-gutter-num",
+    );
+    expect(common).not.toBeNull();
+    expect(
+      common?.parentElement?.querySelector(".diff2-gutter-glyph"),
+    ).toBeNull();
   });
 
   it("destroy() removes the CM6 DOM from the parent", () => {

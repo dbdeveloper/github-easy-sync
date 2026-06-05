@@ -1,16 +1,29 @@
-// Stage 2.1 — recoverCommit() across the full §5.0.b A–K decision matrix.
+// Stage 2.1 — recoverCommit() across the §5.0.b decision matrix (modify-in-place
+// variant, bug3).
 //
 // Recovery is a PURE function of disk state. We hand-craft each row's exact
-// on-disk slot configuration (final / .sync-tmp / .sync-bak × old/new/torn/
-// foreign/absent), run recoverCommit, and assert the vault converges to the
-// committed end-state (forward rows D–K) or cleanly rolls back (A–C) /
-// falls back (foreign). Hand-crafting is the ONLY way to reach the torn-write
-// rows B/C and the external-modification fallback — crash injection at await
-// boundaries can never produce a partial .sync-tmp. A secondary injection test
-// then proves commit7Step's real crash points land WITHIN the matrix.
+// on-disk slot configuration (final / .sync-tmp × old/new/torn/foreign/absent),
+// run recoverCommit, and assert the vault converges to the committed end-state
+// (forward rows) or cleanly rolls back (A–C) / falls back (genuine foreign).
 //
-// Node env (real fs over tmpdir), composing Stage 2.0 startSession so meta's
-// baseShaAtStart/siblingShaAtStart are the real session-start SHAs.
+// bug3 note: commit7Step now promotes IN PLACE (modifyBinary), so it NEVER
+// writes .sync-bak — the original is modified, not renamed aside. modifyBinary
+// is non-atomic, so a crash can leave a TORN final (classified "foreign"); the
+// discriminator is OUR clean .sync-tmp — torn-final + clean-tmp = our write →
+// roll forward; foreign-final + no-clean-tmp = external edit → fall back. Rows
+// TB/TS cover the torn cases. Hand-crafting is the ONLY way to reach a partial
+// .sync-tmp / a torn final; a secondary injection test then proves a real
+// commit7Step crash lands WITHIN the matrix.
+//
+// The ENTIRE matrix runs over BOTH a regular vault path AND a `.obsidian/` dot-
+// dir path (matrixSuite is invoked twice). A conflict can — undesirably but
+// possibly — land on a config-dir file; those are never indexed TFiles, so the
+// commit takes the safeRename path and the staging-path shape differs
+// (`.obsidian/p/data.sync-tmp.json`). Running the full matrix on both proves
+// classifySide / stagingPathFor / safeRename handle the hidden-dir shape
+// identically. (Production uses vault.adapter throughout — the high-level
+// vault.read/modify TFile API does NOT see dot-dir files — and modifyBinary
+// only when an indexed TFile exists, i.e. never for dot-dirs.)
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "fs";
@@ -26,8 +39,6 @@ import { commit7Step, recoverCommit } from "../../../src/diff2/exit-commit";
 
 const NOW = "2026-06-02T12:00:00.000Z";
 const ID = "tracked-recover";
-const BASE = "Notes/doc.md";
-const SIB = "Notes/doc.conflict-from-Phone-X.md";
 
 const OLD_BASE = "old base\n";
 const OLD_SIB = "old sib\n";
@@ -46,262 +57,268 @@ function fixture() {
 
 type FinalSlot = "absent" | "old" | "new" | "foreign";
 type TmpSlot = "absent" | "tmpNew" | "tmpTorn";
+type Slot = { final: FinalSlot; tmp: TmpSlot; bak: boolean };
 
-// Build the meta + done.json, then place each side's three slots exactly.
-async function craft(
-  vault: Vault,
-  base: { final: FinalSlot; tmp: TmpSlot; bak: boolean },
-  sib: { final: FinalSlot; tmp: TmpSlot; bak: boolean },
-  opts: { writeDone?: boolean; newBase?: string; newSib?: string } = {},
-) {
-  const newBase = opts.newBase ?? NEW_BASE;
-  const newSib = opts.newSib ?? NEW_SIB;
-  // Seed originals so startSession records meta SHAs = SHA(OLD_*).
-  await vault.adapter.writeBinary(BASE, enc(OLD_BASE));
-  await vault.adapter.writeBinary(SIB, enc(OLD_SIB));
-  await startSession(vault, ID, BASE, SIB, NOW);
+// Define the full recovery matrix for a given (BASE, SIB) path pair. Invoked
+// once for a regular vault path and once for a `.obsidian/` dot-dir path.
+function matrixSuite(label: string, BASE: string, SIB: string): void {
+  // Build meta + done.json, then place each side's slots exactly.
+  async function craft(
+    vault: Vault,
+    base: Slot,
+    sib: Slot,
+    opts: { writeDone?: boolean; newBase?: string; newSib?: string } = {},
+  ) {
+    const newBase = opts.newBase ?? NEW_BASE;
+    const newSib = opts.newSib ?? NEW_SIB;
+    await vault.adapter.writeBinary(BASE, enc(OLD_BASE));
+    await vault.adapter.writeBinary(SIB, enc(OLD_SIB));
+    await startSession(vault, ID, BASE, SIB, NOW);
 
-  if (opts.writeDone !== false) {
-    await vault.adapter.write(
-      `${autosaveDir(ID)}/done.json`,
-      JSON.stringify({
-        v: 1,
-        writtenAt: NOW,
-        expectedBaseSha: await calculateGitBlobSHA(enc(newBase)),
-        expectedSiblingSha: await calculateGitBlobSHA(enc(newSib)),
-      }),
-    );
+    if (opts.writeDone !== false) {
+      await vault.adapter.write(
+        `${autosaveDir(ID)}/done.json`,
+        JSON.stringify({
+          v: 1,
+          writtenAt: NOW,
+          expectedBaseSha: await calculateGitBlobSHA(enc(newBase)),
+          expectedSiblingSha: await calculateGitBlobSHA(enc(newSib)),
+        }),
+      );
+    }
+
+    await vault.adapter.remove(BASE);
+    await vault.adapter.remove(SIB);
+    await placeSide(vault, BASE, base, OLD_BASE, newBase);
+    await placeSide(vault, SIB, sib, OLD_SIB, newSib);
   }
 
-  // Wipe the seeded originals; re-place exactly the requested slots.
-  await vault.adapter.remove(BASE);
-  await vault.adapter.remove(SIB);
-  await placeSide(vault, BASE, base, OLD_BASE, newBase);
-  await placeSide(vault, SIB, sib, OLD_SIB, newSib);
-}
+  async function placeSide(
+    vault: Vault,
+    finalPath: string,
+    slot: Slot,
+    oldBytes: string,
+    newBytes: string,
+  ) {
+    if (slot.final === "old") await vault.adapter.writeBinary(finalPath, enc(oldBytes));
+    else if (slot.final === "new") await vault.adapter.writeBinary(finalPath, enc(newBytes));
+    else if (slot.final === "foreign") await vault.adapter.writeBinary(finalPath, enc(FOREIGN));
 
-async function placeSide(
-  vault: Vault,
-  finalPath: string,
-  slot: { final: FinalSlot; tmp: TmpSlot; bak: boolean },
-  oldBytes: string,
-  newBytes: string,
-) {
-  if (slot.final === "old") await vault.adapter.writeBinary(finalPath, enc(oldBytes));
-  else if (slot.final === "new") await vault.adapter.writeBinary(finalPath, enc(newBytes));
-  else if (slot.final === "foreign") await vault.adapter.writeBinary(finalPath, enc(FOREIGN));
+    if (slot.tmp === "tmpNew")
+      await vault.adapter.writeBinary(stagingPathFor(finalPath, "tmp"), enc(newBytes));
+    else if (slot.tmp === "tmpTorn")
+      await vault.adapter.writeBinary(stagingPathFor(finalPath, "tmp"), enc(TORN));
 
-  if (slot.tmp === "tmpNew")
-    await vault.adapter.writeBinary(stagingPathFor(finalPath, "tmp"), enc(newBytes));
-  else if (slot.tmp === "tmpTorn")
-    await vault.adapter.writeBinary(stagingPathFor(finalPath, "tmp"), enc(TORN));
-
-  if (slot.bak) await vault.adapter.writeBinary(stagingPathFor(finalPath, "bak"), enc(oldBytes));
-}
-
-async function assertCommitted(vault: Vault) {
-  expect(await vault.adapter.read(BASE)).toBe(NEW_BASE);
-  expect(await vault.adapter.read(SIB)).toBe(NEW_SIB);
-  for (const w of ["tmp", "bak"] as const) {
-    expect(await vault.adapter.exists(stagingPathFor(BASE, w))).toBe(false);
-    expect(await vault.adapter.exists(stagingPathFor(SIB, w))).toBe(false);
+    if (slot.bak) await vault.adapter.writeBinary(stagingPathFor(finalPath, "bak"), enc(oldBytes));
   }
-  expect(await vault.adapter.exists(autosaveDir(ID))).toBe(false);
-}
 
-describe("recoverCommit — forward rows D–K converge to committed", () => {
-  let fx: ReturnType<typeof fixture>;
-  beforeEach(() => (fx = fixture()));
-  afterEach(() => fs.rmSync(fx.root, { recursive: true, force: true }));
+  async function assertCommitted(vault: Vault) {
+    expect(await vault.adapter.read(BASE)).toBe(NEW_BASE);
+    expect(await vault.adapter.read(SIB)).toBe(NEW_SIB);
+    for (const w of ["tmp", "bak"] as const) {
+      expect(await vault.adapter.exists(stagingPathFor(BASE, w))).toBe(false);
+      expect(await vault.adapter.exists(stagingPathFor(SIB, w))).toBe(false);
+    }
+    expect(await vault.adapter.exists(autosaveDir(ID))).toBe(false);
+  }
 
-  const FORWARD: Array<[
-    string,
-    { final: FinalSlot; tmp: TmpSlot; bak: boolean },
-    { final: FinalSlot; tmp: TmpSlot; bak: boolean },
-  ]> = [
-    ["D (both tmp✓, finals old)", { final: "old", tmp: "tmpNew", bak: false }, { final: "old", tmp: "tmpNew", bak: false }],
-    ["E (base renamed first)", { final: "absent", tmp: "tmpNew", bak: true }, { final: "old", tmp: "tmpNew", bak: false }],
-    ["F (sibling renamed first)", { final: "old", tmp: "tmpNew", bak: false }, { final: "absent", tmp: "tmpNew", bak: true }],
-    ["G (both renamed to bak)", { final: "absent", tmp: "tmpNew", bak: true }, { final: "absent", tmp: "tmpNew", bak: true }],
-    ["H (base committed first)", { final: "new", tmp: "absent", bak: true }, { final: "absent", tmp: "tmpNew", bak: true }],
-    ["I (sibling committed first)", { final: "absent", tmp: "tmpNew", bak: true }, { final: "new", tmp: "absent", bak: true }],
-    ["J (both committed, baks remain)", { final: "new", tmp: "absent", bak: true }, { final: "new", tmp: "absent", bak: true }],
-    ["K (both committed, baks gone)", { final: "new", tmp: "absent", bak: false }, { final: "new", tmp: "absent", bak: false }],
-  ];
+  describe(`recoverCommit [${label}] — forward rows converge to committed`, () => {
+    let fx: ReturnType<typeof fixture>;
+    beforeEach(() => (fx = fixture()));
+    afterEach(() => fs.rmSync(fx.root, { recursive: true, force: true }));
 
-  for (const [name, base, sib] of FORWARD) {
-    it(`${name} → rolled-forward`, async () => {
-      await craft(fx.vault, base, sib);
+    const FORWARD: Array<[string, Slot, Slot]> = [
+      // Modify-in-place crash states (bug3): no .sync-bak is ever created (the
+      // original is modified in place, never renamed aside). The clean .sync-tmp
+      // is the roll-forward source. A "foreign" final WITH our clean tmp is OUR
+      // torn modifyBinary — recovery overwrites it from the tmp (NOT a fallback).
+      ["D (both staged, finals old — pre-modify)", { final: "old", tmp: "tmpNew", bak: false }, { final: "old", tmp: "tmpNew", bak: false }],
+      ["E (new-file base pre-promote, sibling staged)", { final: "absent", tmp: "tmpNew", bak: false }, { final: "old", tmp: "tmpNew", bak: false }],
+      ["F (base staged, new-file sibling pre-promote)", { final: "old", tmp: "tmpNew", bak: false }, { final: "absent", tmp: "tmpNew", bak: false }],
+      ["G (both new files pre-promote)", { final: "absent", tmp: "tmpNew", bak: false }, { final: "absent", tmp: "tmpNew", bak: false }],
+      ["TB (base modifyBinary TORN + clean tmp)", { final: "foreign", tmp: "tmpNew", bak: false }, { final: "old", tmp: "tmpNew", bak: false }],
+      ["H (base modify done, sibling not yet)", { final: "new", tmp: "tmpNew", bak: false }, { final: "old", tmp: "tmpNew", bak: false }],
+      ["TS (base done, sibling modifyBinary TORN + clean tmp)", { final: "new", tmp: "tmpNew", bak: false }, { final: "foreign", tmp: "tmpNew", bak: false }],
+      ["I (sibling modify done, base not yet)", { final: "old", tmp: "tmpNew", bak: false }, { final: "new", tmp: "tmpNew", bak: false }],
+      ["J (both committed, tmps not cleaned)", { final: "new", tmp: "tmpNew", bak: false }, { final: "new", tmp: "tmpNew", bak: false }],
+      ["K (both committed, tmps cleaned)", { final: "new", tmp: "absent", bak: false }, { final: "new", tmp: "absent", bak: false }],
+    ];
+
+    for (const [name, base, sib] of FORWARD) {
+      it(`${name} → rolled-forward`, async () => {
+        await craft(fx.vault, base, sib);
+        const res = await recoverCommit(fx.vault, ID);
+        expect(res).toEqual({ kind: "rolled-forward", siblingRemoved: false });
+        await assertCommitted(fx.vault);
+      });
+    }
+  });
+
+  describe(`recoverCommit [${label}] — rollback rows A–C preserve the session`, () => {
+    let fx: ReturnType<typeof fixture>;
+    beforeEach(() => (fx = fixture()));
+    afterEach(() => fs.rmSync(fx.root, { recursive: true, force: true }));
+
+    const ROLLBACK: Array<[string, Slot, Slot]> = [
+      ["A (pre-write, both old)", { final: "old", tmp: "absent", bak: false }, { final: "old", tmp: "absent", bak: false }],
+      ["B (both torn)", { final: "old", tmp: "tmpTorn", bak: false }, { final: "old", tmp: "tmpTorn", bak: false }],
+      ["C (one torn, one good)", { final: "old", tmp: "tmpTorn", bak: false }, { final: "old", tmp: "tmpNew", bak: false }],
+    ];
+
+    for (const [name, base, sib] of ROLLBACK) {
+      it(`${name} → rolled-back, originals intact, session kept`, async () => {
+        await craft(fx.vault, base, sib);
+        const res = await recoverCommit(fx.vault, ID);
+        expect(res).toEqual({ kind: "rolled-back" });
+
+        expect(await fx.vault.adapter.read(BASE)).toBe(OLD_BASE);
+        expect(await fx.vault.adapter.read(SIB)).toBe(OLD_SIB);
+        expect(await fx.vault.adapter.exists(stagingPathFor(BASE, "tmp"))).toBe(false);
+        expect(await fx.vault.adapter.exists(stagingPathFor(SIB, "tmp"))).toBe(false);
+        expect(await fx.vault.adapter.exists(`${autosaveDir(ID)}/done.json`)).toBe(false);
+        expect(await fx.vault.adapter.exists(`${autosaveDir(ID)}/meta.json`)).toBe(true);
+      });
+    }
+  });
+
+  describe(`recoverCommit [${label}] — fallback, 6.5-in-recovery, no-commit`, () => {
+    let fx: ReturnType<typeof fixture>;
+    beforeEach(() => (fx = fixture()));
+    afterEach(() => fs.rmSync(fx.root, { recursive: true, force: true }));
+
+    it("GENUINE foreign final (external edit, NO clean tmp of ours) → fallback, foreign intact", async () => {
+      await craft(
+        fx.vault,
+        { final: "foreign", tmp: "absent", bak: false },
+        { final: "old", tmp: "tmpNew", bak: false },
+      );
+      const res = await recoverCommit(fx.vault, ID);
+      expect(res).toEqual({ kind: "fallback", reason: "external-modification" });
+      expect(await fx.vault.adapter.read(BASE)).toBe(FOREIGN);
+      expect(await fx.vault.adapter.exists(stagingPathFor(BASE, "tmp"))).toBe(false);
+      expect(await fx.vault.adapter.exists(stagingPathFor(SIB, "tmp"))).toBe(false);
+      expect(await fx.vault.adapter.exists(autosaveDir(ID))).toBe(false);
+    });
+
+    it("forward with identical committed sides → step 6.5 removes the sibling", async () => {
+      await craft(
+        fx.vault,
+        { final: "old", tmp: "tmpNew", bak: false },
+        { final: "old", tmp: "tmpNew", bak: false },
+        { newBase: "MERGED\n", newSib: "MERGED\n" },
+      );
+      const res = await recoverCommit(fx.vault, ID);
+      expect(res).toEqual({ kind: "rolled-forward", siblingRemoved: true });
+      expect(await fx.vault.adapter.read(BASE)).toBe("MERGED\n");
+      expect(await fx.vault.adapter.exists(SIB)).toBe(false);
+      expect(await fx.vault.adapter.exists(autosaveDir(ID))).toBe(false);
+    });
+
+    it("no done.json → no-commit, nothing touched", async () => {
+      await craft(
+        fx.vault,
+        { final: "old", tmp: "absent", bak: false },
+        { final: "old", tmp: "absent", bak: false },
+        { writeDone: false },
+      );
+      const res = await recoverCommit(fx.vault, ID);
+      expect(res).toEqual({ kind: "no-commit" });
+      expect(await fx.vault.adapter.read(BASE)).toBe(OLD_BASE);
+      expect(await fx.vault.adapter.exists(`${autosaveDir(ID)}/meta.json`)).toBe(true);
+    });
+  });
+
+  describe(`recoverCommit [${label}] under MOCK_PLATFORM=mobile (Capacitor rename)`, () => {
+    // roll-forward does safeRename(tmp → final) OVER an existing old final
+    // (row D) — a rename-over-occupied path, exactly what the CLAUDE.md mobile
+    // rule guards. Confirm it (and the foreign fallback) under strict semantics.
+    let fx: ReturnType<typeof fixture>;
+    beforeEach(() => {
+      setMockPlatform("mobile");
+      fx = fixture();
+    });
+    afterEach(() => {
+      setMockPlatform("desktop");
+      fs.rmSync(fx.root, { recursive: true, force: true });
+    });
+
+    it("row D (rename over occupied final) rolls forward", async () => {
+      await craft(
+        fx.vault,
+        { final: "old", tmp: "tmpNew", bak: false },
+        { final: "old", tmp: "tmpNew", bak: false },
+      );
+      expect(await recoverCommit(fx.vault, ID)).toEqual({
+        kind: "rolled-forward",
+        siblingRemoved: false,
+      });
+      await assertCommitted(fx.vault);
+    });
+
+    it("GENUINE foreign final (no clean tmp) → fallback, foreign content intact", async () => {
+      await craft(
+        fx.vault,
+        { final: "foreign", tmp: "absent", bak: false },
+        { final: "old", tmp: "tmpNew", bak: false },
+      );
+      expect(await recoverCommit(fx.vault, ID)).toEqual({
+        kind: "fallback",
+        reason: "external-modification",
+      });
+      expect(await fx.vault.adapter.read(BASE)).toBe(FOREIGN);
+      expect(await fx.vault.adapter.exists(autosaveDir(ID))).toBe(false);
+    });
+  });
+
+  describe(`recoverCommit [${label}] — secondary: real commit7Step crash lands in the matrix`, () => {
+    let fx: ReturnType<typeof fixture>;
+    beforeEach(() => (fx = fixture()));
+    afterEach(() => fs.rmSync(fx.root, { recursive: true, force: true }));
+
+    it("crash mid-promote (base promoted, sibling not) → recover completes the commit", async () => {
+      await fx.vault.adapter.writeBinary(BASE, enc(OLD_BASE));
+      await fx.vault.adapter.writeBinary(SIB, enc(OLD_SIB));
+      const meta = await startSession(fx.vault, ID, BASE, SIB, NOW);
+
+      // The mock has no modifyBinary → promoteInPlace falls back to safeRename, so
+      // we crash on the sibling promote (adapter.rename dst === SIB). Base has
+      // already been promoted (final=new, its tmp consumed by the rename); the
+      // sibling is still old with its clean tmp staged → recovery rolls forward.
+      const origGet = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(fx.vault),
+        "adapter",
+      )!.get!;
+      Object.defineProperty(fx.vault, "adapter", {
+        configurable: true,
+        get() {
+          const real = origGet.call(this) as {
+            rename: (s: string, d: string) => Promise<void>;
+          };
+          const rn = real.rename;
+          real.rename = async (s: string, d: string) => {
+            if (d === SIB) throw new Error("crash step 5 sibling");
+            return rn(s, d);
+          };
+          return real;
+        },
+      });
+
+      await expect(
+        commit7Step(fx.vault, ID, meta, { base: NEW_BASE, sibling: NEW_SIB }, { now: NOW }),
+      ).rejects.toThrow(/crash step 5/);
+
+      Object.defineProperty(fx.vault, "adapter", { configurable: true, get: origGet });
+
       const res = await recoverCommit(fx.vault, ID);
       expect(res).toEqual({ kind: "rolled-forward", siblingRemoved: false });
       await assertCommitted(fx.vault);
     });
-  }
-});
-
-describe("recoverCommit — rollback rows A–C preserve the session", () => {
-  let fx: ReturnType<typeof fixture>;
-  beforeEach(() => (fx = fixture()));
-  afterEach(() => fs.rmSync(fx.root, { recursive: true, force: true }));
-
-  const ROLLBACK: Array<[
-    string,
-    { final: FinalSlot; tmp: TmpSlot; bak: boolean },
-    { final: FinalSlot; tmp: TmpSlot; bak: boolean },
-  ]> = [
-    ["A (pre-write, both old)", { final: "old", tmp: "absent", bak: false }, { final: "old", tmp: "absent", bak: false }],
-    ["B (both torn)", { final: "old", tmp: "tmpTorn", bak: false }, { final: "old", tmp: "tmpTorn", bak: false }],
-    ["C (one torn, one good)", { final: "old", tmp: "tmpTorn", bak: false }, { final: "old", tmp: "tmpNew", bak: false }],
-  ];
-
-  for (const [name, base, sib] of ROLLBACK) {
-    it(`${name} → rolled-back, originals intact, session kept`, async () => {
-      await craft(fx.vault, base, sib);
-      const res = await recoverCommit(fx.vault, ID);
-      expect(res).toEqual({ kind: "rolled-back" });
-
-      // Originals untouched at their final paths.
-      expect(await fx.vault.adapter.read(BASE)).toBe(OLD_BASE);
-      expect(await fx.vault.adapter.read(SIB)).toBe(OLD_SIB);
-      // Partial staging + barrier gone; session (meta) preserved.
-      expect(await fx.vault.adapter.exists(stagingPathFor(BASE, "tmp"))).toBe(false);
-      expect(await fx.vault.adapter.exists(stagingPathFor(SIB, "tmp"))).toBe(false);
-      expect(await fx.vault.adapter.exists(`${autosaveDir(ID)}/done.json`)).toBe(false);
-      expect(await fx.vault.adapter.exists(`${autosaveDir(ID)}/meta.json`)).toBe(true);
-    });
-  }
-});
-
-describe("recoverCommit — fallback, 6.5-in-recovery, no-commit", () => {
-  let fx: ReturnType<typeof fixture>;
-  beforeEach(() => (fx = fixture()));
-  afterEach(() => fs.rmSync(fx.root, { recursive: true, force: true }));
-
-  it("foreign final (external modification) → fallback, foreign content left intact", async () => {
-    // base.final externally overwritten (neither old nor new) but base.tmp✓.
-    await craft(
-      fx.vault,
-      { final: "foreign", tmp: "tmpNew", bak: false },
-      { final: "old", tmp: "tmpNew", bak: false },
-    );
-    const res = await recoverCommit(fx.vault, ID);
-    expect(res).toEqual({ kind: "fallback", reason: "external-modification" });
-    // The foreign content survives; our staging + session dir are gone.
-    expect(await fx.vault.adapter.read(BASE)).toBe(FOREIGN);
-    expect(await fx.vault.adapter.exists(stagingPathFor(BASE, "tmp"))).toBe(false);
-    expect(await fx.vault.adapter.exists(stagingPathFor(SIB, "tmp"))).toBe(false);
-    expect(await fx.vault.adapter.exists(autosaveDir(ID))).toBe(false);
   });
+}
 
-  it("forward with identical committed sides → step 6.5 removes the sibling", async () => {
-    await craft(
-      fx.vault,
-      { final: "old", tmp: "tmpNew", bak: false },
-      { final: "old", tmp: "tmpNew", bak: false },
-      { newBase: "MERGED\n", newSib: "MERGED\n" },
-    );
-    const res = await recoverCommit(fx.vault, ID);
-    expect(res).toEqual({ kind: "rolled-forward", siblingRemoved: true });
-    expect(await fx.vault.adapter.read(BASE)).toBe("MERGED\n");
-    expect(await fx.vault.adapter.exists(SIB)).toBe(false);
-    expect(await fx.vault.adapter.exists(autosaveDir(ID))).toBe(false);
-  });
-
-  it("no done.json → no-commit, nothing touched", async () => {
-    await craft(
-      fx.vault,
-      { final: "old", tmp: "absent", bak: false },
-      { final: "old", tmp: "absent", bak: false },
-      { writeDone: false },
-    );
-    const res = await recoverCommit(fx.vault, ID);
-    expect(res).toEqual({ kind: "no-commit" });
-    expect(await fx.vault.adapter.read(BASE)).toBe(OLD_BASE);
-    expect(await fx.vault.adapter.exists(`${autosaveDir(ID)}/meta.json`)).toBe(true);
-  });
-});
-
-describe("recoverCommit under MOCK_PLATFORM=mobile (Capacitor rename)", () => {
-  // roll-forward does safeRename(tmp → final) OVER an existing old final
-  // (row D) — a rename-over-occupied path, exactly what the CLAUDE.md mobile
-  // rule guards. Confirm it (and the foreign fallback) under strict semantics.
-  let fx: ReturnType<typeof fixture>;
-  beforeEach(() => {
-    setMockPlatform("mobile");
-    fx = fixture();
-  });
-  afterEach(() => {
-    setMockPlatform("desktop");
-    fs.rmSync(fx.root, { recursive: true, force: true });
-  });
-
-  it("row D (rename over occupied final) rolls forward", async () => {
-    await craft(
-      fx.vault,
-      { final: "old", tmp: "tmpNew", bak: false },
-      { final: "old", tmp: "tmpNew", bak: false },
-    );
-    expect(await recoverCommit(fx.vault, ID)).toEqual({
-      kind: "rolled-forward",
-      siblingRemoved: false,
-    });
-    await assertCommitted(fx.vault);
-  });
-
-  it("foreign final → fallback, foreign content intact", async () => {
-    await craft(
-      fx.vault,
-      { final: "foreign", tmp: "tmpNew", bak: false },
-      { final: "old", tmp: "tmpNew", bak: false },
-    );
-    expect(await recoverCommit(fx.vault, ID)).toEqual({
-      kind: "fallback",
-      reason: "external-modification",
-    });
-    expect(await fx.vault.adapter.read(BASE)).toBe(FOREIGN);
-    expect(await fx.vault.adapter.exists(autosaveDir(ID))).toBe(false);
-  });
-});
-
-describe("recoverCommit — secondary: real commit7Step crash lands in the matrix", () => {
-  let fx: ReturnType<typeof fixture>;
-  beforeEach(() => (fx = fixture()));
-  afterEach(() => fs.rmSync(fx.root, { recursive: true, force: true }));
-
-  it("crash mid step-5 (base promoted, sibling not) → recover completes the commit", async () => {
-    await fx.vault.adapter.writeBinary(BASE, enc(OLD_BASE));
-    await fx.vault.adapter.writeBinary(SIB, enc(OLD_SIB));
-    const meta = await startSession(fx.vault, ID, BASE, SIB, NOW);
-
-    // Crash on the step-5 sibling promote (adapter.rename dst === SIB). Base
-    // has already been promoted by then → row H.
-    const origGet = Object.getOwnPropertyDescriptor(
-      Object.getPrototypeOf(fx.vault),
-      "adapter",
-    )!.get!;
-    Object.defineProperty(fx.vault, "adapter", {
-      configurable: true,
-      get() {
-        const real = origGet.call(this) as {
-          rename: (s: string, d: string) => Promise<void>;
-        };
-        const rn = real.rename;
-        real.rename = async (s: string, d: string) => {
-          if (d === SIB) throw new Error("crash step 5 sibling");
-          return rn(s, d);
-        };
-        return real;
-      },
-    });
-
-    await expect(
-      commit7Step(fx.vault, ID, meta, { base: NEW_BASE, sibling: NEW_SIB }, { now: NOW }),
-    ).rejects.toThrow(/crash step 5/);
-
-    Object.defineProperty(fx.vault, "adapter", { configurable: true, get: origGet });
-
-    const res = await recoverCommit(fx.vault, ID);
-    expect(res).toEqual({ kind: "rolled-forward", siblingRemoved: false });
-    await assertCommitted(fx.vault);
-  });
-});
+matrixSuite("vault", "Notes/doc.md", "Notes/doc.conflict-from-Phone-X.md");
+matrixSuite(
+  "dot-dir",
+  ".obsidian/plugins/p/data.json",
+  ".obsidian/plugins/p/data.conflict-from-Phone-X.json",
+);

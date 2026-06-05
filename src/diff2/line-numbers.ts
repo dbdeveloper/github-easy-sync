@@ -19,17 +19,65 @@
 import { EditorState, Text } from "@codemirror/state";
 import { EditorView, gutter, GutterMarker } from "@codemirror/view";
 import { diffPaneStateField } from "./decorations";
-import type { Segment } from "./editor-model";
+import type { Segment, SegRole } from "./editor-model";
+import { ConflictMarkerWidget } from "./markers";
 
-class LineNumberMarker extends GutterMarker {
-  constructor(readonly text: string) {
+// #3 — colour the gutter cell next to a marker BLOCK widget (<<<<< / ===== /
+// >>>>>) the same side tint as its lines, so the gutter column reads as one
+// continuous ours/theirs band over the whole group. Empty content; the tint is
+// the elementClass background.
+class MarkerGutterMarker extends GutterMarker {
+  constructor(readonly kind: "top" | "middle" | "bottom") {
     super();
+    this.elementClass =
+      kind === "top"
+        ? "diff2-gutter-ours-marker"
+        : kind === "bottom"
+          ? "diff2-gutter-theirs-marker"
+          : "diff2-gutter-split-marker";
   }
-  eq(other: LineNumberMarker): boolean {
-    return other.text === this.text;
+  eq(other: MarkerGutterMarker): boolean {
+    return other.kind === this.kind;
   }
   toDOM(): Node {
-    return document.createTextNode(this.text);
+    return document.createTextNode("");
+  }
+}
+
+class LineNumberMarker extends GutterMarker {
+  constructor(
+    readonly text: string,
+    readonly role: SegRole,
+  ) {
+    super();
+    // §6.7 — tint the whole gutter CELL to the line's side colour. The cell is
+    // as tall as the (wrapped) line, so the colour spans every visual row even
+    // though the number + glyph render once at the top (§6.5, accepted).
+    // elementClass is a GutterMarker property (assigned, not an accessor).
+    this.elementClass =
+      role === "ver1"
+        ? "diff2-gutter-ours"
+        : role === "ver2"
+          ? "diff2-gutter-theirs"
+          : "";
+  }
+  eq(other: LineNumberMarker): boolean {
+    return other.text === this.text && other.role === this.role;
+  }
+  toDOM(): Node {
+    // §6.5 — a `−` for ver1 (ours) / `+` for ver2 (theirs), after the number.
+    const cell = document.createElement("span");
+    cell.className = "diff2-gutter-cell";
+    const num = cell.appendChild(document.createElement("span"));
+    num.className = "diff2-gutter-num";
+    num.textContent = this.text;
+    const glyph = this.role === "ver1" ? "−" : this.role === "ver2" ? "+" : "";
+    if (glyph) {
+      const g = cell.appendChild(document.createElement("span"));
+      g.className = "diff2-gutter-glyph";
+      g.textContent = glyph;
+    }
+    return cell;
   }
 }
 
@@ -58,28 +106,61 @@ export function computeLineLabels(doc: Text, structure: Segment[]): string[] {
   return labels;
 }
 
-// Memoize labels per EditorState (immutable per transaction), so the
-// per-line gutter callback doesn't recompute the whole array each call.
-const labelCache = new WeakMap<EditorState, string[]>();
-function labelsFor(state: EditorState): string[] {
-  const cached = labelCache.get(state);
+// role per 1-indexed doc line — drives the gutter glyph (§6.5) + colour (§6.7).
+// Lines not covered by a content segment (e.g. the trailing empty line) are
+// "normal" (no glyph, no tint).
+export function computeLineRoles(doc: Text, structure: Segment[]): SegRole[] {
+  const roles: SegRole[] = new Array(doc.lines).fill("normal");
+  for (const s of structure) {
+    if (s.to <= s.from) continue;
+    eachLineNumber(doc, s.from, s.to, (lineNo) => {
+      roles[lineNo - 1] = s.role;
+    });
+  }
+  return roles;
+}
+
+// Memoize labels + roles per EditorState (immutable per transaction), so the
+// per-line gutter callback doesn't recompute the whole arrays each call.
+const gutterCache = new WeakMap<
+  EditorState,
+  { labels: string[]; roles: SegRole[] }
+>();
+function gutterDataFor(state: EditorState): { labels: string[]; roles: SegRole[] } {
+  const cached = gutterCache.get(state);
   if (cached) return cached;
   const field = state.field(diffPaneStateField, false);
-  const labels = field
-    ? computeLineLabels(state.doc, field.structure)
-    : new Array(state.doc.lines).fill("");
-  labelCache.set(state, labels);
-  return labels;
+  const data = field
+    ? {
+        labels: computeLineLabels(state.doc, field.structure),
+        roles: computeLineRoles(state.doc, field.structure),
+      }
+    : {
+        labels: new Array(state.doc.lines).fill(""),
+        roles: new Array<SegRole>(state.doc.lines).fill("normal"),
+      };
+  gutterCache.set(state, data);
+  return data;
 }
 
 export function siblingWinsGutter() {
   return gutter({
     class: "diff2-line-number-gutter",
     lineMarker(view: EditorView, line) {
-      const labels = labelsFor(view.state);
+      const { labels, roles } = gutterDataFor(view.state);
       const lineNo = view.state.doc.lineAt(line.from).number;
       const text = labels[lineNo - 1] ?? "";
-      return text ? new LineNumberMarker(text) : null;
+      const role = roles[lineNo - 1] ?? "normal";
+      // A content line always has a number; the trailing empty line has neither
+      // number nor role → no marker.
+      if (!text && role === "normal") return null;
+      return new LineNumberMarker(text, role);
+    },
+    // #3 — tint the gutter cell beside each conflict-marker block widget.
+    widgetMarker(_view, widget) {
+      return widget instanceof ConflictMarkerWidget
+        ? new MarkerGutterMarker(widget.kind)
+        : null;
     },
     // Recompute markers when the structure field changes even if the
     // doc length is unchanged (e.g. a same-length chunk resolution).
@@ -90,7 +171,7 @@ export function siblingWinsGutter() {
       );
     },
     initialSpacer() {
-      return new LineNumberMarker("0");
+      return new LineNumberMarker("0", "normal");
     },
   });
 }

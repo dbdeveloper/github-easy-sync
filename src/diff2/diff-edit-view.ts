@@ -50,7 +50,7 @@ import {
 } from "./autosave-store";
 import { reopenAction } from "./reopen-action";
 import { ResumeRecoveryModal, SaveToAltModal } from "./recovery-dialog";
-import { scanHistory } from "./history-replay";
+import { assessHistory, scanHistory } from "./history-replay";
 import { persistCursor, readCursor } from "./cursor-store";
 import { CursorScheduler } from "./cursor-timer";
 import { HistoryWriter } from "./history-log";
@@ -58,8 +58,7 @@ import type { Segment } from "./editor-model";
 import type Logger from "../logger";
 import { atomicWriteFile } from "../sync2/atomic-write";
 import {
-  classifyToctou,
-  commit7Step,
+  commitOrDiscardExit,
   commitToAlt,
   commitUnchangedSide,
   type ResolvedSides,
@@ -183,7 +182,16 @@ export class DiffEditView extends ItemView {
       // Defer render to next microtask so multiple rapid changes
       // collapse into one re-render. Simple debounce; later phases
       // may upgrade to requestAnimationFrame if needed.
-      queueMicrotask(() => this.render());
+      queueMicrotask(() => {
+        // ONLY the list re-renders on a count change. In detail mode a
+        // re-render would re-run mountDiffPane — disposing the live DiffPane
+        // (losing the in-progress edit) AND re-classifying the now-existing
+        // autosave dir into a spurious "Resume previous edit session? · 0 edits"
+        // modal (TODO §2 double-mount). The active entry is stable until the
+        // user clicks `[←]`/back, so detail needs no refresh here (the comment
+        // above always intended this no-op; the guard now enforces it).
+        if (this.viewState.mode === "list") this.render();
+      });
     });
 
     this.viewState = initialState();
@@ -207,12 +215,24 @@ export class DiffEditView extends ItemView {
       this.activeDiffPane.destroy();
       this.activeDiffPane = null;
     }
-    // Drop the in-memory session ref. The on-disk .diff2-autosave/<id>/ dir is
-    // intentionally LEFT for recovery — a non-`[←]` exit (switch conflict /
-    // close view) keeps the autosave so a crash mid-edit is still recoverable;
-    // a stale session is GC'd by sweepAll on the next onload (§4.2), and a
-    // reopen rmdir+fresh's it (W1) until the resume dialog lands (W4).
+    // §4.1 zero-edit invariant: a session ABANDONED (sub-tab switch / view
+    // close, i.e. the "інший механізм" exit) with ZERO recorded edits has no
+    // recovery value → wipe its dir (fire-and-forget; a failure is caught by the
+    // onload sweep). A session WITH edits is LEFT untouched so a crash mid-edit
+    // stays recoverable. The committed/discarded `[←]` path already nulled
+    // activeSession before render(), so this only fires on a genuine abandon.
+    // (The counter-guard in onOpen is what makes a live session here mean a real
+    // abandon — render() no longer fires spuriously in detail mode.)
+    const session = this.activeSession;
+    if (session && (this.activeWriter?.liveBlockCount() ?? 0) === 0) {
+      void this.deps.vault.adapter
+        .rmdir(autosaveDir(session.conflictId), true)
+        .catch(() => {
+          /* best-effort; onload sweep is the backstop */
+        });
+    }
     this.activeSession = null;
+    this.activeWriter = null;
   }
 
   // ── render dispatch ───────────────────────────────────────────────
@@ -413,6 +433,12 @@ export class DiffEditView extends ItemView {
           this.activeWriter?.record(change, structure, new Date().toISOString());
           this.cursorScheduler?.schedule("typing");
         },
+        // TODO §5 — a CM6 undo drops the last history.jsonl block (so the log
+        // mirrors the editor's undo depth; the net count feeds §4.1.a exit-wipe).
+        onUndo: () => {
+          this.activeWriter?.truncateLastBlock();
+          this.cursorScheduler?.schedule("typing");
+        },
         // W3 — a pure caret move pokes the cursor timer on the nav cadence. The
         // flush re-reads the LIVE selection, so we ignore the passed position.
         onSelectionChange: () => {
@@ -485,6 +511,14 @@ export class DiffEditView extends ItemView {
             // the §3.2 ResumeRecoveryModal (a "*" marks the changed file — no
             // scary "files changed" dialog; it is just crash recovery).
             const sess = await readResumeSession(this.deps.vault, conflictId);
+            // §3.5 (TODO §2): zero trustworthy edits → nothing to restore even
+            // though one side changed in the vault. Skip the modal and start
+            // fresh from the CURRENT vault (which reflects that one-side change);
+            // there is no user work to carry onto the unchanged side.
+            if (assessHistory(sess.jsonl).empty) {
+              await startFreshAndMount();
+              break;
+            }
             const choice = await new ResumeRecoveryModal(this.app, {
               basePath: entry.basePath,
               siblingPath: entry.siblingPath,
@@ -557,6 +591,17 @@ export class DiffEditView extends ItemView {
             // exactly what replayFrom will apply (so the dialog can't promise
             // more than it restores).
             const sess = await readResumeSession(this.deps.vault, conflictId);
+            // §3.5 (TODO §2): a valid session whose history.jsonl holds ZERO
+            // trustworthy edits is stale — there is nothing to resume, so the
+            // "Resume previous edit session? · 0 edits saved" modal is pointless.
+            // Skip it and start fresh (wipe + fresh session). `empty` = no blocks
+            // AND no corruption; a corrupt-first-block session is a DIFFERENT
+            // §3.5 row (it would still surface a modal) so it's intentionally
+            // excluded here.
+            if (assessHistory(sess.jsonl).empty) {
+              await startFreshAndMount();
+              break;
+            }
             const choice = await new ResumeRecoveryModal(this.app, {
               basePath: entry.basePath,
               siblingPath: entry.siblingPath,
@@ -592,6 +637,11 @@ export class DiffEditView extends ItemView {
             break;
           }
         }
+        // TODO §6.1 — focus the freshly-mounted editor so the caret shows and
+        // Ctrl/Cmd+Z works without a click. Cancel paths returned early; every
+        // mount path set activeDiffPane. Idempotent on the resume-with-cursor
+        // path (setCursor already focused).
+        this.activeDiffPane?.focus();
       } catch (err) {
         body.createEl("p", {
           cls: "diff2-detail-error",
@@ -649,36 +699,42 @@ export class DiffEditView extends ItemView {
         // W2 Step 1 (§5.0) — flush queued history before the commit. commit7Step
         // Step 7 removes the dir on success; drain() awaits the serialized chain.
         await this.activeWriter?.drain();
+        // §4.1 zero-edit invariant — currentSeq() is the TOTAL record count
+        // (continues a resumed session's seq), so 0 means "this session never
+        // recorded an edit" → commitOrDiscardExit wipes the dir without touching
+        // the input files (and without the safeRename swap).
+        const recordCount = this.activeWriter?.liveBlockCount() ?? 0;
         // getResolved() runs the commit-boundary fail-closed checks (tiling
         // assertion) and applies the empty→"\n" guard to BOTH sides — its bytes
         // are exactly what commit7Step hashes into done.json. Keep it INSIDE the
         // try so a thrown corruption guard means "save failed, stay in editor".
         const resolved = pane.getResolved();
-        // TOCTOU (§5.0 Step 1.5): a sync may have rewritten base/sibling under
-        // us since startSession.
-        const toctou = await classifyToctou(this.deps.vault, session.meta);
-        if (toctou.kind === "mismatch") {
+        // §5.0 exit decision (discard-if-empty / commit / TOCTOU). TOCTOU
+        // (§5.0 Step 1.5): a sync may have rewritten base/sibling under us.
+        const outcome = await commitOrDiscardExit(
+          this.deps.vault,
+          session.conflictId,
+          session.meta,
+          resolved,
+          recordCount,
+        );
+        if (outcome.kind === "toctou") {
           // §5.0.e symmetric resolution. Returns false when the user cancels (or
           // the view moved on during the modal) → stay in the editor.
           const proceed = await this.resolveToctouExit(
             entry,
             session,
             resolved,
-            toctou,
+            outcome.toctou,
           );
           if (!proceed) return;
-        } else {
-          const result = await commit7Step(
-            this.deps.vault,
-            session.conflictId,
-            session.meta,
-            resolved,
-          );
-          const suffix = result.siblingRemoved
+        } else if (outcome.kind === "committed") {
+          const suffix = outcome.result.siblingRemoved
             ? " (redundant sibling cleaned)"
             : "";
-          new Notice(`Saved ${result.basePath}${suffix}`);
+          new Notice(`Saved ${outcome.result.basePath}${suffix}`);
         }
+        // outcome.kind === "discarded": §4.1 silent wipe — no Notice, no write.
       } catch (err) {
         new Notice(`Failed to save ${entry.basePath}: ${String(err)}`);
         // Commit failed — stay in detail view so the user doesn't lose work.

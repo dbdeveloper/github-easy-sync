@@ -3,7 +3,13 @@
 // (Stage 2.1, §5.0 — done.json lives in this dir, TOCTOU reads meta, recovery
 // scans it) AND persistent autosave (Stage 3, §2.6–§4) both build on.
 //
-// What lives here, per `<vault>/.diff2-autosave/<conflictId>/`:
+// Location: `<configDir>/plugins/<pluginId>/.diff2-autosave/` in production
+// (set at onload via setAutosaveRoot, so the autosave lives WITH the plugin's
+// other data — TrashStore, .token_expired — not cluttering the vault root, and
+// inside the plugin's gitignored area so it never syncs). The default below is
+// a vault-root path used by the unit tests (and as back-compat).
+//
+// What lives here, per `<root>/.diff2-autosave/<conflictId>/`:
 //   meta.json        — written LAST at session start (§2.5.a commit point)
 //   base.snapshot    — byte-exact copy of basePath at session start
 //   sibling.snapshot — byte-exact copy of siblingPath
@@ -28,7 +34,20 @@ import { calculateGitBlobSHA } from "../utils";
 import { atomicWriteFile } from "../sync2/atomic-write";
 import { build } from "./joined-doc";
 
-export const AUTOSAVE_ROOT = ".diff2-autosave";
+// The autosave root, read live by autosaveDir() / sweepAll() (ES live binding,
+// so autosave-cleanup.ts sees updates). Default = vault-root (tests / back-compat);
+// the plugin reconfigures it to the plugin dir at onload (setAutosaveRoot).
+export let AUTOSAVE_ROOT = ".diff2-autosave";
+
+// The trailing segment is constant; setAutosaveRoot receives the PARENT (the
+// plugin dir) and appends it, so callers pass `<configDir>/plugins/<id>`.
+export const AUTOSAVE_DIRNAME = ".diff2-autosave";
+
+// Point the autosave root at `<parentDir>/.diff2-autosave`. Called ONCE at
+// plugin onload (before recoverAutosaveDirs). Idempotent.
+export function setAutosaveRoot(parentDir: string): void {
+  AUTOSAVE_ROOT = normalizePath(`${parentDir}/${AUTOSAVE_DIRNAME}`);
+}
 
 const utf8Decode = (bytes: ArrayBuffer): string => new TextDecoder().decode(bytes);
 

@@ -480,12 +480,12 @@ ConflictStore створює запис і sibling-файл `note.conflict-from-
 Конфліктний блок виглядає так:
 
 ```
-    | <<<<< [apply ↓][remove ↓] (<local deviceLabel>)
-    | ===== [apply both ↓↑][remove both ↓↑][join <remote deviceLabel>]
+    | <<<<< [Keep ↓][Remove ↓] (<local deviceLabel>)
+    | ===== [Apply Both ↓↑][Remove Both ↓↑][Join (<remote deviceLabel>)]
  1 +| <theirs line 1>
  2 +| <theirs line 2>
  3 +| <theirs line 3>
-    | >>>>> [apply ↑][remove ↑] (<remote deviceLabel>) 
+    | >>>>> [Apply ↑][Remove ↑] (<remote deviceLabel>) 
 ```
 
 Тобто верхній (red/ours) блок порожній — між `<<<<<` маркером і `=====` маркером немає жодного рядка. Це **природна**

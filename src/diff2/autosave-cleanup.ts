@@ -6,8 +6,11 @@
 //   done.json present  → commit-in-progress: DEFER to §5.0.a recoverCommit
 //                        (NOT §4.2). Only if recovery falls through to its
 //                        default fallback does §4.2 then apply.
-//   else, sweep if ANY of (§4.2 conditions 1–7):
+//   else, sweep if ANY of (§4.2 conditions 1–7 + §4.1 empty):
 //     1 no meta.json (or unparseable)   2 no history.jsonl   3 no cursor-a/b.json (neither slot)
+//     2b history.jsonl holds ZERO trustworthy records (§4.1 zero-edit invariant —
+//        a session that recorded no edit has no recovery value; the controlled
+//        exits already wipe these, so this only catches crash-survivors)
 //     4 no base.snapshot / sibling.snapshot
 //     5 snapshot SHA ≠ meta (sha(read snapshot) ≠ meta.*ShaAtStart) — corruption
 //     6 an input file (basePath / siblingPath) missing in the vault
@@ -30,6 +33,7 @@ import {
   cursorSlotPath,
   readMeta,
 } from "./autosave-store";
+import { assessHistory } from "./history-replay";
 
 export type SweepDecision =
   | { action: "keep" }
@@ -39,6 +43,7 @@ export type SweepDecision =
 export type SweepReason =
   | "no-meta"
   | "no-history"
+  | "empty-history"
   | "no-cursor"
   | "no-snapshot"
   | "snapshot-sha-mismatch"
@@ -60,6 +65,14 @@ export async function classifySweep(
   if (!meta) return { action: "sweep", reason: "no-meta" }; // cond 1
   if (!(await a.exists(p(conflictId, "history.jsonl")))) {
     return { action: "sweep", reason: "no-history" }; // cond 2
+  }
+  // cond 2b (§4.1 zero-edit invariant) — history.jsonl exists but holds ZERO
+  // trustworthy records → the session never recorded an edit → no recovery value
+  // (it would only ever reopen as a "0 edits saved" resume). `empty` excludes a
+  // corrupt-first-block log (that one is kept: there WAS user activity → §3.5
+  // corrupt-recovery modal). Cheap single read.
+  if (assessHistory(await a.read(p(conflictId, "history.jsonl"))).empty) {
+    return { action: "sweep", reason: "empty-history" };
   }
   // cond 3 — §2.9 ping-pong: sweep only when NEITHER slot exists (a live
   // session always has at least the survivor slot).

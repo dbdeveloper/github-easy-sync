@@ -44,6 +44,7 @@ import { TrashStore } from "./diff2/trash-store";
 import { TrashWatcher } from "./diff2/trash-watcher";
 import { sweepOnload as trashSweepOnload } from "./diff2/trash-recovery";
 import { recoverAutosaveDirs } from "./diff2/onload-recovery";
+import { setAutosaveRoot } from "./diff2/autosave-store";
 import { DiffEditView, DIFF2_EDIT_VIEW_TYPE } from "./diff2/diff-edit-view";
 import { TokenExpiredModal } from "./sync2/views/token-expired-modal";
 import { CancelSyncModal } from "./sync2/views/cancel-sync-modal";
@@ -704,6 +705,11 @@ export default class GitHubSyncPlugin extends Plugin {
   // ── engine init ─────────────────────────────────────────────────────
 
   private async initSync2(): Promise<void> {
+    // Keep the diff-editor autosave WITH the plugin's other data
+    // (`<configDir>/plugins/<id>/.diff2-autosave/`) instead of cluttering the
+    // vault root — and inside the plugin's gitignored area so it never syncs.
+    // MUST run before recoverAutosaveDirs (and any startSession) below.
+    setAutosaveRoot(`${this.app.vault.configDir}/plugins/${manifest.id}`);
     const vaultRoot =
       (this.app.vault.adapter as unknown as { basePath?: string }).basePath ??
       "";

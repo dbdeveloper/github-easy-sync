@@ -12,6 +12,18 @@
 
 .diff2-edit-view-root {
     padding: 8px;
+
+    /* Diff-editor colours (TODO §6 — OVERRIDE these to taste). The defaults are
+     * GitHub-style red/green: a subtle line/gutter TINT (-bg) under a saturated
+     * number/glyph/↵ colour (-fg, so it stays readable — red-on-red was the bug),
+     * with a STRONGER tint for the <<<<< / ===== / >>>>> marker rows (-strong).
+     * Translucent rgba over the editor background, so it adapts to light/dark. */
+    --diff2-ours-fg: #f85149;
+    --diff2-ours-bg: rgba(248, 81, 73, 0.16);
+    --diff2-ours-strong: rgba(248, 81, 73, 0.30);
+    --diff2-theirs-fg: #2ea043;
+    --diff2-theirs-bg: rgba(63, 185, 80, 0.16);
+    --diff2-theirs-strong: rgba(63, 185, 80, 0.30);
 }
 
 /* Sub-tabs header (Conflicts | Deleted) */
@@ -168,12 +180,25 @@
     background: var(--background-modifier-hover);
 }
 
+/* TODO §6 — global toolbar buttons tinted to the side they keep (red = ver1,
+ * green = ver2), matching the ver-block backgrounds; the saturated -fg border +
+ * text make them readable in either theme. */
 .diff2-btn-keep-local {
-    border-color: var(--background-modifier-error);
+    background: var(--diff2-ours-bg);
+    border-color: var(--diff2-ours-fg);
+    color: var(--diff2-ours-fg);
+}
+.diff2-btn-keep-local:hover {
+    background: var(--diff2-ours-strong);
 }
 
 .diff2-btn-apply-remote {
-    border-color: var(--background-modifier-success);
+    background: var(--diff2-theirs-bg);
+    border-color: var(--diff2-theirs-fg);
+    color: var(--diff2-theirs-fg);
+}
+.diff2-btn-apply-remote:hover {
+    background: var(--diff2-theirs-strong);
 }
 
 .diff2-btn-join-all {
@@ -204,21 +229,56 @@
     user-select: none;
 }
 
+/* The marker rows share the SAME tint as the ver-block lines they border, so
+ * <<<<< flows into ver1 and >>>>> into ver2 as one continuous band (TODO §6).
+ * --text-normal, not --text-on-accent: the glyph (<<<<<) + device label must be
+ * theme-readable — black on the light theme, white on the dark. */
 .diff2-marker-top {
-    background: var(--background-modifier-error);
-    color: var(--text-on-accent);
+    background: var(--diff2-ours-bg);
+    color: var(--text-normal);
     border-top: 1px solid var(--background-modifier-border);
 }
 
+/* §6.6 — split the ===== separator background: top half = ours (red), bottom
+ * half = theirs (green), so it reads as the seam between the two sides instead
+ * of a distracting blank white strip. Theme-aware via the Obsidian vars. */
 .diff2-marker-middle {
-    background: var(--background-secondary-alt);
-    color: var(--text-muted);
+    background: linear-gradient(
+        to bottom,
+        var(--diff2-ours-bg) 0 50%,
+        var(--diff2-theirs-bg) 50% 100%
+    );
+    color: var(--text-normal);
 }
 
 .diff2-marker-bottom {
-    background: var(--background-modifier-success);
-    color: var(--text-on-accent);
+    background: var(--diff2-theirs-bg);
+    color: var(--text-normal);
     border-bottom: 1px solid var(--background-modifier-border);
+}
+
+/* TODO §6 — ≥5px between the action buttons in the marker rows. */
+.diff2-marker-buttons {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    vertical-align: middle;
+    margin: 0 6px;
+}
+
+/* §6.3 — marker action buttons hover the same as the toolbar [Keep all RED/
+ * GREEN] buttons: a STRONGER side tint as the background, text colour unchanged.
+ * Top = ver1 (red), bottom = ver2 (green); the middle (Apply Both / Join) uses
+ * the accent. */
+.diff2-marker-top .diff2-marker-btn:hover {
+    background: var(--diff2-ours-strong);
+}
+.diff2-marker-bottom .diff2-marker-btn:hover {
+    background: var(--diff2-theirs-strong);
+}
+.diff2-marker-middle .diff2-marker-btn:hover {
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
 }
 
 .diff2-marker-glyph {
@@ -257,25 +317,103 @@
     opacity: 0.85;
 }
 
-/* Line decorations — red for ours, green for theirs */
+/* Line decorations — subtle red tint for ours, green for theirs (TODO §6). */
 .diff2-line-ours {
-    background: var(--background-modifier-error);
+    background: var(--diff2-ours-bg);
 }
 
 .diff2-line-theirs {
-    background: var(--background-modifier-success);
+    background: var(--diff2-theirs-bg);
 }
 
 .diff2-line-common {
     /* No tint — keep common lines on the editor's default background. */
 }
 
-/* Word-level overlay (R7.4) — yellow over the line tint gives
- * orange (on red) and salad (on green). The semi-transparent fill
- * lets the underlying line color show through.
- */
+/* §6.5/§6.7 — sibling-wins gutter (line-numbers.ts). Each cell carries a
+ * number plus a side glyph (− ours / + theirs), and the CELL is tinted to the
+ * line's side colour (matching the line background) so the whole gutter column
+ * — across every wrapped visual row — reads as ours/theirs. Theme handling is
+ * automatic: the Obsidian vars below are light-red/green in the light theme and
+ * dark-red/green in the dark theme, while the number/glyph colour (--text-error
+ * / --color-green) stays a saturated, readable shade on either. */
+.diff2-gutter-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+.diff2-gutter-glyph {
+    font-weight: bold;
+    width: 0.7em;
+    text-align: center;
+}
+/* §6.7 — gutter cell tinted to the side colour (-bg), with a SATURATED number +
+ * glyph (-fg) so they stay readable on the tint (a same-colour fg/bg was the
+ * "no numbers/+−" bug). The widgetMarker (line-numbers.ts) carries the same tint
+ * onto the <<<<< / ===== / >>>>> rows' gutter cells. */
+.cm-gutterElement.diff2-gutter-ours {
+    background: var(--diff2-ours-bg);
+    color: var(--diff2-ours-fg);
+}
+.cm-gutterElement.diff2-gutter-theirs {
+    background: var(--diff2-theirs-bg);
+    color: var(--diff2-theirs-fg);
+}
+/* The gutter COLUMN itself must be transparent so the translucent cell tints
+ * composite over the editor background (dark in the dark theme) — otherwise the
+ * default gutter background showed through as a white strip in dark mode. */
+.diff2-edit-view-root .cm-gutters {
+    background-color: transparent;
+    border-right: none;
+}
+
+/* The text caret — our bare CM6 EditorView doesn't inherit Obsidian's editor
+ * caret colour, so it defaulted to black and went invisible on the dark theme.
+ * --text-normal is theme-aware (black on light, white on dark). Covers both the
+ * native caret (caret-color) and a drawn one (.cm-cursor border). */
+.diff2-edit-view-root .cm-content {
+    caret-color: var(--text-normal);
+}
+.diff2-edit-view-root .cm-cursor,
+.diff2-edit-view-root .cm-cursor-primary {
+    border-left-color: var(--text-normal);
+}
+/* Marker-row gutter cells (#3) — SAME tint as the lines, so the gutter is one
+ * continuous ours/theirs band across the whole group. */
+.cm-gutterElement.diff2-gutter-ours-marker {
+    background: var(--diff2-ours-bg);
+}
+.cm-gutterElement.diff2-gutter-theirs-marker {
+    background: var(--diff2-theirs-bg);
+}
+.cm-gutterElement.diff2-gutter-split-marker {
+    background: linear-gradient(
+        to bottom,
+        var(--diff2-ours-bg) 0 50%,
+        var(--diff2-theirs-bg) 50% 100%
+    );
+}
+/* §6.7 — ↵ inside ver-blocks tinted to the side colour (matches the gutter). */
+.diff2-line-ours .diff2-newline-glyph {
+    color: var(--diff2-ours-fg);
+    opacity: 0.85;
+}
+.diff2-line-theirs .diff2-newline-glyph {
+    color: var(--diff2-theirs-fg);
+    opacity: 0.85;
+}
+
+/* Word-level overlay (R7.4 / TODO §6.4) — the CHANGED fragments inside a ver
+ * line get the STRONGER side tint (red in ver1, green in ver2), so they stand
+ * out from the subtle line tint. (Replaces the disliked yellow.) */
 .diff2-word-changed {
-    background: rgba(255, 235, 59, 0.45);
+    background: var(--background-modifier-border); /* fallback for non-ver lines */
+}
+.diff2-line-ours .diff2-word-changed {
+    background: var(--diff2-ours-strong);
+}
+.diff2-line-theirs .diff2-word-changed {
+    background: var(--diff2-theirs-strong);
 }
 
 /* 2.0.2-beta2 — ribbon "syncing" affordance. While a drain runs, the

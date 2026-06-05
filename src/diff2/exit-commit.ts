@@ -4,11 +4,24 @@
 // `[← back]` commits BOTH sides of a conflict back to the vault at once:
 // the resolved base and the resolved sibling (from `split(fromEditorModel)`,
 // surfaced by DiffPane.getResolved()). A naive "two sequential
-// atomicWriteFile" loses ver2 edits on a crash between the two writes. This
-// protocol records the expected SHAs in a `done.json` commit barrier FIRST,
-// then stages + renames both files, so recovery on the next launch is a
-// deterministic function of what's on disk — it can always roll forward to
-// the committed state or cleanly roll back to the autosave session.
+// atomicWriteFile" loses ver2 edits on a crash between the two writes (and the
+// onload sync pulse runs BEFORE the user can reopen, so a half-committed pair
+// would be pushed to the remote). This protocol records the expected SHAs in a
+// `done.json` commit barrier FIRST, then stages + promotes both files, so
+// recovery on the next launch is a deterministic function of what's on disk —
+// it can always roll forward to the committed state or cleanly roll back to the
+// autosave session, atomically for the PAIR, before the engine touches the vault.
+//
+// WRITE STRATEGY (bug3): the promote writes IN PLACE via `vault.modifyBinary`
+// when the target is an existing TFile — the editor-friendly path that
+// PRESERVES an open tab's cursor/scroll. The previous safeRename swap made
+// Obsidian see the file vanish and closed the tab. modifyBinary is NOT atomic
+// (a crash can leave a torn final), but the done.json + clean `.sync-tmp` make
+// recovery deterministic anyway: a torn final WITH our clean tmp is OUR write →
+// roll forward from the tmp; a non-matching final WITHOUT our clean tmp is a
+// genuine external edit → fall back. The original is never renamed aside, so
+// there is no `.sync-bak` (rollback only happens before any modify, when the
+// originals are still intact). New files (no TFile) atomically rename the tmp.
 //
 // SCOPE: this module is the commit engine + TOCTOU detector + per-dir
 // recovery. WIRED into the view as of W1: `commit7Step` is the `[←]` save
@@ -24,7 +37,7 @@
 // (TOCTOU). atomic-write.ts staging-path convention (SYNC2 §2.4 / PSEUDO-
 // MERGE-MODE §9.2/§9.3).
 
-import { normalizePath, type Vault } from "obsidian";
+import { normalizePath, TFile, type Vault } from "obsidian";
 import { atomicWriteFile, stagingPathFor } from "../sync2/atomic-write";
 import { safeRename } from "../sync2/cross-platform";
 import { buildSiblingPath } from "../sync2/conflict-store";
@@ -144,32 +157,27 @@ export async function commit7Step(
 
   const baseTmp = stagingPathFor(targetBase, "tmp");
   const siblingTmp = stagingPathFor(targetSibling, "tmp");
-  const baseBak = stagingPathFor(targetBase, "bak");
-  const siblingBak = stagingPathFor(targetSibling, "bak");
 
   // Step 3 — stage both new versions in .sync-tmp. Parallel: distinct paths.
+  // These are the clean source of truth recovery rolls forward from.
   await Promise.all([
     vault.adapter.writeBinary(baseTmp, baseBytes),
     vault.adapter.writeBinary(siblingTmp, siblingBytes),
   ]);
 
-  // Step 4 — move live originals aside to .sync-bak. Skipped per-file when the
-  // target doesn't exist (brand-new / save-to-alt path).
-  // SEQUENTIAL by design — see DIFF-EDITOR.md §5.0.b E vs F. Do not Promise.all.
-  if (await vault.adapter.exists(targetBase)) {
-    await safeRename(vault.adapter, targetBase, baseBak);
-  }
-  if (await vault.adapter.exists(targetSibling)) {
-    await safeRename(vault.adapter, targetSibling, siblingBak);
-  }
+  // Step 4 — promote each side IN PLACE (bug3). modifyBinary keeps an open
+  // editor's tab/cursor/scroll; a new file (no TFile) atomically renames the
+  // tmp. The original is NEVER renamed aside → no .sync-bak. The commit point
+  // is reached the moment the first modifyBinary lands; before that, originals
+  // are intact and recovery rolls back. SEQUENTIAL by design (base then
+  // sibling) so recovery reasons over one linear sequence — DIFF-EDITOR.md
+  // §5.0.b. Do not Promise.all.
+  await promoteInPlace(vault, baseTmp, targetBase, baseBytes);
+  await promoteInPlace(vault, siblingTmp, targetSibling, siblingBytes);
 
-  // Step 5 — promote .sync-tmp → final. This is the commit point.
-  // SEQUENTIAL by design — see DIFF-EDITOR.md §5.0.b H vs I. Do not Promise.all.
-  await safeRename(vault.adapter, baseTmp, targetBase);
-  await safeRename(vault.adapter, siblingTmp, targetSibling);
-
-  // Step 6 — drop the backups. Parallel.
-  await Promise.all([removeIfExists(vault, baseBak), removeIfExists(vault, siblingBak)]);
+  // Step 5 — drop the staging tmps. modify-in-place leaves the tmp behind; a
+  // new-file rename already consumed its tmp → removeIfExists is a no-op there.
+  await Promise.all([removeIfExists(vault, baseTmp), removeIfExists(vault, siblingTmp)]);
 
   // Step 6.5 — R7.11 proactive sibling cleanup. Only when we committed onto
   // the REAL conflict sibling (not a save-to-alt fresh path) AND both sides
@@ -195,6 +203,79 @@ export async function commit7Step(
     expectedSiblingSha,
     siblingRemoved,
   };
+}
+
+// Promote staged `bytes` to `targetPath` (bug3). If the target is an existing
+// TFile and the runtime exposes modifyBinary (production Obsidian, desktop +
+// mobile), write IN PLACE so any open editor on that file keeps its tab,
+// cursor, and scroll. Otherwise — a brand-new file, or the unit-test mock that
+// doesn't expose modifyBinary — atomically rename the staged tmp into place
+// (there is no open editor to preserve in either case). The tmp is LEFT for the
+// caller to clean up in the modify case (the real file already has the bytes);
+// it is CONSUMED by the rename in the new-file case. Mirrors the
+// atomicWriteFile fast-path gate so behaviour is identical across the engine.
+async function promoteInPlace(
+  vault: Vault,
+  tmpPath: string,
+  targetPath: string,
+  bytes: ArrayBuffer,
+): Promise<void> {
+  const getter = (
+    vault as { getAbstractFileByPath?: (p: string) => unknown }
+  ).getAbstractFileByPath;
+  const modBin = (
+    vault as { modifyBinary?: (f: TFile, b: ArrayBuffer) => Promise<void> }
+  ).modifyBinary;
+  if (typeof getter === "function" && typeof modBin === "function") {
+    const existing = getter.call(vault, targetPath);
+    if (existing instanceof TFile) {
+      await modBin.call(vault, existing, bytes);
+      return;
+    }
+  }
+  await safeRename(vault.adapter, tmpPath, targetPath);
+}
+
+// ── exit decision: commit vs discard (§5.0 + §4.1 zero-edit invariant) ─
+
+export type ExitOutcome =
+  // §4.1: the session recorded ZERO edits → no recovery value AND nothing to
+  // commit. The dir was wiped; base/sibling were NOT touched.
+  | { kind: "discarded" }
+  // recordCount > 0, vault unchanged → the 7-step pair-atomic commit ran.
+  | { kind: "committed"; result: Commit7Result }
+  // recordCount > 0, vault changed under the session → caller runs the §5.0.e modal.
+  | { kind: "toctou"; toctou: Extract<ToctouStatus, { kind: "mismatch" }> };
+
+// The `[← back]` exit decision, extracted from the view so the END STATE is
+// unit-testable (the view glue is not). Encodes the §4.1 zero-edit invariant:
+//
+//   recordCount === 0 → the session holds NO recorded edits, so it has no
+//     recovery value AND nothing to commit — split(fromEditorModel) reproduces
+//     the inputs byte-for-byte (§1.5). Wipe the dir WITHOUT touching base/sibling
+//     and WITHOUT the safeRename swap (strictly safer: a byte-identical commit
+//     would still yank an editor tab that has an input file open). → "discarded".
+//   recordCount  >  0 → classifyToctou; "ok" → commit7Step → "committed";
+//     "mismatch" → "toctou" (the caller resolves it via the §5.0.e modal — that
+//     path is view-coupled and stays in the view).
+export async function commitOrDiscardExit(
+  vault: Vault,
+  conflictId: string,
+  meta: AutosaveMeta,
+  resolved: ResolvedSides,
+  recordCount: number,
+): Promise<ExitOutcome> {
+  if (recordCount === 0) {
+    const dir = autosaveDir(conflictId);
+    if (await vault.adapter.exists(dir)) {
+      await vault.adapter.rmdir(dir, true);
+    }
+    return { kind: "discarded" };
+  }
+  const toctou = await classifyToctou(vault, meta);
+  if (toctou.kind === "mismatch") return { kind: "toctou", toctou };
+  const result = await commit7Step(vault, conflictId, meta, resolved);
+  return { kind: "committed", result };
 }
 
 // ── §5.0.e — symmetric exit-TOCTOU writers ───────────────────────────
@@ -343,13 +424,23 @@ export async function recoverCommit(
     done.expectedSiblingSha,
   );
 
-  // A final slot that matches NEITHER the session-start bytes NOR the
-  // committed bytes was written by something else (another device's sync, a
-  // manual edit) — external modification. Rolling forward would step-4-rename
-  // it to .bak and then delete it, losing that content. Bail to fallback. Note
-  // this is correctly SCOPED by classification: post-commit rows (H/I/J/K)
-  // have final === "new", which is NOT foreign, so they still roll forward.
-  if (base.final === "foreign" || sibling.final === "foreign") {
+  // A final slot that matches NEITHER the session-start bytes NOR the committed
+  // bytes is EITHER (a) our own torn modifyBinary (bug3 modify-in-place is not
+  // atomic), OR (b) an external write (another device's sync, a manual edit).
+  // The discriminator is OUR clean tmp: a torn final WITH `tmp === "tmpNew"` is
+  // our half-written commit → roll forward from the clean tmp. A non-matching
+  // final WITHOUT our clean tmp is a genuine external edit → fall back (never
+  // clobber it). Under the old safeRename promote a torn final was impossible,
+  // so "foreign" alone meant external; modify-in-place adds the torn case, hence
+  // the `&& tmp !== "tmpNew"` qualifier (§5.0.b). Residual risk: an external
+  // edit of this exact file in the crash→onload window WHILE our clean tmp sits
+  // staged → we roll forward over it. Same risk class atomicWriteFile already
+  // accepts; not engineered around. Post-commit rows still have final === "new"
+  // (not foreign) and roll forward as before.
+  if (
+    (base.final === "foreign" && base.tmp !== "tmpNew") ||
+    (sibling.final === "foreign" && sibling.tmp !== "tmpNew")
+  ) {
     await cleanupStagingAndDir(vault, autosaveId, base, sibling);
     return { kind: "fallback", reason: "external-modification" };
   }

@@ -307,6 +307,19 @@ export function buildDecorationSet(
     }
 
     // Bottom marker — below ver2, or below ver1 when ver2 empty.
+    //
+    // The anchor is the END of the group's last line, which (when the group
+    // is followed by more content) equals the START of the NEXT doc line.
+    // The top/middle markers anchor at the START of the content they precede
+    // with side:-1 (render ABOVE it) and that works cleanly. The bottom
+    // marker must use the SAME idiom: a block widget at a line's `from` needs
+    // side:-1 to sit ABOVE that line. With side:1 here CM6 splits off a
+    // phantom empty line before the marker and the next line loses its
+    // Decoration.line (the gutter number + nav geometry then shift by one —
+    // every ver-block's trailing line desynced). The ONLY case where the
+    // anchor is a line END rather than a following line's START is the
+    // EOL-less group at end-of-document (anchor === doc.length, no line
+    // after) — there the marker belongs BELOW the last line → side:1.
     const bottomAnchor = v2Empty ? v1.to : v2.to;
     pushBlock(
       bottomAnchor,
@@ -318,17 +331,27 @@ export function buildDecorationSet(
         opts.callbacks,
         v2Empty,
       ),
-      1,
+      bottomAnchor < doc.length ? -1 : 1,
     );
   }
 
-  // §1.6.a.1: a `↵` glyph at the end of every line that is followed by a
-  // real \n — i.e. all lines except the last. Since line-wrap is always
-  // on (§1.6.a.0), this disambiguates a hard line break from a soft wrap,
-  // across the WHOLE document. The LAST line gets no glyph: its absence
-  // signals "no trailing newline" (§1.2 last-line-of-file). Ghost only —
-  // a widget, never part of the doc, so never selected or copied.
+  // §1.6.a.1 (TODO §6.8): a `↵` glyph at the end of every VER1/VER2 line that is
+  // followed by a real \n — to disambiguate a hard break from a soft wrap when
+  // comparing the two sides (line-wrap is always on, §1.6.a.0). NOT on normal
+  // lines — there it was just noise (the user reads them as plain text). The
+  // glyph is tinted to the side colour via .diff2-line-ours/theirs (CSS). The
+  // last line of a ver-block with no trailing \n gets none (its absence signals
+  // EOL-less, §1.2). Ghost only — a widget, never selected or copied.
+  const verLines = new Set<number>();
+  for (const s of structure) {
+    if (s.role === "ver1" || s.role === "ver2") {
+      eachLineStart(doc, s.from, s.to, (from) =>
+        verLines.add(doc.lineAt(from).number),
+      );
+    }
+  }
   for (let ln = 1; ln < doc.lines; ln++) {
+    if (!verLines.has(ln)) continue;
     const line = doc.line(ln);
     decos.push(
       Decoration.widget({ widget: NEWLINE_GLYPH, side: 1 }).range(line.to),

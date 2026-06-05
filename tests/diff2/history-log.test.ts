@@ -116,7 +116,7 @@ describe("HistoryWriter — serialized append per transaction (§2.7/§2.8)", ()
     await w.drain();
     const seqs = (await readLines()).map((l) => parseHistoryBlock(l)!.seq);
     expect(seqs).toEqual([8, 9]);
-    expect(w.currentSeq()).toBe(9);
+    expect(w.liveBlockCount()).toBe(9);
   });
 
   it("drain on an empty writer is a no-op", async () => {

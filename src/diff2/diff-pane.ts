@@ -33,7 +33,7 @@ import {
   Transaction,
   TransactionSpec,
 } from "@codemirror/state";
-import { EditorView, keymap } from "@codemirror/view";
+import { drawSelection, EditorView, keymap } from "@codemirror/view";
 import {
   defaultKeymap,
   history,
@@ -79,6 +79,13 @@ export interface DiffPaneOpts {
   // recovery replay consumes. Fires ONLY while recording is enabled (see
   // enableRecording): live user edits, never construct / replay / setCursor.
   onRecord?: (change: unknown, structure: Segment[]) => void;
+  // TODO §5 — invoked once per CM6 UNDO transaction (isUserEvent("undo")) instead
+  // of onRecord, so the owner can DROP the last history.jsonl block. Without this
+  // an undo would be re-recorded as a forward inverse block: the log grows
+  // unbounded on undo/redo cycling and the net edit-count feeding §4.1.a exit-wipe
+  // is wrong. Redo / edit-after-undo fall to onRecord (append) — correct. Same
+  // recording gate as onRecord.
+  onUndo?: () => void;
   // W3 — invoked on a PURE caret/selection move (selectionSet && !docChanged),
   // for the cursor-flush timer (§2.9). Doc changes go through onRecord (which
   // also schedules a flush, on the typing cadence). Same recording gate as
@@ -157,6 +164,11 @@ export class DiffPane {
           structureHistory,
           keymap.of([...historyKeymap, ...defaultKeymap]),
           EditorView.lineWrapping,
+          // TODO §6.9 — draw the selection ourselves instead of the native one,
+          // so the highlight extends to the line END and covers the trailing `↵`
+          // glyph (a widget the native selection left outside the highlight). It
+          // also draws the caret as .cm-cursor (already styled, §6 caret fix).
+          drawSelection(),
           // W2 — history feed: one block per RECORDABLE transaction (a doc
           // change, or a setDiffPaneState structure change) while recording is
           // enabled. Double-guarded against the record→replay→re-record loop:
@@ -164,15 +176,22 @@ export class DiffPane {
           // so this loop body never runs) AND `recording` is false during it.
           EditorView.updateListener.of((u) => {
             if (!this.recording) return;
-            if (this.opts.onRecord) {
-              for (const tr of u.transactions) {
-                if (
-                  !tr.docChanged &&
-                  !tr.effects.some((e) => e.is(setDiffPaneState))
-                ) {
-                  continue;
-                }
-                this.opts.onRecord(
+            for (const tr of u.transactions) {
+              if (
+                !tr.docChanged &&
+                !tr.effects.some((e) => e.is(setDiffPaneState))
+              ) {
+                continue;
+              }
+              // TODO §5 — a CM6 undo (isUserEvent "undo") DROPS the last block
+              // instead of recording a forward inverse; redo + edit-after-undo
+              // fall to onRecord (append). With newGroupDelay:0 each recordable
+              // tx is exactly one undo step, so this keeps the on-disk block
+              // count == the editor's undo depth (pinned by the test oracle).
+              if (tr.isUserEvent("undo")) {
+                this.opts.onUndo?.();
+              } else {
+                this.opts.onRecord?.(
                   tr.changes.toJSON(),
                   u.state.field(diffPaneStateField)!.structure,
                 );
@@ -194,6 +213,17 @@ export class DiffPane {
       }),
       parent,
     });
+  }
+
+  // TODO §6.1 — focus the editor so the caret is visible immediately and
+  // Ctrl/Cmd+Z works WITHOUT a preceding mouse click (the CM6 undo keymap only
+  // fires while .cm-content has focus). Called by the owner AFTER mount (not in
+  // the constructor: focusing mid-construction schedules a measure that a
+  // dispatch on the very next tick trips with "update in progress"). No-op on a
+  // detached pane; on mobile a programmatic, non-gesture focus doesn't pop the
+  // keyboard.
+  focus(): void {
+    this.view.focus();
   }
 
   // W2 — turn on the history feed. The owner (DiffEditView) calls this AFTER
@@ -282,10 +312,20 @@ export class DiffPane {
     const len = this.view.state.doc.length;
     const a = Math.max(0, Math.min(anchor, len));
     const h = Math.max(0, Math.min(head, len));
-    this.view.dispatch({ selection: { anchor: a, head: h } });
+    // TODO §6.2 — scroll the restored caret into view via the CM6 effect, which
+    // is applied AFTER the next layout measure. Setting scrollDOM.scrollTop here
+    // directly (below) runs BEFORE the freshly-mounted view is measured, so the
+    // scroll silently doesn't stick — that's why the resume didn't scroll to
+    // where the user left off. scrollIntoView is robust; scrollTop is a
+    // best-effort pixel-perfect bonus layered on top.
+    this.view.dispatch({
+      selection: { anchor: a, head: h },
+      effects: EditorView.scrollIntoView(a, { y: "center" }),
+    });
     if (typeof scrollTop === "number") {
       this.view.scrollDOM.scrollTop = scrollTop;
     }
+    this.view.focus(); // the restored caret must be in a FOCUSED editor (§6.1)
   }
 
   destroy(): void {
@@ -381,6 +421,14 @@ export class DiffPane {
         activeEmptyVer: null, // a chunk action clears any activation
       }),
     });
+    // Return focus to the editor (TODO §4). Every chunk/group action arrives via
+    // a button CLICK (marker [apply]/[remove]/… or a toolbar [Keep all local]/
+    // [Join all]…), which moves DOM focus onto the <button>. The CM6 undo/redo
+    // keymap only fires while .cm-content has focus, so without this Ctrl/Cmd+Z
+    // after a button action would do nothing (the transaction IS in history —
+    // proven by undo-redo.test — the keystroke just never reached CM6). Free
+    // typing kept focus, which is why undo "only worked for keyboard edits".
+    this.view.focus();
   }
 }
 

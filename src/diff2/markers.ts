@@ -125,30 +125,31 @@ export class ConflictMarkerWidget extends WidgetType {
   }
 
   private renderActionButtons(parent: HTMLElement): void {
-    // R7.5 semantics + R7.6 arrows:
-    //   top    — [apply ↓] [remove ↓]
-    //              apply on top   = take ours-lines
-    //              remove on top  = drop ours, take theirs-lines
-    //   bottom — [apply ↑] [remove ↑]
-    //              apply on bottom = take theirs-lines
-    //              remove on bottom = drop theirs, take ours-lines
-    //   middle — [apply both ↓↑] [remove both ↓↑]
-    //              plus [join <label>] (markdown only)
+    // R7.5 semantics + R7.6 arrows (labels: TODO §6.3/§6.4 — Capitalized; ver1
+    // = local so its "take" reads [Keep], mirroring the [Keep all local] command;
+    // ver2 = remote so its "take" reads [Apply], mirroring [Apply all remote]):
+    //   top    — [Keep ↓] [Remove ↓]
+    //              Keep on top   = take ours-lines (keep local)
+    //              Remove on top = drop ours, take theirs-lines
+    //   bottom — [Apply ↑] [Remove ↑]
+    //              Apply on bottom = take theirs-lines (apply remote)
+    //              Remove on bottom = drop theirs, take ours-lines
+    //   middle — [Apply Both ↓↑] [Remove Both ↓↑]  plus [Join (<label>)] (md only)
     if (this.kind === "top") {
-      this.addBtn(parent, "apply ↓", "ours");
-      this.addBtn(parent, "remove ↓", "theirs");
+      this.addBtn(parent, "Keep ↓", "ours");
+      this.addBtn(parent, "Remove ↓", "theirs");
       return;
     }
     if (this.kind === "bottom") {
-      this.addBtn(parent, "apply ↑", "theirs");
-      this.addBtn(parent, "remove ↑", "ours");
+      this.addBtn(parent, "Apply ↑", "theirs");
+      this.addBtn(parent, "Remove ↑", "ours");
       return;
     }
     // middle
-    this.addBtn(parent, "apply both ↓↑", "both");
-    this.addBtn(parent, "remove both ↓↑", "neither");
+    this.addBtn(parent, "Apply Both ↓↑", "both");
+    this.addBtn(parent, "Remove Both ↓↑", "neither");
     if (this.isMarkdown) {
-      this.addBtn(parent, `join ${this.label || "remote"}`, "join");
+      this.addBtn(parent, `Join (${this.label || "remote"})`, "join");
     }
   }
 

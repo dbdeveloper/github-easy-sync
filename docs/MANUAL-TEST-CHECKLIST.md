@@ -78,7 +78,14 @@ suite (`pnpm test:integration`).
 - [ ] **Ctrl/Cmd-Home / Ctrl/Cmd-End** jump to the first/last line — verify the case where the first line is a **hidden empty "local" block** and the last is a **hidden empty "remote" block** (they reveal/activate correctly).
 - [ ] **Home / End** on a wrapped line behave sensibly (visual vs logical line start/end).
 - [ ] **Entering an empty change block:** pressing Down from a normal line above an empty block reveals a temporary blank line; pressing Down again without typing collapses it and moves on. Up from below is the mirror.
-- [ ] **Markers:** the `<<<<<` / `=====` / `>>>>>` rows render as block widgets; the action buttons (apply / remove / both / neither / join) are clickable; the device label shows on the top/bottom markers.
+- [ ] **Markers:** the `<<<<<` / `=====` / `>>>>>` rows render as block widgets; the action buttons are clickable; the device label shows on the top/bottom markers.
+- [ ] **Button labels (TODO §6.3/§6.4):** top (ours) = `[Keep ↓] [Remove ↓]`; middle = `[Apply Both ↓↑] [Remove Both ↓↑] [Join (<remote>)]`; bottom (theirs) = `[Apply ↑] [Remove ↑]` — all Capitalized, Join label in parens.
+- [ ] **Focus on open (TODO §6.1):** opening a conflict shows the blinking caret immediately and Ctrl/Cmd+Z works WITHOUT clicking into the text first.
+- [ ] **Cursor restore (TODO §6.2):** edit deep in a long conflict, force-quit, reopen → the editor scrolls to roughly where you left off (caret visible, focused).
+- [ ] **Gutter glyphs + colour (TODO §6.5/§6.7):** ours lines show `−` and a red-tinted gutter cell; theirs lines show `+` and a green-tinted cell; wrapped continuation rows keep the colour (no repeated number/glyph). The gutter band also covers the `<<<<<` / `=====` / `>>>>>` marker rows.
+- [ ] **`↵` only in ver-blocks (TODO §6.8):** the `↵` newline glyph appears ONLY inside ver1/ver2 lines (red/green), NOT on normal/common lines.
+- [ ] **Separator colour (TODO §6.6):** the `=====` row is split top-red / bottom-green (not a blank white strip).
+- [ ] **Light AND dark themes:** switch Obsidian theme — the ours/theirs backgrounds, gutter, and numbers stay readable in both (light: light bg + dark numbers; dark: dark bg + bright numbers).
 - [ ] **Colours:** the local side is red, the remote side green, and intra-line word differences get a yellow overlay (blending to orange / olive).
 - [ ] **No-trailing-newline edge:** a whole-file single-line difference (e.g. local `"abc"` vs remote `"XYZ"`) renders without errors and without a marker landing mid-line.
 
@@ -86,14 +93,21 @@ suite (`pnpm test:integration`).
 
 - [ ] Opening the editor from each entry point (file menu *Resolve conflict*, the diff ribbon icon, the post-sync summary modal).
 - [ ] Resolving via the buttons and via the hotkeys (`Ctrl+Enter` / `Ctrl+Backspace` / `Ctrl+Shift+Enter` / `Ctrl+Shift+Backspace` / `Ctrl+Shift+.`).
+- [ ] **Undo/redo after a BUTTON action (TODO §4):** click a marker `[apply]`/`[remove]`/… or a toolbar `[Keep all local]` / `[Apply all remote]` / `[Join all changes]`, then press **Ctrl/Cmd+Z** — it must undo the action (and Ctrl/Cmd+Shift+Z redo it). Previously a button click stole focus and Ctrl+Z did nothing.
+- [ ] **Undo shrinks the recovery log (TODO §5):** make 3 changes, press Ctrl/Cmd+Z twice, then force-quit Obsidian and reopen the conflict → the recovery replays **only the 1 surviving change** (not all 3). Make N changes then N undos → reopening offers a *fresh* session (the log is empty, nothing to resume). This needs a force-quit (the log is discarded on a clean `[← back]`).
 - [ ] **`[← Back]`** writes the resolved file, removes a now-redundant sibling, and returns to the list.
-- [ ] **`[×]`** (tab close) discards the session; the vault is left as it was before editing.
+- [ ] **⚠️ Open editor survives `[← Back]` (bug3):** open the conflict's base file (e.g. `test.md`) in a NORMAL markdown tab FIRST, then resolve that conflict in the diff-editor and press `[← Back]`. The markdown tab must STAY OPEN (not close/reopen), and its cursor + scroll position should be preserved (the write goes through `modifyBinary` in place, not a rename swap). Try with the sibling open too.
+- [ ] **Config-dir conflict:** if a conflict ever lands on a `.obsidian/…` file, `[← Back]` still commits it correctly (those files aren't opened in tabs, so they take the rename path — no tab to preserve).
+- [ ] **⚠️ Resolve via BUTTONS ONLY (no typing)** — click *Keep all local* / per-chunk `[apply]`, then `[← Back]`: the inputs **are written** (Notice "Saved…", redundant sibling cleaned if converged). They must NOT be silently discarded. *(This is the data-loss-critical seam: a button resolve must count as a recorded edit — §4.1.a `recordCount > 0`.)*
+- [ ] **`[×]`** (tab close) **with edits** keeps the session for recovery; **with zero edits** silently discards it. The vault is left as it was before editing in both cases.
 - [ ] **One editor at a time:** clicking another conflict during an active edit shows a *"close the current edit first"* notice instead of losing work.
 - [ ] **Select all + delete** then `[← Back]` saves a single newline (not a 0-byte file).
 - [ ] **Standard editing commands** (delete line, delete word, Home/End, Page Up/Down) behave normally and never corrupt the merged view. (Note: *delete to end of line* / Ctrl+K is not bound yet — verify if/when added.)
 
 **Autosave & recovery (⏳ later milestone):**
 
+- [ ] **Zero-edit invariant (§4.1.a):** open a conflict, change **nothing**, leave (via `[← Back]`, a sub-tab switch, or closing the view). Reopening the SAME conflict must NOT show a *"Resume previous edit session · 0 edits saved"* dialog — it opens fresh. (The `.diff2-autosave/<id>/` dir is wiped on the zero-edit exit; a crash-survivor empty dir is swept on the next plugin load.)
+- [ ] **No spurious re-mount:** while editing a conflict, trigger a background sync that adds/removes another conflict → the editor you're in keeps its state (it does NOT re-mount or pop a resume dialog mid-edit).
 - [ ] Edit, force-quit Obsidian, reopen the conflict → a recovery dialog offers *Continue editing*, which restores the in-progress state with the caret roughly where it was; Undo steps back through the edits.
 - [ ] *Start over* discards the session and starts fresh from the current files.
 - [ ] If the underlying files changed during the session (a sync pulled new content), a dialog offers *restore the previous version / discard / cancel*.

@@ -58,16 +58,21 @@ export function renderConflictsToolbar(
   // Middle cluster: group resolve buttons.
   const middle = container.createDiv({ cls: "diff2-toolbar-actions" });
 
+  // TODO §6 — short, colour-named buttons (red = ver1/local, green = ver2/
+  // remote) tinted to the side colour. Safe because undo/redo is reliable. The
+  // full device-scoped description stays on hover (title).
   const keepBtn = middle.createEl("button", {
     cls: "diff2-btn diff2-btn-keep-local",
-    text: `Keep all local (${labels.localLabel}) changes`,
+    text: "Keep all RED changes",
   });
+  keepBtn.title = `Keep all local (${labels.localLabel}) changes`;
   keepBtn.addEventListener("click", () => callbacks.onKeepAllLocal());
 
   const applyBtn = middle.createEl("button", {
     cls: "diff2-btn diff2-btn-apply-remote",
-    text: `Apply all remote (${labels.remoteLabel}) changes`,
+    text: "Keep all GREEN changes",
   });
+  applyBtn.title = `Apply all remote (${labels.remoteLabel}) changes`;
   applyBtn.addEventListener("click", () => callbacks.onApplyAllRemote());
 
   if (callbacks.onJoinAll) {

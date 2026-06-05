@@ -16,6 +16,7 @@ import { Vault as MockVault } from "../../mock-obsidian";
 import type { Vault } from "obsidian";
 import { autosaveDir, startSession } from "../../src/diff2/autosave-store";
 import { recoverAutosaveDirs } from "../../src/diff2/onload-recovery";
+import { serializeHistoryBlock } from "../../src/diff2/history-log";
 
 const enc = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer;
 const NOW = "2026-06-03T12:00:00.000Z";
@@ -41,6 +42,12 @@ async function makeSession(
   await vault.adapter.writeBinary(basePath, enc(baseContent));
   await vault.adapter.writeBinary(siblingPath, enc(sibContent));
   await startSession(vault, id, basePath, siblingPath, NOW);
+  // Record one edit — a 0-record session is now swept by the §4.1 zero-edit
+  // invariant (cond 2b), so a "keep"/"defer" fixture must look like real work.
+  await vault.adapter.append(
+    `${autosaveDir(id)}/history.jsonl`,
+    serializeHistoryBlock(1, NOW, [10], []) + "\n",
+  );
   return { basePath, siblingPath };
 }
 

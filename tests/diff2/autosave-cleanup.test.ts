@@ -11,6 +11,7 @@ import { Vault as MockVault } from "../../mock-obsidian";
 import type { Vault } from "obsidian";
 import { autosaveDir, startSession } from "../../src/diff2/autosave-store";
 import { classifySweep, sweepAll } from "../../src/diff2/autosave-cleanup";
+import { serializeHistoryBlock } from "../../src/diff2/history-log";
 
 const NOW = "2026-06-02T12:00:00.000Z";
 const enc = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer;
@@ -21,17 +22,35 @@ function fixture() {
   return { root, vault: new MockVault(root) as unknown as Vault };
 }
 
+const file = (id: string, name: string) => `${autosaveDir(id)}/${name}`;
+
+// Append one valid (checksummed) history record so the session is NOT empty —
+// the §4.1 zero-edit invariant (cond 2b) sweeps a 0-record session, so a "keep"
+// case must have recorded at least one edit. The change/structure payload only
+// has to round-trip through assessHistory's parse+checksum (not a real replay).
+async function recordOne(vault: Vault, id: string) {
+  const block = serializeHistoryBlock(1, NOW, [10], []);
+  await vault.adapter.append(file(id, "history.jsonl"), block + "\n");
+}
+
 // Start a real session for `id` with distinct input files; base ≠ sibling.
-async function seed(vault: Vault, id: string, base = "base v1\n", sib = "sib v1\n") {
+// Records one edit by default (a keepable session); pass records=0 for the
+// empty-history (zero-edit) case.
+async function seed(
+  vault: Vault,
+  id: string,
+  base = "base v1\n",
+  sib = "sib v1\n",
+  records = 1,
+) {
   const bp = `b-${id}.md`;
   const sp = `s-${id}.md`;
   await vault.adapter.writeBinary(bp, enc(base));
   await vault.adapter.writeBinary(sp, enc(sib));
   await startSession(vault, id, bp, sp, NOW);
+  if (records > 0) await recordOne(vault, id);
   return { bp, sp };
 }
-
-const file = (id: string, name: string) => `${autosaveDir(id)}/${name}`;
 
 describe("classifySweep — §4.2 conditions", () => {
   let fx: ReturnType<typeof fixture>;
@@ -68,6 +87,19 @@ describe("classifySweep — §4.2 conditions", () => {
     await seed(fx.vault, id);
     await fx.vault.adapter.remove(file(id, "history.jsonl"));
     expect(await classify()).toEqual({ action: "sweep", reason: "no-history" });
+  });
+
+  it("empty history (0 records) → sweep (§4.1 zero-edit invariant, cond 2b)", async () => {
+    await seed(fx.vault, id, "base v1\n", "sib v1\n", 0); // history.jsonl empty
+    expect(await classify()).toEqual({ action: "sweep", reason: "empty-history" });
+  });
+
+  it("a corrupt-FIRST-block history (0 trustworthy, but user activity) → NOT empty-swept", async () => {
+    await seed(fx.vault, id, "base v1\n", "sib v1\n", 0);
+    await fx.vault.adapter.write(file(id, "history.jsonl"), "{ not valid json\n");
+    // assessHistory.empty is false (stoppedAtCorrupt) → cond 2b does NOT fire;
+    // the session is kept for the §3.5 corrupt-recovery modal.
+    expect(await classify()).toEqual({ action: "keep" });
   });
 
   it("no cursor (NEITHER ping-pong slot) → sweep", async () => {

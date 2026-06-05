@@ -31,6 +31,37 @@ describe("DiffPane actions (1b.1 model)", () => {
     container.remove();
   });
 
+  describe("TODO §4 — focus returns to the editor so Ctrl/Cmd+Z works", () => {
+    // Every chunk/group action arrives via a button CLICK, which moves DOM
+    // focus onto the <button>; the CM6 undo keymap only fires while .cm-content
+    // has focus. Without the dispatchModel `view.focus()`, undo "only worked for
+    // keyboard edits" (the transaction IS in history — see undo-redo.test — the
+    // keystroke just never reached CM6 after a button click).
+    it("applyToChunk re-focuses the editor (steal focus first)", () => {
+      pane = new DiffPane(container, "c\nours\nc2\n", "c\ntheirs\nc2\n");
+      const view = pane.getView();
+      view.requestMeasure();
+      const stealer = document.body.appendChild(document.createElement("button"));
+      stealer.focus();
+      expect(view.hasFocus).toBe(false); // a button stole focus
+      pane.applyToChunk(0, "ours");
+      expect(view.hasFocus).toBe(true); // …returned so Ctrl+Z reaches CM6
+      stealer.remove();
+    });
+
+    it("resolveAll (toolbar [Keep all local] / [Join all]) re-focuses the editor", () => {
+      pane = new DiffPane(container, "c\nA\nc2\nB\nc3\n", "c\nX\nc2\nY\nc3\n");
+      const view = pane.getView();
+      view.requestMeasure();
+      const stealer = document.body.appendChild(document.createElement("button"));
+      stealer.focus();
+      expect(view.hasFocus).toBe(false);
+      pane.resolveAll("ours"); // the bulk path
+      expect(view.hasFocus).toBe(true);
+      stealer.remove();
+    });
+  });
+
   describe("applyToChunk", () => {
     it("ours: resolves the group to ver1, drops markers", () => {
       pane = new DiffPane(
