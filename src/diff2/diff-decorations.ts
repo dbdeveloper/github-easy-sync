@@ -1,0 +1,97 @@
+// V2 decoration DECISIONS — the pure §2.2.8 rules that say, given the doc +
+// structure + caret, which ver-block lines collapse (height:0), which show the
+// `↵` glyph, and where the `≪`/`==`/`≫` markers anchor. These are the
+// spec-encoding (unit-tested here); turning them into CM6 `Decoration` objects +
+// the geometry (height:0 actually rendering 0px, markers not stealing
+// `Decoration.line`) is the diff-pane.ts view layer, already validated by the 1a
+// browser gate.
+//
+// Terminal-inside reminder: a ver range [from, to) covers content + the terminal
+// `\n` at index `to-1`; the terminal `\n` is its own (empty) line — the LAST line
+// of the range (`doc.lineAt(to-1)`).
+//
+// §2.2.8 collapse / glyph rules:
+//   1. unfocused empty ver-block → NOT shown (height:0);
+//   2. focused empty ver-block ("|\n") → shown full height;
+//   3. the terminal (last) line never shows the `↵` glyph;
+//   4. a non-empty ver-block's terminal line → ALWAYS hidden (height:0).
+//   NOTE: `↵` shows on every ver-block line EXCEPT the terminal; never on normals.
+
+import type { Text } from "@codemirror/state";
+import type { VerRange } from "./diff-model";
+
+export interface LineDecision {
+  line: number; // CM6 line number (1-indexed)
+  from: number; // line.from (anchor for Decoration.line)
+  ver: 1 | 2;
+  group: number;
+  collapsed: boolean; // height:0
+  glyph: boolean; // show the `↵` end-of-line glyph
+  isTerminal: boolean; // the terminal (last) line of the range
+}
+
+// One decision per ver-block line, in document order. `caret` is the selection
+// head (so a focused empty ver-block expands). Normal lines produce nothing.
+export function verLineDecisions(doc: Text, ranges: VerRange[], caret: number): LineDecision[] {
+  const out: LineDecision[] = [];
+  for (const r of [...ranges].sort((a, b) => a.from - b.from)) {
+    const firstLine = doc.lineAt(r.from).number;
+    const termLine = doc.lineAt(r.to - 1).number; // last line of the range = terminal `\n`
+    const empty = r.to - r.from === 1;
+    for (let n = firstLine; n <= termLine; n++) {
+      const line = doc.line(n);
+      const isTerminal = n === termLine;
+      let collapsed = false;
+      if (isTerminal) {
+        // empty: hide unless the caret sits on it; non-empty: always hide the terminal line.
+        collapsed = empty ? !(caret >= r.from && caret <= r.to) : true;
+      }
+      out.push({
+        line: n,
+        from: line.from,
+        ver: r.ver,
+        group: r.group,
+        collapsed,
+        glyph: !isTerminal, // §2.2.8(3) / NOTE
+        isTerminal,
+      });
+    }
+  }
+  return out;
+}
+
+export type MarkerKind = "open" | "mid" | "close"; // ≪ / == / ≫
+
+export interface MarkerSpec {
+  pos: number; // anchor position for the block widget
+  side: number; // -1 → render ABOVE the line at pos (the TODO #1-safe choice); 1 → below
+  kind: MarkerKind;
+  group: number;
+}
+
+// Block-widget marker anchors (§2.2.2 layout). `side:-1` anchors the widget to a
+// line START so it renders ABOVE that line — this is the TODO #1 fix (the old
+// `side:1` bottom marker stole the next line's Decoration.line). The close marker
+// uses `side:1` ONLY when the group ends the document (no following line).
+export function markerSpecs(doc: Text, ranges: VerRange[]): MarkerSpec[] {
+  const byGroup: Record<number, Partial<Record<1 | 2, VerRange>>> = {};
+  for (const r of ranges) (byGroup[r.group] ??= {})[r.ver] = r;
+  const out: MarkerSpec[] = [];
+  for (const g of Object.keys(byGroup)
+    .map(Number)
+    .sort((a, b) => a - b)) {
+    const v1 = byGroup[g][1];
+    const v2 = byGroup[g][2];
+    if (!v1 || !v2) continue; // a group always has both; defensive
+    out.push({ pos: doc.lineAt(v1.from).from, side: -1, kind: "open", group: g });
+    out.push({ pos: doc.lineAt(v2.from).from, side: -1, kind: "mid", group: g });
+    const anchor = v2.to; // start of the next normal line (or doc end)
+    out.push({
+      pos: doc.lineAt(anchor).from,
+      side: anchor < doc.length ? -1 : 1,
+      kind: "close",
+      group: g,
+    });
+  }
+  return out;
+}
