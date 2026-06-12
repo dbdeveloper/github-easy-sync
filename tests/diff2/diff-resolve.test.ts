@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import { buildModel, splitModel } from "../../src/diff2/diff-model";
 import { readStructure } from "../../src/diff2/diff-structure";
-import { resolveGroup } from "../../src/diff2/diff-resolve";
+import { currentGroupAt, resolveAll, resolveGroup } from "../../src/diff2/diff-resolve";
 import { createDiffPaneState } from "../../src/diff2/diff-pane-v2";
 
 // one group: base "a\nL\nc\n" vs "a\nR\nc\n" ⇒ doc "a\nL\n\nR\n\nc\n"
@@ -74,5 +74,33 @@ describe("diff-resolve — dispatch-level (doc + structure resolve together)", (
       { from: 7, to: 11, ver: 1, group: 1 },
       { from: 11, to: 15, ver: 2, group: 1 },
     ]);
+  });
+});
+
+describe("diff-resolve — currentGroupAt (§1.9 hotkey target)", () => {
+  const s = createDiffPaneState("a\nL1\nb\nL2\nc\n", "a\nR1\nb\nR2\nc\n"); // groups [2,10),[12,20)
+  const ranges = readStructure(s);
+  it("returns the group whose span contains the caret", () => {
+    expect(currentGroupAt(ranges, 3)).toBe(0); // inside group 0
+    expect(currentGroupAt(ranges, 14)).toBe(1); // inside group 1
+  });
+  it("returns null when the caret is in normal space", () => {
+    expect(currentGroupAt(ranges, 0)).toBeNull(); // "a"
+    expect(currentGroupAt(ranges, 11)).toBeNull(); // "b" between the groups
+  });
+});
+
+describe("diff-resolve — resolveAll (bulk toolbar)", () => {
+  it("resolves EVERY group in one transaction; structure emptied", () => {
+    const s0 = createDiffPaneState("a\nL1\nb\nL2\nc\n", "a\nR1\nb\nR2\nc\n");
+    const spec = resolveAll(s0.doc, readStructure(s0), "keep2")!; // apply all remote
+    const s1 = s0.update(spec).state;
+    expect(s1.doc.toString()).toBe("a\nR1\nb\nR2\nc\n"); // both groups → ver2
+    expect(readStructure(s1)).toEqual([]);
+    expect(s1.selection.main.head).toBe(2); // first resolved group
+  });
+  it("returns null when there are no conflicts", () => {
+    const s0 = createDiffPaneState("x\ny\n", "x\ny\n");
+    expect(resolveAll(s0.doc, readStructure(s0), "keep1")).toBeNull();
   });
 });

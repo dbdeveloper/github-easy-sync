@@ -9,7 +9,12 @@
 import { describe, expect, it } from "vitest";
 import { createDiffPaneState, decorationsField, mountDiffPaneV2 } from "../../src/diff2/diff-pane-v2";
 import { readStructure } from "../../src/diff2/diff-structure";
-import { applyResolve } from "../../src/diff2/diff-resolve";
+import {
+  applyResolve,
+  applyResolveAll,
+  createBulkToolbar,
+  resolveCurrentGroup,
+} from "../../src/diff2/diff-resolve";
 
 interface Deco {
   from: number;
@@ -103,6 +108,37 @@ describe("diff-pane-v2 — mounts without error (happy-dom)", () => {
       applyResolve(view, 0, "keep1");
       expect(view.state.doc.toString()).toBe("a\nL\nc\n"); // resolved to ver1
       expect(readStructure(view.state)).toEqual([]); // conflict gone
+    } finally {
+      view.destroy();
+      parent.remove();
+    }
+  });
+
+  it("resolveCurrentGroup resolves the group the caret is in (§1.9 hotkey)", () => {
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const view = mountDiffPaneV2(parent, "a\nL\nc\n", "a\nR\nc\n");
+    try {
+      view.dispatch({ selection: { anchor: 3 } }); // caret inside the group
+      expect(resolveCurrentGroup(view, "keep2")).toBe(true);
+      expect(view.state.doc.toString()).toBe("a\nR\nc\n");
+      expect(readStructure(view.state)).toEqual([]);
+    } finally {
+      view.destroy();
+      parent.remove();
+    }
+  });
+
+  it("bulk toolbar: 3 buttons; applyResolveAll resolves every group", () => {
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const view = mountDiffPaneV2(parent, "a\nL1\nb\nL2\nc\n", "a\nR1\nb\nR2\nc\n");
+    try {
+      const bar = createBulkToolbar(view);
+      expect(bar.querySelectorAll(".diff2-toolbar-btn").length).toBe(3);
+      applyResolveAll(view, "keep2"); // apply all remote
+      expect(view.state.doc.toString()).toBe("a\nR1\nb\nR2\nc\n");
+      expect(readStructure(view.state)).toEqual([]);
     } finally {
       view.destroy();
       parent.remove();

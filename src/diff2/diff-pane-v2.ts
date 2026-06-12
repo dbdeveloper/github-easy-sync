@@ -42,7 +42,7 @@ import { type MarkerKind, markerSpecs, verLineDecisions } from "./diff-decoratio
 import { autoNewlineFilter, externalGuardFilter } from "./diff-edits";
 import { selectionLegalizeFilter } from "./diff-selection";
 import { diffLineNumbers } from "./diff-line-numbers";
-import { type ResolveChoice, resolveClickHandler } from "./diff-resolve";
+import { type ResolveChoice, diffResolveKeymap, resolveClickHandler } from "./diff-resolve";
 
 // ── markers ────────────────────────────────────────────────────────────────
 const MARKER_GLYPH: Record<MarkerKind, string> = {
@@ -169,6 +169,7 @@ export function createDiffPaneState(base: string, sibling: string): EditorState 
       autoNewlineFilter, // §2.2.4(2) — transactionFilter (appends normalization)
       selectionLegalizeFilter, // §2.2.4(5)/§2.2.6 — transactionFilter (legalize selection)
       resolveClickHandler(), // §2.2.9 marker-button clicks (deviceLabel/date wired in Phase 6)
+      diffResolveKeymap(), // §1.9 hotkeys — resolve current group (Mod-Enter etc.)
       diffNavKeymap,
       keymap.of([...historyKeymap, ...defaultKeymap]),
       EditorView.lineWrapping,

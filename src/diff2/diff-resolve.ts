@@ -14,10 +14,11 @@
 // Pure `resolveGroup` (unit-tested) + `applyResolve` (dispatch) + a click handler
 // that wires the marker buttons.
 
-import { EditorView } from "@codemirror/view";
-import type { Extension, Text, TransactionSpec } from "@codemirror/state";
+import { EditorView, keymap } from "@codemirror/view";
+import { Prec, type Extension, type Text, type TransactionSpec } from "@codemirror/state";
 import type { VerRange } from "./diff-model";
 import { readStructure, setStructure, toRangeSet } from "./diff-structure";
+import { groupsOf } from "./diff-selection";
 
 export type ResolveChoice = "keep1" | "keep2" | "both" | "neither" | "join";
 
@@ -39,6 +40,27 @@ function joinText(ver2content: string, opts: ResolveOpts): string {
   return header + quoted;
 }
 
+// The resolved plain text for one group's two contents (terminal \n already dropped).
+function resolvedInsert(
+  choice: ResolveChoice,
+  ver1content: string,
+  ver2content: string,
+  opts: ResolveOpts,
+): string {
+  switch (choice) {
+    case "keep1":
+      return ver1content;
+    case "keep2":
+      return ver2content;
+    case "both":
+      return ver1content + ver2content;
+    case "neither":
+      return "";
+    case "join":
+      return ver1content + joinText(ver2content, opts);
+  }
+}
+
 // Build the resolution transaction for one group, or null if the group is absent.
 export function resolveGroup(
   doc: Text,
@@ -52,27 +74,12 @@ export function resolveGroup(
   if (!v1 || !v2) return null;
   const groupFrom = v1.from;
   const groupTo = v2.to;
-  const ver1content = doc.sliceString(v1.from, v1.to - 1); // drop terminal \n
-  const ver2content = doc.sliceString(v2.from, v2.to - 1);
-
-  let insert: string;
-  switch (choice) {
-    case "keep1":
-      insert = ver1content;
-      break;
-    case "keep2":
-      insert = ver2content;
-      break;
-    case "both":
-      insert = ver1content + ver2content;
-      break;
-    case "neither":
-      insert = "";
-      break;
-    case "join":
-      insert = ver1content + joinText(ver2content, opts);
-      break;
-  }
+  const insert = resolvedInsert(
+    choice,
+    doc.sliceString(v1.from, v1.to - 1), // ver1 content (terminal \n dropped)
+    doc.sliceString(v2.from, v2.to - 1), // ver2 content
+    opts,
+  );
 
   // structure after the replace: drop this group; ranges after the span shift by
   // delta (groups never overlap, so others are wholly before groupFrom or after
@@ -119,4 +126,100 @@ export function resolveClickHandler(opts: ResolveOpts = {}): Extension {
       return applyResolve(view, group, choice, opts);
     },
   });
+}
+
+// ── keyboard hotkeys (§1.9) ──────────────────────────────────────────────────
+// The group whose span [ver1.from, ver2.to] contains the caret, else null.
+export function currentGroupAt(ranges: VerRange[], caret: number): number | null {
+  for (const g of groupsOf(ranges)) {
+    if (caret >= g.from && caret <= g.to) return g.group;
+  }
+  return null;
+}
+
+// Resolve the group the caret is in (no-op if the caret isn't in a group).
+export function resolveCurrentGroup(
+  view: EditorView,
+  choice: ResolveChoice,
+  opts: ResolveOpts = {},
+): boolean {
+  const group = currentGroupAt(readStructure(view.state), view.state.selection.main.head);
+  if (group === null) return false;
+  return applyResolve(view, group, choice, opts);
+}
+
+// Default hotkeys for the current group (configurable; Prec.highest so they win
+// over defaultKeymap). Mod = Ctrl/Cmd.
+export function diffResolveKeymap(opts: ResolveOpts = {}): Extension {
+  return Prec.highest(
+    keymap.of([
+      { key: "Mod-Enter", run: (v) => resolveCurrentGroup(v, "keep2", opts) }, // apply theirs
+      { key: "Mod-Shift-Enter", run: (v) => resolveCurrentGroup(v, "keep1", opts) }, // keep ours
+      { key: "Mod-Alt-Enter", run: (v) => resolveCurrentGroup(v, "both", opts) },
+    ]),
+  );
+}
+
+// ── bulk resolution (toolbar: Keep all / Apply all / Join all) ────────────────
+// Resolve EVERY group toward one choice in a SINGLE transaction (one undo step).
+export function resolveAll(
+  doc: Text,
+  ranges: VerRange[],
+  choice: ResolveChoice,
+  opts: ResolveOpts = {},
+): TransactionSpec | null {
+  const groups = groupsOf(ranges);
+  if (groups.length === 0) return null;
+  const changes = groups.map((g) => {
+    const v1 = ranges.find((r) => r.group === g.group && r.ver === 1)!;
+    const v2 = ranges.find((r) => r.group === g.group && r.ver === 2)!;
+    const insert = resolvedInsert(
+      choice,
+      doc.sliceString(v1.from, v1.to - 1),
+      doc.sliceString(v2.from, v2.to - 1),
+      opts,
+    );
+    return { from: g.from, to: g.to, insert }; // non-overlapping; ChangeSet composes
+  });
+  return {
+    changes,
+    effects: setStructure.of(toRangeSet([])), // all groups resolved ⇒ no conflicts left
+    selection: { anchor: groups[0].from }, // caret at the first resolved group
+    scrollIntoView: true,
+  };
+}
+
+export function applyResolveAll(
+  view: EditorView,
+  choice: ResolveChoice,
+  opts: ResolveOpts = {},
+): boolean {
+  const spec = resolveAll(view.state.doc, readStructure(view.state), choice, opts);
+  if (!spec) return false;
+  view.dispatch(spec);
+  view.focus();
+  return true;
+}
+
+// A bulk toolbar element (placed ABOVE the editor by the host view). Buttons map
+// to applyResolveAll; disabled when there are no conflicts.
+export function createBulkToolbar(view: EditorView, opts: ResolveOpts = {}): HTMLElement {
+  const bar = document.createElement("div");
+  bar.className = "diff2-toolbar";
+  const buttons: { label: string; choice: ResolveChoice }[] = [
+    { label: "Keep all (local)", choice: "keep1" },
+    { label: "Apply all (remote)", choice: "keep2" },
+    { label: "Join all", choice: "join" },
+  ];
+  for (const b of buttons) {
+    const btn = document.createElement("button");
+    btn.className = `diff2-toolbar-btn diff2-toolbar-${b.choice}`;
+    btn.textContent = b.label;
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      applyResolveAll(view, b.choice, opts);
+    });
+    bar.appendChild(btn);
+  }
+  return bar;
 }
