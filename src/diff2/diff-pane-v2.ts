@@ -28,7 +28,6 @@ import {
   type DecorationSet,
   EditorView,
   keymap,
-  lineNumbers,
   WidgetType,
 } from "@codemirror/view";
 import { buildModel } from "./diff-model";
@@ -42,6 +41,7 @@ import {
 import { type MarkerKind, markerSpecs, verLineDecisions } from "./diff-decorations";
 import { autoNewlineFilter, externalGuardFilter } from "./diff-edits";
 import { selectionLegalizeFilter } from "./diff-selection";
+import { diffLineNumbers } from "./diff-line-numbers";
 
 // ── markers ────────────────────────────────────────────────────────────────
 const MARKER_GLYPH: Record<MarkerKind, string> = {
@@ -130,7 +130,7 @@ export function createDiffPaneState(base: string, sibling: string): EditorState 
   return EditorState.create({
     doc: m.doc,
     extensions: [
-      lineNumbers(),
+      diffLineNumbers, // §2.2.10 per-side −/+ gutter (replaces lineNumbers())
       history(),
       structureField.init(() => toRangeSet(m.ranges)),
       decorationsField,
