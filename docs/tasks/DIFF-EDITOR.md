@@ -16,7 +16,8 @@
 
 ## Зміст
 
-- §1. Документ-модель і поведінка редактора (R7.7 core)
+- §0. **V2-модель: інтеграційний контракт (ПЛАН, не імплементовано)** — як §2–§5 адаптуються під нову модель
+- §1. Документ-модель і поведінка редактора (R7.7 core) — **заміщується згідно [DIFF-EDITOR-V2.md](./DIFF-EDITOR-V2.md) (план; код досі §1 Segment[])**
 - §2. R7.7.a — Persistent autosave (REDO-log + cursor-timer)
 - §3. R7.7.b — Recovery dialog
 - §4. Cleanup / TTL (три умови видалення)
@@ -24,6 +25,74 @@
 - §6. Mobile append benchmark — test button у Settings
 - §7. Тестовий план
 - §8. Open questions / TBD
+
+---
+
+## §0. V2-модель: інтеграційний контракт (ПЛАН — не імплементовано)
+
+> **Статус (2026-06-12).** Код у `src/diff2/` досі реалізує **§1-модель** (`Segment[]` над чистим CM6-doc +
+> `\0/\1` joined-doc — див. «Стан імплементації» нижче). **DIFF-EDITOR-V2.md** — нова **спека моделі** (план),
+> яка замінює лише §1. Рішення й критичний розбір — у **DIFF-EDITOR-V2-ANALYSIS.md**. Цей §0 — **контракт**:
+> як §2–§5 цього документа адаптуються під V2-модель. Нічого з V2 ще НЕ імплементовано і НЕ перевірено на
+> пристрої. **Gating-передумова:** Фаза-1 device-spike (`height:0` toggling + `moveVertically` крізь приховані
+> рядки) — happy-dom її не ловить; поки не пройде на пристрої, V2 не починаємо кодити.
+>
+> **Зворотна сумісність — НЕ потрібна** (єдиний користувач, рішення 2026-06-12): чистий розрив. Жодних міграцій
+> on-disk форматів (`meta.json` / `history.jsonl` / autosave-сесії можна викидати), старий код представлення
+> видаляємо повністю, без dual-support. Мета — максимально якісна модель, не сумісність.
+
+### §0.1 Що V2 замінює, а що лишається
+
+**Замінюється (модель §1):** представлення документа. Стара: `Segment[]` (zero-width для порожніх ver) над
+чистим doc + `\0/\1` серіалізація. Нова (V2): CM6-doc, де КОЖЕН ver-block має **термінальний `\n`** (порожній =
+`"\n"`, `height:0` поза фокусом) + **Inclusive RangeSet** `{ver, group}`. Усі §1.x правила взаємодії
+(selection, навігація, empty-ver, gutter, hotkeys, резолюція) переписані у V2 §2.2.x.
+
+**Лишається representation-independent (БЕЗ ЗМІН — оперує байтами файлів / рядками `base`+`sibling`):**
+§5 commit (`commit7Step` 7-step, `done.json` barrier, A–K `recoverCommit`, modify-in-place), §2.4/§2.5
+директорія + session-start, §2.7 append, §2.8 coalesce, §2.9 cursor ping-pong, §4 cleanup, увесь trash-шар.
+Перевірено: `exit-commit.ts` приймає `base`/`sibling: string` — представлення йому байдуже.
+
+### §0.2 Шви адаптації (§2–§5 під V2-модель)
+
+| Стара точка | V2-адаптація | Статус |
+|---|---|---|
+| `split(\0/\1 joined)` (§1.4) | V2 §2.2.11 — обхід RangeSet: normal→обидві сторони, ver1→base, ver2→sibling, термінальні `\n` пропускаються | контракт ✔; інваріант §1.5 нижче |
+| `build(base,sibling)` (§1.4) | jsdiff→групи→V2-doc(термінальні `\n`)+RangeSet; детермінований | контракт ✔ |
+| `meta.joinedDocSha` (§2.5) | = `SHA(build(base,sibling))` над V2-canonical-doc — той самий library-drift fingerprint | концепт без змін |
+| `history.jsonl` блок `{change, structure:Segment[]}` (§2.6) | **drop `structure`** → блок = текст-зміна: plain `change` (typing/резолюція) АБО §2.2.7 clipboard-текст (рідкісний group-paste). Структура ДЕРИВУЄТЬСЯ на replay | ✅ gate §0.4 PASS |
+| replay `setDiffPaneState.of({structure})` (§3.3) | re-apply `change`; RangeSet деривується: free-edit→`map`; empty-ver-typing→`map` (terminal-inside, §0.4); резолюція→spanning-resolve; group-paste→re-paste §2.2.7 фільтр | ✅ gate §0.4 PASS |
+| резолюція як doc-edit (§1.6) | **scenario-2**: region-replace однією транзакцією (`userEvent:"input.paste"`) — CM6-рекогносцировка ANALYSIS §3.5 (spike A–E) | контракт ✔ |
+| `structureHistory` (`invertedEffects`, Segment[]-field) | той самий патерн над RangeSet-полем + його ефектом | контракт ✔ (precedent у коді) |
+| §3.3.a synthetic-caret **trim** | trim існував через full-doc-replace chunk-action; scenario-2 = мінімальний region-replace → каретка природно лягає в resolved-зону → **trim імовірно стає moot** | **спростити — verify** |
+| fail-closed: `\0/\1` collision + tiling-assert (§1.3) | сентинелів у doc немає; натомість guard-и цілісності RangeSet (термінал не видаляється; ranges не перетинаються) | контракт ✔ |
+
+### §0.3 Інваріанти, які міграція НЕ сміє зламати
+
+1. **Byte-exact round-trip (§1.5):** `split(build(base,sibling)) === (base,sibling)`, включно з **EOL-less
+   останнім рядком** (V2 §2.2.12, варіант (a): останній ver-block у doc може мати форму `.*\n` — без
+   зайвого `\n`; як уже робить `editor-model.ts` POSITIONAL-нормалізація). Інакше — фантомний конфлікт у рушії.
+2. **`on-disk block count == CM6 undoDepth == HistoryWriter.liveBlockCount()`** (§2.7.a / TODO #5). 1 блок = 1
+   транзакція; undo → truncate останнього блоку.
+3. **Undo-after-replay oracle:** `replay N → undo k == replay N−k` (doc + структура + `selection.main.head`).
+4. **0-byte guard:** порожня сторона від split не пише рівно 0 байт у vault (SYNC2 §2.9) — лишається на межі
+   commit (representation-independent).
+
+### §0.4 Gate-спайки на «drop structure» — ✅ ПРОЙДЕНО (2026-06-12)
+
+`history-replay-structure-spike` (стара модель) довів, що change-only НЕ відновлює `Segment[]` для (a)
+chunk-action = full-doc-replace+effect; (b) free-edit у активний empty-ver залежав від `activeEmptyVer`. V2
+лагодить обидва — **доведено спайками**:
+- **(a)** scenario-2 = мінімальний region-replace (CM6-рекогносцировка, `v2-resolution-paste-spike.test.ts`).
+- **(b)** `tests/diff2/spikes/v2-replay-empty-ver-spike.test.ts` (4/4 PASS): empty-ver як **terminal-inside**
+  ≥1-width range (`Decoration.mark({inclusive:true})` поверх термінального `\n`) **росте над введеним текстом
+  через `DecorationSet.map(change)`** — детерміновано, байт-точно, БЕЗ `activeEmptyVer`; replay==live.
+
+**⚠️ ПЕРЕДУМОВА для реалізації (інакше gate РЕ-ламається):** модель empty-ver мусить бути **terminal-inside**
+(range ВКЛЮЧАЄ свій термінальний `\n`, ширина ≥1) — як стверджує V2 §2.2.4(1). **V2 §2.2.2 показує `Range(7,7)`
+(zero-width) — це помилка: zero-width re-ламає старий баг і `Decoration.mark` його забороняє. Виправити на
+`Range(7,8)` тощо** (range = content + термінальний `\n`; для split — `content = doc.slice(from, to-1)`).
+Лишені edge-кейси (delete-до-порожнього / multi-line / межі суміжних груп) — у TDD Фаз 2/5.
 
 ---
 
@@ -2089,9 +2158,14 @@ crash — `Ctrl+Z` йде назад послідовно.
 має деградувати до 0, ніколи не зупиняти replay). Тому кожен replayed-блок
 дістає **синтетичний** курсор, деривований з самого `change`:
 
-- **`syntheticCaret(cs, newDoc)`** = позиція одразу ПІСЛЯ останньої зміненої
-  ділянки (`toB`); якщо там `\n` → 0-та позиція наступного рядка (`toB+1`).
-  Порожній change → 0.
+- **`syntheticCaret(cs, oldDoc, newDoc)`** = позиція одразу ПІСЛЯ **реальної**
+  зміненої ділянки; якщо там `\n` → 0-та позиція наступного рядка. Порожній
+  change → 0. **Trim:** chunk-action (резолюція) записується як full-doc-replace
+  (`[0,oldLen)→[0,newLen)`), тож наївний `toB` = кінець doc. Тому обрізаємо
+  common prefix/suffix між видаленим зрізом (`oldDoc[fromA,toA]`) і вставленим —
+  відновлюємо справжню зону конфлікту, беремо її кінець. Free-edit уже мінімальний
+  → обрізати нічого (no-op). Усе replay-only: блок/формат/checksum недоторкані
+  (→ #5 trustworthy-prefix і #9-live незмінні).
 - Курсор кладеться у `selection` тієї ж replay-транзакції → потрапляє у CM6-undo-
   стек (кожен `state.update` = крок). Тож після recovery: **REDO** → синтетична
   позиція, **UNDO** → selection попереднього кроку. Більше нема «безладного 0,0».
@@ -2099,8 +2173,10 @@ crash — `Ctrl+Z` йде назад послідовно.
   синтетичний останнього блоку; якщо `cursor.json` нема/невалідний — лишається
   синтетичний (fallback: «курсор зупиняється після останньої зміни, де б вона не
   була»).
-- Chunk-action (резолюція) = full-doc-replace → `toB` = кінець doc (детерміновано;
-  НЕ resolved-group як у живому #9 — наслідок derive-from-change підходу).
+- Резолюція приземляє курсор у **кінець реальної зміненої зони** (після trim),
+  тобто в місці конфлікту — навіть якщо це перший конфлікт на початку файлу й
+  далі є купа спільного тексту. (Це КІНЕЦЬ зони; живий #9 ставить на ПОЧАТОК
+  resolved-group — свідома різниця: replay-rule єдиний «після зміни», як free-edit.)
 
 Oracle (`history-replay.test.ts`): undo-after-replay перевіряє doc+structure+
 **`selection.main.head`** через всю траєкторію (`replay N → undo k == replay N−k`).
