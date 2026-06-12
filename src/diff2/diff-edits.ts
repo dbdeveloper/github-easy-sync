@@ -88,6 +88,7 @@ export function externalGuardOk(doc: Text, ranges: VerRange[], changes: ChangeDe
 
 export const externalGuardFilter = EditorState.changeFilter.of((tr) => {
   if (!tr.docChanged) return true;
+  if (tr.effects.some((e) => e.is(setStructure))) return true; // resolution / replay
   return externalGuardOk(
     tr.startState.doc,
     fromRangeSet(tr.startState.field(structureField)),

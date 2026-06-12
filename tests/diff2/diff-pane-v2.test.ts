@@ -8,6 +8,8 @@
 
 import { describe, expect, it } from "vitest";
 import { createDiffPaneState, decorationsField, mountDiffPaneV2 } from "../../src/diff2/diff-pane-v2";
+import { readStructure } from "../../src/diff2/diff-structure";
+import { applyResolve } from "../../src/diff2/diff-resolve";
 
 interface Deco {
   from: number;
@@ -76,6 +78,31 @@ describe("diff-pane-v2 — mounts without error (happy-dom)", () => {
       expect(view.dom.querySelectorAll(".cm-line.diff2-v1").length).toBeGreaterThanOrEqual(1);
       expect(view.dom.querySelectorAll(".cm-line.diff2-v2").length).toBeGreaterThanOrEqual(1);
       expect(view.dom.querySelectorAll(".cm-line.diff2-collapsed").length).toBeGreaterThanOrEqual(2);
+    } finally {
+      view.destroy();
+      parent.remove();
+    }
+  });
+
+  it("marker buttons carry the resolve data-attributes; applyResolve resolves the group", () => {
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const view = mountDiffPaneV2(parent, "a\nL\nc\n", "a\nR\nc\n");
+    try {
+      // §2.2.9 buttons present with data-diff2-resolve + data-diff2-group
+      const keep = view.dom.querySelector<HTMLElement>('[data-diff2-resolve="keep1"]');
+      expect(keep).not.toBeNull();
+      expect(keep!.getAttribute("data-diff2-group")).toBe("0");
+      expect(
+        Array.from(view.dom.querySelectorAll("[data-diff2-resolve]")).map((b) =>
+          b.getAttribute("data-diff2-resolve"),
+        ),
+      ).toEqual(expect.arrayContaining(["keep1", "keep2", "both", "neither", "join"]));
+      // the action the click handler invokes (the DOM click→handler path is
+      // browser-validated; the handler logic is this call).
+      applyResolve(view, 0, "keep1");
+      expect(view.state.doc.toString()).toBe("a\nL\nc\n"); // resolved to ver1
+      expect(readStructure(view.state)).toEqual([]); // conflict gone
     } finally {
       view.destroy();
       parent.remove();

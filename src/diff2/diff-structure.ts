@@ -104,6 +104,9 @@ export function terminalProtected(ranges: VerRange[], changes: ChangeDesc): bool
 
 export const terminalProtectionFilter = EditorState.changeFilter.of((tr) => {
   if (!tr.docChanged) return true;
+  // resolution / replay carry a setStructure effect and replace whole group spans
+  // (incl. their terminals) on purpose — they drive doc + structure together.
+  if (tr.effects.some((e) => e.is(setStructure))) return true;
   return terminalProtected(readStructure(tr.startState), tr.changes);
 });
 

@@ -42,12 +42,31 @@ import { type MarkerKind, markerSpecs, verLineDecisions } from "./diff-decoratio
 import { autoNewlineFilter, externalGuardFilter } from "./diff-edits";
 import { selectionLegalizeFilter } from "./diff-selection";
 import { diffLineNumbers } from "./diff-line-numbers";
+import { type ResolveChoice, resolveClickHandler } from "./diff-resolve";
 
 // ── markers ────────────────────────────────────────────────────────────────
 const MARKER_GLYPH: Record<MarkerKind, string> = {
-  open: "≪", // ≪
+  open: "≪",
   mid: "==",
-  close: "≫", // ≫
+  close: "≫",
+};
+
+// Resolution buttons per marker row (§1.9 / TODO #6.3). `↓`/`↑` hint which side
+// the action acts on. Each maps to a ResolveChoice handled by resolveClickHandler.
+const MARKER_BUTTONS: Record<MarkerKind, { label: string; choice: ResolveChoice }[]> = {
+  open: [
+    { label: "Keep ↓", choice: "keep1" }, // keep ver1 (ours)
+    { label: "Remove ↓", choice: "keep2" }, // drop ver1 → keep ver2
+  ],
+  mid: [
+    { label: "Apply Both ↓↑", choice: "both" },
+    { label: "Remove Both ↓↑", choice: "neither" },
+    { label: "Join", choice: "join" },
+  ],
+  close: [
+    { label: "Apply ↑", choice: "keep2" }, // keep ver2 (theirs)
+    { label: "Remove ↑", choice: "keep1" }, // drop ver2 → keep ver1
+  ],
 };
 
 class MarkerWidget extends WidgetType {
@@ -63,7 +82,18 @@ class MarkerWidget extends WidgetType {
   toDOM(): HTMLElement {
     const el = document.createElement("div");
     el.className = `diff2-marker diff2-marker-${this.kind}`;
-    el.textContent = MARKER_GLYPH[this.kind];
+    const glyph = document.createElement("span");
+    glyph.className = "diff2-marker-glyph";
+    glyph.textContent = MARKER_GLYPH[this.kind];
+    el.appendChild(glyph);
+    for (const b of MARKER_BUTTONS[this.kind]) {
+      const btn = document.createElement("button");
+      btn.className = "diff2-marker-btn";
+      btn.textContent = b.label;
+      btn.setAttribute("data-diff2-resolve", b.choice);
+      btn.setAttribute("data-diff2-group", String(this.group));
+      el.appendChild(btn);
+    }
     return el;
   }
   get estimatedHeight(): number {
@@ -138,6 +168,7 @@ export function createDiffPaneState(base: string, sibling: string): EditorState 
       externalGuardFilter, // §2.2.5(1) — changeFilter (runs before transactionFilters)
       autoNewlineFilter, // §2.2.4(2) — transactionFilter (appends normalization)
       selectionLegalizeFilter, // §2.2.4(5)/§2.2.6 — transactionFilter (legalize selection)
+      resolveClickHandler(), // §2.2.9 marker-button clicks (deviceLabel/date wired in Phase 6)
       diffNavKeymap,
       keymap.of([...historyKeymap, ...defaultKeymap]),
       EditorView.lineWrapping,
