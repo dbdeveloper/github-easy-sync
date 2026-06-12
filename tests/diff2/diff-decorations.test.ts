@@ -41,6 +41,32 @@ describe("diff-decorations — verLineDecisions (§2.2.8)", () => {
     expect(d[0].collapsed).toBe(false); // caret on it → not collapsed
   });
 
+  it("§2.2.12(a) EOL-less last group: the line is VISIBLE (no collapse) + NO ↵ glyph", () => {
+    // base "a\nL" vs "a\nR" (both EOL-less) ⇒ doc "a\nL\nR\n"; each ver-block is a
+    // single EOL-less content line (terminal \n doubles as the line terminator).
+    const m = model("a\nL", "a\nR");
+    const d = verLineDecisions(m.text, m.ranges, 0);
+    const v1 = d.filter((x) => x.ver === 1);
+    const v2 = d.filter((x) => x.ver === 2);
+    expect(v1).toHaveLength(1);
+    expect(v1[0].collapsed).toBe(false); // visible content, NOT a hidden terminal
+    expect(v1[0].glyph).toBe(false); // EOL-less ⇒ no ↵
+    expect(v2).toHaveLength(1);
+    expect(v2[0].collapsed).toBe(false);
+    expect(v2[0].glyph).toBe(false);
+  });
+
+  it("collapses ONLY the bare terminal \\n; a blank CONTENT line stays visible", () => {
+    // ver1 block "a\n\n\n": content "a\n\n" (line "a" + a blank CONTENT line) + terminal "\n".
+    const doc = Text.of("a\n\n\nZ\n".split("\n"));
+    const ranges = [{ from: 0, to: 4, ver: 1 as const, group: 0 }];
+    const d = verLineDecisions(doc, ranges, 999);
+    expect(d).toHaveLength(3); // "a", blank content, bare terminal
+    expect(d.map((x) => x.collapsed)).toEqual([false, false, true]); // only the terminal collapses
+    expect(d[1].from).toBe(2); // the blank content line stays VISIBLE
+    expect(d[2].isTerminal).toBe(true);
+  });
+
   it("normal lines produce no decisions", () => {
     const m = model("a\nL\nb\n", "a\nR\nb\n");
     const d = verLineDecisions(m.text, m.ranges, 0);

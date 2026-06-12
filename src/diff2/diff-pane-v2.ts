@@ -40,6 +40,7 @@ import {
   toRangeSet,
 } from "./diff-structure";
 import { type MarkerKind, markerSpecs, verLineDecisions } from "./diff-decorations";
+import { autoNewlineFilter, externalGuardFilter } from "./diff-edits";
 
 // ── markers ────────────────────────────────────────────────────────────────
 const MARKER_GLYPH: Record<MarkerKind, string> = {
@@ -133,6 +134,8 @@ export function createDiffPaneState(base: string, sibling: string): EditorState 
       structureField.init(() => toRangeSet(m.ranges)),
       decorationsField,
       terminalProtectionFilter,
+      externalGuardFilter, // §2.2.5(1) — changeFilter (runs before transactionFilters)
+      autoNewlineFilter, // §2.2.4(2) — transactionFilter (appends normalization)
       diffNavKeymap,
       keymap.of([...historyKeymap, ...defaultKeymap]),
       EditorView.lineWrapping,

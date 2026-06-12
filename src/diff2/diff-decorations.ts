@@ -41,9 +41,16 @@ export function verLineDecisions(doc: Text, ranges: VerRange[], caret: number): 
     for (let n = firstLine; n <= termLine; n++) {
       const line = doc.line(n);
       const isTerminal = n === termLine;
+      // §2.2.8 / §2.2.12(a): collapse ONLY a BARE terminal `\n` line — i.e. the
+      // terminal line when it is EMPTY (a normal block's separate hidden line, or an
+      // empty ver-block's only line). Any line WITH content stays visible: content
+      // empty-lines (non-terminal blanks) AND an EOL-less last line (the terminal
+      // `\n` doubles as that content line's terminator — `firstLine === termLine`,
+      // line has text). The `↵` glyph is suppressed on the terminal line either way,
+      // which correctly shows an EOL-less line as having no trailing newline.
+      const bareTerminal = isTerminal && line.length === 0;
       let collapsed = false;
-      if (isTerminal) {
-        // empty: hide unless the caret sits on it; non-empty: always hide the terminal line.
+      if (bareTerminal) {
         collapsed = empty ? !(caret >= r.from && caret <= r.to) : true;
       }
       out.push({
@@ -52,7 +59,7 @@ export function verLineDecisions(doc: Text, ranges: VerRange[], caret: number): 
         ver: r.ver,
         group: r.group,
         collapsed,
-        glyph: !isTerminal, // §2.2.8(3) / NOTE
+        glyph: !isTerminal, // §2.2.8(3): never on the terminal line (incl. an EOL-less last line)
         isTerminal,
       });
     }
