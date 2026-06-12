@@ -35,6 +35,7 @@ import {
   cursorVertTarget,
   readStructure,
   structureField,
+  structureHistory,
   terminalProtectionFilter,
   toRangeSet,
 } from "./diff-structure";
@@ -163,6 +164,7 @@ export function createDiffPaneState(base: string, sibling: string): EditorState 
       diffLineNumbers, // §2.2.10 per-side −/+ gutter (replaces lineNumbers())
       history(),
       structureField.init(() => toRangeSet(m.ranges)),
+      structureHistory, // version the structure field across undo/redo (resolution)
       decorationsField,
       terminalProtectionFilter,
       externalGuardFilter, // §2.2.5(1) — changeFilter (runs before transactionFilters)

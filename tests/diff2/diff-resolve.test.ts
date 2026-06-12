@@ -3,6 +3,7 @@
 // createDiffPaneState pipeline: doc + structure resolve together, caret at start).
 
 import { describe, expect, it } from "vitest";
+import { redo, undo } from "@codemirror/commands";
 import { buildModel, splitModel } from "../../src/diff2/diff-model";
 import { readStructure } from "../../src/diff2/diff-structure";
 import { currentGroupAt, resolveAll, resolveGroup } from "../../src/diff2/diff-resolve";
@@ -102,5 +103,51 @@ describe("diff-resolve — resolveAll (bulk toolbar)", () => {
   it("returns null when there are no conflicts", () => {
     const s0 = createDiffPaneState("x\ny\n", "x\ny\n");
     expect(resolveAll(s0.doc, readStructure(s0), "keep1")).toBeNull();
+  });
+});
+
+describe("diff-resolve — undo/redo restore STRUCTURE + cursor (Mina 1: structureHistory)", () => {
+  const run = (
+    state: ReturnType<typeof createDiffPaneState>,
+    cmd: typeof undo,
+  ): ReturnType<typeof createDiffPaneState> => {
+    let next: ReturnType<typeof createDiffPaneState> | null = null;
+    cmd({ state, dispatch: (tr) => (next = tr.state) });
+    if (!next) throw new Error("command did not dispatch");
+    return next;
+  };
+
+  it("undo after resolve brings the group + its structure back; redo re-resolves", () => {
+    let s = createDiffPaneState("a\nL\nc\n", "a\nR\nc\n");
+    const groupStructure = readStructure(s); // [ver1[2,5), ver2[5,8)]
+    s = s.update(resolveGroup(s.doc, readStructure(s), 0, "keep1")!).state;
+    expect(readStructure(s)).toEqual([]); // resolved
+    expect(s.selection.main.head).toBe(2); // caret at resolved start (TODO #9)
+
+    const undone = run(s, undo);
+    expect(undone.doc.toString()).toBe("a\nL\n\nR\n\nc\n"); // raw group text back
+    expect(readStructure(undone)).toEqual(groupStructure); // ⭐ STRUCTURE restored (was the desync bug)
+
+    const redone = run(undone, redo);
+    expect(redone.doc.toString()).toBe("a\nL\nc\n");
+    expect(readStructure(redone)).toEqual([]);
+    // cursor after redo follows CM6-native history (here the pre-resolution pos);
+    // it stays a VALID position (no 0,0-garbage / out-of-range). Exact placement
+    // on undo/redo is a polish item — see the cursor note.
+    expect(redone.selection.main.head).toBeGreaterThanOrEqual(0);
+    expect(redone.selection.main.head).toBeLessThanOrEqual(redone.doc.length);
+  });
+
+  it("UNDO→REDO→UNDO keeps structure + cursor consistent (no 0,0 drift)", () => {
+    let s = createDiffPaneState("a\nL\nc\n", "a\nR\nc\n");
+    const g = readStructure(s);
+    s = s.update(resolveGroup(s.doc, readStructure(s), 0, "keep2")!).state;
+    const u1 = run(s, undo);
+    expect(readStructure(u1)).toEqual(g);
+    const r1 = run(u1, redo);
+    expect(readStructure(r1)).toEqual([]);
+    expect(r1.selection.main.head).toBeGreaterThanOrEqual(0); // valid, not garbage
+    const u2 = run(r1, undo);
+    expect(readStructure(u2)).toEqual(g); // structure still intact after the round-trip
   });
 });

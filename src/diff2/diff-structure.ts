@@ -21,6 +21,7 @@ import {
   StateField,
   type ChangeDesc,
 } from "@codemirror/state";
+import { invertedEffects } from "@codemirror/commands";
 import type { VerRange } from "./diff-model";
 
 // Inclusive RangeValue: `startSide = -1` (from leans left) + `endSide = 1` (to
@@ -84,6 +85,26 @@ export const structureField = StateField.define<StructureSet>({
 export function readStructure(state: EditorState): VerRange[] {
   return fromRangeSet(state.field(structureField));
 }
+
+// Version the structure field across undo/redo. CM6 history reverts the DOC TEXT
+// but does NOT auto-invert custom StateEffects — so undoing a `setStructure`
+// transaction (a resolution) would revert the text yet leave the structure stale
+// (the group returns as plain text with no ver1/ver2 ranges — a desync; the
+// diff-group's boundary lives only in the RangeSet, never in the raw doc text).
+// We record the PRE-tx structure as the effect attached to the INVERSE (undo)
+// transaction; CM6 inverts it again on redo. Free edits carry no `setStructure`
+// (RangeSet.map derives them from the inverse change), so they need no inversion.
+// (For DISK replay the same boundary is carried as §2.2.7-text — Phase 5; this is
+// only the in-memory Ctrl+Z path.)
+export const structureHistory = invertedEffects.of((tr) => {
+  for (const e of tr.effects) {
+    if (e.is(setStructure)) {
+      const prev = tr.startState.field(structureField, false);
+      return prev ? [setStructure.of(prev)] : [];
+    }
+  }
+  return [];
+});
 
 // §2.2.4(1,3) terminal protection: the terminal `\n` (the char at index
 // `range.to-1`) must never be deleted, so a ver-block never collapses below

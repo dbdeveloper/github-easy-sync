@@ -103,8 +103,17 @@ export function applyResolve(
   choice: ResolveChoice,
   opts: ResolveOpts = {},
 ): boolean {
-  const spec = resolveGroup(view.state.doc, readStructure(view.state), group, choice, opts);
+  const ranges = readStructure(view.state);
+  const v1 = ranges.find((r) => r.group === group && r.ver === 1);
+  if (!v1) return false;
+  const spec = resolveGroup(view.state.doc, ranges, group, choice, opts);
   if (!spec) return false;
+  // §2.2.9 — imitate select-copy-paste cursor handling: FIRST anchor the caret at
+  // the group start (a selection-only transaction — NOT a history step), so CM6
+  // history records THIS as the resolution's before-selection. Then undo restores
+  // the caret to the group start (where the group reappears) and redo maps it
+  // forward to the resolved-content start — both sane, no 0,0 drift.
+  view.dispatch({ selection: { anchor: v1.from } });
   view.dispatch(spec);
   view.focus(); // keep keyboard focus after a button click (undo/redo reach CM6)
   return true;
@@ -194,8 +203,11 @@ export function applyResolveAll(
   choice: ResolveChoice,
   opts: ResolveOpts = {},
 ): boolean {
-  const spec = resolveAll(view.state.doc, readStructure(view.state), choice, opts);
+  const ranges = readStructure(view.state);
+  const spec = resolveAll(view.state.doc, ranges, choice, opts);
   if (!spec) return false;
+  const groups = groupsOf(ranges);
+  view.dispatch({ selection: { anchor: groups[0].from } }); // §2.2.9 before-selection anchor
   view.dispatch(spec);
   view.focus();
   return true;
