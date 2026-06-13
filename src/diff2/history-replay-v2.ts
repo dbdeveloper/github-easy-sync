@@ -48,18 +48,33 @@ export function scanHistoryV2(jsonl: string): {
 
 // What the recovery dialog needs BEFORE committing to a replay (§3.5).
 export interface HistoryAssessmentV2 {
-  edits: number; // edit-block count → "N edits saved" (cosmetic; refine at wiring)
+  edits: number; // NET live count: #edit − #undo + #redo, clamped ≥0 (see below)
   stoppedAtCorrupt: boolean; // a corrupt block truncated the log → "recovered K of N"
-  empty: boolean; // no valid blocks, no corruption → stale session, no modal
+  empty: boolean; // nothing to restore + clean log → stale session, NO modal
   firstBlockCorrupt: boolean; // corruption at block 1 → "0 edits", [Continue] disabled
 }
 
+// `edits` is the NET count `#edit − #undo + #redo`, not the raw edit-block count
+// (carry-into-step-2 #3): a raw count reports a typed-then-undone session as
+// non-empty and pops a bogus "N edits saved" modal. The net count is a HEURISTIC,
+// not exact — CM6 coalesces a typing burst into ONE undo group, so a single `undo`
+// can cancel several `edit` blocks (net over-reports by the burst length). It is
+// only ever the modal's cosmetic "N" + the `empty` gate; the authoritative restore
+// is the replay itself. `empty` (net 0 + clean log) is the one decision that
+// matters: a fresh/stale session shows no modal.
 export function assessHistoryV2(jsonl: string): HistoryAssessmentV2 {
   const { blocks, stoppedAtCorrupt } = scanHistoryV2(jsonl);
+  let net = 0;
+  for (const b of blocks) {
+    if (b.kind === "edit") net += 1;
+    else if (b.kind === "undo") net -= 1;
+    else net += 1; // redo
+  }
+  const edits = Math.max(0, net);
   return {
-    edits: blocks.filter((b) => b.kind === "edit").length,
+    edits,
     stoppedAtCorrupt,
-    empty: blocks.length === 0 && !stoppedAtCorrupt,
+    empty: edits === 0 && !stoppedAtCorrupt,
     firstBlockCorrupt: blocks.length === 0 && stoppedAtCorrupt,
   };
 }

@@ -47,6 +47,16 @@ import { autoNewlineFilter, externalGuardFilter } from "./diff-edits";
 import { selectionLegalizeFilter } from "./diff-selection";
 import { diffLineNumbers } from "./diff-line-numbers";
 import { type ResolveChoice, diffResolveKeymap, resolveClickHandler } from "./diff-resolve";
+import { type HistorySink, type ReplayFlag, historyFeedListener } from "./history-feed";
+
+// §0.5.6 step-2 — OPTIONAL persistence wiring. When the owner (Phase-6 DiffEditView)
+// supplies a sink + the SHARED ReplayFlag, a historyFeedListener is appended so
+// every live transaction is fed to history.jsonl. Omitted in pure-CM6 unit tests,
+// so the render/nav/resolution spine stays testable without a vault.
+export interface DiffPaneV2Hooks {
+  sink: HistorySink;
+  flag: ReplayFlag; // SAME instance the owner passes to replayWithGuard
+}
 
 // ── markers ────────────────────────────────────────────────────────────────
 const MARKER_GLYPH: Record<MarkerKind, string> = {
@@ -181,7 +191,7 @@ export const cursorRestoreListener: Extension = EditorView.updateListener.of((u)
 // ── assembly ─────────────────────────────────────────────────────────────────
 // Build the initial EditorState for a (base, sibling) pair. The structure field
 // is seeded via `.init()` from the model's ranges (no post-create dispatch).
-export function createDiffPaneState(base: string, sibling: string): EditorState {
+export function createDiffPaneState(base: string, sibling: string, hooks?: DiffPaneV2Hooks): EditorState {
   const m = buildModel(base, sibling);
   return EditorState.create({
     doc: m.doc,
@@ -202,12 +212,19 @@ export function createDiffPaneState(base: string, sibling: string): EditorState 
       diffNavKeymap,
       keymap.of([...historyKeymap, ...defaultKeymap]),
       EditorView.lineWrapping,
+      // §0.5.6 step-2 — live history feed (optional; off in pure-CM6 unit tests).
+      ...(hooks ? [historyFeedListener(hooks.sink, hooks.flag)] : []),
     ],
   });
 }
 
 // Mount a DiffPane into `parent` and return the view. (Geometry validated by the
 // 1a gate; full browser validation of THIS bundled module is the device gate.)
-export function mountDiffPaneV2(parent: HTMLElement, base: string, sibling: string): EditorView {
-  return new EditorView({ state: createDiffPaneState(base, sibling), parent });
+export function mountDiffPaneV2(
+  parent: HTMLElement,
+  base: string,
+  sibling: string,
+  hooks?: DiffPaneV2Hooks,
+): EditorView {
+  return new EditorView({ state: createDiffPaneState(base, sibling, hooks), parent });
 }

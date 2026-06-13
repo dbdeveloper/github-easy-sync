@@ -37,7 +37,9 @@
 > `history-replay-v2.ts`. V2-файли `diff-*.ts` / `*-v2.ts` живуть ПАРАЛЕЛЬНО зі старими §1-файлами (`editor-model.ts`,
 > `joined-doc.ts`, старий `diff-pane.ts`, `decorations.ts`, §1 `history-log.ts`/`history-replay.ts`), які **помирають
 > на Phase 6**. **Спека моделі** — **DIFF-EDITOR-V2.md**; рішення/розбір — **DIFF-EDITOR-V2-ANALYSIS.md**. Цей §0 —
-> **контракт** адаптації §2–§5; **§0.5 — канон персистентності** (single source of truth). **NEXT = §0.5.6 step-2 wiring.**
+> **контракт** адаптації §2–§5; **§0.5 — канон персистентності** (single source of truth). **§0.5.6 STEP 2
+> feed-bridge ЗРОБЛЕНО** (`history-feed.ts`: `classifyFeed`/`historyFeedListener`/`ReplayFlag`/`replayWithGuard`,
+> обидва gate-спайки через продакшн-listener). **NEXT = Phase 6 wiring** (DiffEditView swap + startSession/recovery-modal).
 >
 > **Зворотна сумісність — НЕ потрібна** (єдиний користувач): чистий розрив. Жодних міграцій on-disk форматів
 > (`meta.json` / `history.jsonl` / autosave-сесії можна викидати), старий код представлення видаляємо повністю на
@@ -202,9 +204,19 @@ main). **Наслідок:** усе на main, але ядро ЧИСТЕ → un
    (нема паузи > `newGroupDelay`); `isolateHistory` — стенд-ін паузи; у проді межі дає реальна пауза → undoDepth+1.
    **Step-2 gap:** `replayDispatch` НЕ покриває `undo(view)`/`redo(view)` (вони будують власні неанотовні tx) → wiring
    мусить мати `replaying`-прапор, що глушить запис на ВЕСЬ replay.
-2. **Wiring**: writer ← DiffPane updateListener (undoDepth before/after → delta; `replaying`-прапор навколо replay);
-   `startSession` з V2-`joinedDocSha`; recovery-flow (`classifyReopen`→`reopenAction`→`ResumeRecoveryModal`→replay);
-   `cursor.json` restore.
+2. **Wiring — feed-bridge + replay-guard ЗРОБЛЕНО (2026-06-13).** `src/diff2/history-feed.ts`: чиста
+   `classifyFeed` (skip/edit/undo/redo — truth-table; undo/redo ПЕРЕД docChanged, бо їх tx теж docChanged) +
+   тонкий `historyFeedListener(sink, flag, now?)` (per-tx дельта з `tr.startState`→`tr.state`, НЕ update-рівня —
+   update батчить tx; skip на `replayDispatch`-annotation АБО `replaying`-прапорі) + `HistorySink` (HistoryWriterV2
+   задовольняє) + `ReplayFlag`/`replayWithGuard` (ОДИН спільний інстанс глушить ВЕСЬ replay, бо `undo(view)`/
+   `redo(view)` будують неанотовні tx). `assessHistoryV2.edits` → NET-лічба `#edit−#undo+#redo` clamp≥0 (тип-3-undo-3
+   → empty → без модалки; евристика, не точна — coalescing зливає burst в 1 групу). `mountDiffPaneV2`/
+   `createDiffPaneState` — опційний `hooks:{sink,flag}` (off у чистих CM6-тестах). Тести (`history-feed.test.ts` 12):
+   classifyFeed-таблиця + net-count + **ОБИДВА gate-спайки через РЕАЛЬНИЙ `historyFeedListener`** (retire ручного
+   `liveRecorder`) → serialize → `replayWithGuard` у свіжий view; replay==live ТА sink реплей-view порожній
+   (трап-2 no-double-record). **Лишилось на Phase 6** (потребує DiffEditView lifecycle + Obsidian Modal, не unit-
+   тестовне без vault): `startSession` з V2-`joinedDocSha`; recovery-flow (`classifyReopen`→`reopenAction`→
+   `ResumeRecoveryModal`→`replayWithGuard`); `cursor.json` restore.
 3. **Карусель** (§0.5.5) — окремий пізніший інкремент (worker-офлоуд відмінено; `compact()` на main + atomic-swap +
    тригери з `shouldCompact`).
 
