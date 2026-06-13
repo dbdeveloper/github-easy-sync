@@ -75,6 +75,19 @@ export function buildModel(base: string, sibling: string): DiffModel {
   return { doc, ranges };
 }
 
+// Canonical, deterministic serialization of a DiffModel — the V2 replay-validity
+// fingerprint input (DIFF-EDITOR.md §2.5 / §0.5: joinedDocSha). buildModel is
+// deterministic (jsdiff + fixed flush order) and never throws (no sentinels),
+// so SHA(serializeModel(buildModel(base, sibling))) is reproducible from
+// (base, sibling) alone. Captures BOTH the clean doc AND the group partition
+// (ranges), so a structural change (different diff regions) shifts the
+// fingerprint even when the doc text happens to coincide. The VerRange keys are
+// always written in {from,to,ver,group} order by buildModel, so JSON.stringify
+// is stable here.
+export function serializeModel(m: DiffModel): string {
+  return JSON.stringify({ doc: m.doc, ranges: m.ranges });
+}
+
 // (doc, ranges) → (base, sibling). Walk in document order: normal gaps go to
 // both sides; a ver1 range's content (terminal `\n` dropped) to base, a ver2
 // range's content to sibling. The terminal `\n` is internal — never written.

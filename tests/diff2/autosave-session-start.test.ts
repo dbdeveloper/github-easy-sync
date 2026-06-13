@@ -12,7 +12,7 @@ import * as crypto from "crypto";
 import { Vault as MockVault } from "../../mock-obsidian";
 import type { Vault } from "obsidian";
 import { calculateGitBlobSHA } from "../../src/utils";
-import { build } from "../../src/diff2/joined-doc";
+import { buildModel, serializeModel } from "../../src/diff2/diff-model";
 import {
   AUTOSAVE_ROOT,
   autosaveDir,
@@ -55,9 +55,12 @@ describe("startSession — §2.5.a", () => {
     expect(meta.conflictId).toBe(id);
     expect(meta.v).toBe(1);
     expect(meta.createdAt).toBe(NOW);
-    // joinedDocSha = SHA(build(base, sibling)) — the replay-validity fingerprint.
+    // V2 joinedDocSha = SHA(serializeModel(buildModel(base, sibling))) — the
+    // replay-validity fingerprint (clean doc + VerRange partition).
     expect(meta.joinedDocSha).toBe(
-      await calculateGitBlobSHA(enc(build("base content\n", "sibling content\n"))),
+      await calculateGitBlobSHA(
+        enc(serializeModel(buildModel("base content\n", "sibling content\n"))),
+      ),
     );
   });
 
@@ -150,10 +153,13 @@ describe("classifyReopen — §3.1 detection (joinedDocSha gate)", () => {
     expect((await reopen()).kind).toBe("library-drift");
   });
 
-  it("a \\0 sentinel entered an input since start → sentinel (route to §1.3)", async () => {
+  it("V2: a \\0 in an input is ordinary text (no sentinel) → vault-changed", async () => {
+    // Under §1 a \0 made build() throw → "sentinel". V2 buildModel treats \0 as
+    // text, so the input simply differs from the snapshot → vault-changed. The
+    // sentinel branch is defensive-only now (retires with §1.3 in the view-swap).
     await startSession(fx.vault, id, "base.md", "sibling.md", NOW);
     await fx.vault.adapter.writeBinary("base.md", enc("base\0poisoned\n"));
-    expect((await reopen()).kind).toBe("sentinel");
+    expect((await reopen()).kind).toBe("vault-changed");
   });
 
   it("snapshot integrity failure → corrupt", async () => {

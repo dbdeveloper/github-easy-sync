@@ -32,7 +32,7 @@
 import { normalizePath, type Vault } from "obsidian";
 import { calculateGitBlobSHA } from "../utils";
 import { atomicWriteFile } from "../sync2/atomic-write";
-import { build } from "./joined-doc";
+import { buildModel, serializeModel } from "./diff-model";
 
 // The autosave root, read live by autosaveDir() / sweepAll() (ES live binding,
 // so autosave-cleanup.ts sees updates). Default = vault-root (tests / back-compat);
@@ -134,10 +134,10 @@ export interface AutosaveMeta {
   siblingPath: string;
   baseShaAtStart: string;
   siblingShaAtStart: string;
-  // §2.5 joinedDocSha — git-blob SHA of build(base, sibling) (the joined `\0`/`\1`
-  // string, which serializes BOTH the clean doc and the structure partition).
+  // §2.5 joinedDocSha — git-blob SHA of serializeModel(buildModel(base, sibling)),
+  // i.e. the V2 diff-model's clean doc + VerRange partition (see joinedDocShaV2).
   // Replaces joinAlgoVersion/joinAlgoOptions: replay is valid iff a fresh
-  // build() reproduces this fingerprint, which detects diff-library drift
+  // buildModel reproduces this fingerprint, which detects diff-library drift
   // DIRECTLY (no version tracking). Drives the replay-validity gate in
   // classifyReopen; orthogonal to the input SHAs (which drive the dialog).
   joinedDocSha: string;
@@ -145,6 +145,17 @@ export interface AutosaveMeta {
 
 const utf8 = (s: string): ArrayBuffer =>
   new TextEncoder().encode(s).buffer as ArrayBuffer;
+
+// §2.5 (V2) — the replay-validity fingerprint: git-blob SHA of the canonical
+// serialization of the V2 diff-model (clean doc + VerRange partition). Replaces
+// the §1 `build()` joined `\0`/`\1` string. ONE helper used at BOTH the
+// startSession write and the classifyReopen recompute, so the fingerprint can
+// never drift between them. buildModel is deterministic and (unlike §1 build)
+// NEVER throws — V2 has no sentinels (DIFF-EDITOR-V2 §2.1) — so this is
+// reproducible from (base, sibling) alone.
+function joinedDocShaV2(base: string, sibling: string): Promise<string> {
+  return calculateGitBlobSHA(utf8(serializeModel(buildModel(base, sibling))));
+}
 
 // ── session-start protocol (§2.5.a) ──────────────────────────────────
 
@@ -174,11 +185,12 @@ export async function startSession(
   const siblingBytes = await vault.adapter.readBinary(siblingPath);
   const baseShaAtStart = await calculateGitBlobSHA(baseBytes);
   const siblingShaAtStart = await calculateGitBlobSHA(siblingBytes);
-  const joinedDocSha = await calculateGitBlobSHA(
-    utf8(build(utf8Decode(baseBytes), utf8Decode(siblingBytes))),
-  ); // may throw on \0/\1 collision — before any disk write
+  const joinedDocSha = await joinedDocShaV2(
+    utf8Decode(baseBytes),
+    utf8Decode(siblingBytes),
+  ); // V2 buildModel never throws (no sentinels) — see joinedDocShaV2
 
-  await ensureDir(vault, autosaveDir(conflictId)); // step 1 (idempotent), after build
+  await ensureDir(vault, autosaveDir(conflictId)); // step 1 (idempotent), after buildModel
 
   await atomicWriteFile(vault, baseSnapshotPath(conflictId), baseBytes); // 6
   await atomicWriteFile(vault, siblingSnapshotPath(conflictId), siblingBytes); // 7
@@ -230,18 +242,22 @@ export async function readMeta(
 // On `openDiffPane(conflictId)` decide how to open. Returns a status; does NOT
 // render the recovery dialog or run cleanup (Stage 3 §3.2/§3.2.a, §4). The
 // REPLAY-VALIDITY gate is `joinedDocSha`: replay is valid iff a fresh
-// build(currentBase, currentSibling) reproduces meta.joinedDocSha. The input
-// SHAs are ORTHOGONAL — they choose the DIALOG (clean resume vs vault-changed),
-// not whether replay can run. The two can disagree: a whitespace-only input
-// change that diffLines collapses leaves joinedDocSha matching → replay is
-// genuinely valid → "resume" (joinedDocSha governs).
+// buildModel(currentBase, currentSibling) reproduces meta.joinedDocSha.
+//
+// V2 NOTE (P6.1): buildModel is INJECTIVE (`splitModel∘buildModel === id`, the
+// §0.3 round-trip), so the fingerprint is injective on (base, sibling) — UNLIKE
+// the §1 claim, inputs-differ ⟹ fingerprint-differs always. The gate therefore
+// collapses to: `resume ⟺ inputs byte-identical`. joinedDocSha buys EXACTLY ONE
+// discrimination over a plain input-SHA compare: `library-drift` — same input
+// bytes producing a DIFFERENT partition, which can only happen if the diff
+// library (jsdiff) changed mid-session. That single case is its whole purpose.
 //
 //   resume        → joined reproduces        → §3.2 normal recovery dialog
-//   library-drift → joined differs, inputs SAME → diff lib changed; replay
+//   library-drift → joined differs, inputs SAME → jsdiff changed; replay
 //                    impossible AND restore-from-snapshot can't help either
-//                    (build(snapshot) ≠ joinedDocSha too) → start fresh (Notice)
+//                    (buildModel(snapshot) ≠ joinedDocSha too) → start fresh (Notice)
 //   vault-changed → joined differs, inputs DIFFER → §3.2.a (the restore path
-//                    re-checks build(snapshot) === joinedDocSha itself)
+//                    re-checks buildModel(snapshot) === joinedDocSha itself)
 //   corrupt       → meta unparseable / snapshot-integrity fail / input missing
 //                    → cleanup → fresh
 //   sentinel      → a \0/\1 entered an input since session start (build throws)
@@ -291,12 +307,18 @@ export async function classifyReopen(
   const currentBaseSha = await calculateGitBlobSHA(baseBytes);
   const currentSiblingSha = await calculateGitBlobSHA(siblingBytes);
 
-  // The replay-validity gate. build() throws if a sentinel entered an input
-  // since session start — route to §1.3 rather than crashing the reopen.
+  // The replay-validity gate (V2 fingerprint). buildModel never throws under V2
+  // (no sentinels) — so the catch is now DEFENSIVE-ONLY (any unexpected hash/
+  // serialize failure falls back to the safe "open externally" route). The
+  // `sentinel` ReopenStatus + this try/catch retire alongside the §1.3 collision
+  // check in the view-swap session; kept here so P6.1 leaves the classifier
+  // branch structure untouched. A `\0` in an input is now ordinary text → it
+  // shifts the fingerprint and classifies as `vault-changed`, not `sentinel`.
   let currentJoinedSha: string;
   try {
-    currentJoinedSha = await calculateGitBlobSHA(
-      utf8(build(utf8Decode(baseBytes), utf8Decode(siblingBytes))),
+    currentJoinedSha = await joinedDocShaV2(
+      utf8Decode(baseBytes),
+      utf8Decode(siblingBytes),
     );
   } catch {
     return { kind: "sentinel", meta };

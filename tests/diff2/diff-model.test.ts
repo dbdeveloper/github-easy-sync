@@ -4,7 +4,7 @@
 // invariants hold. (DIFF-EDITOR-V2.md §2.1–§2.2.12; contract DIFF-EDITOR.md §0.3.)
 
 import { describe, expect, it } from "vitest";
-import { buildModel, splitModel, type VerRange } from "../../src/diff2/diff-model";
+import { buildModel, serializeModel, splitModel, type VerRange } from "../../src/diff2/diff-model";
 
 function roundtrip(base: string, sibling: string) {
   const m = buildModel(base, sibling);
@@ -42,6 +42,28 @@ describe("diff-model — round-trip split(build(a,b)) === (a,b)", () => {
     const m = buildModel("a\nb\nc\n", "a\nb\nc\n");
     expect(m.ranges).toHaveLength(0);
     expect(m.doc).toBe("a\nb\nc\n");
+  });
+});
+
+describe("serializeModel — V2 joinedDocSha fingerprint input (P6.1)", () => {
+  it("is reproducible from (base, sibling) alone — two builds match byte-for-byte", () => {
+    const b = "alpha\nA1\ngamma\n";
+    const s = "alpha\nA2\ngamma\n";
+    expect(serializeModel(buildModel(b, s))).toBe(serializeModel(buildModel(b, s)));
+  });
+
+  it("captures the group partition, not just the doc text", () => {
+    // Same sibling text reached two ways: identical-to-base (no group) vs a real
+    // change (one group). The doc/ranges differ ⇒ the fingerprint must differ.
+    const noChange = serializeModel(buildModel("x\ny\n", "x\ny\n"));
+    const oneGroup = serializeModel(buildModel("x\ny\n", "x\nY\n"));
+    expect(noChange).not.toBe(oneGroup);
+  });
+
+  it("different inputs that share no diff region still differ", () => {
+    expect(serializeModel(buildModel("a\n", "b\n"))).not.toBe(
+      serializeModel(buildModel("a\n", "c\n")),
+    );
   });
 });
 

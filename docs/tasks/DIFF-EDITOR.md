@@ -39,7 +39,11 @@
 > на Phase 6**. **Спека моделі** — **DIFF-EDITOR-V2.md**; рішення/розбір — **DIFF-EDITOR-V2-ANALYSIS.md**. Цей §0 —
 > **контракт** адаптації §2–§5; **§0.5 — канон персистентності** (single source of truth). **§0.5.6 STEP 2
 > feed-bridge ЗРОБЛЕНО** (`history-feed.ts`: `classifyFeed`/`historyFeedListener`/`ReplayFlag`/`replayWithGuard`,
-> обидва gate-спайки через продакшн-listener). **NEXT = Phase 6 wiring** (DiffEditView swap + startSession/recovery-modal).
+> обидва gate-спайки через продакшн-listener). **Phase 6 P6.1 ЗРОБЛЕНО** (V2 `joinedDocSha` —
+> `serializeModel(buildModel)` git-blob SHA в `startSession`+`classifyReopen`; §1 `build` прибрано з autosave-store;
+> `\0` тепер звичайний текст→`vault-changed`, sentinel-гілка defensive-only до view-swap). **NEXT = Phase 6 P6.3
+> view-swap** (DiffEditView→V2 owner-object: `mountDiffPaneV2`+спільний `ReplayFlag`+`HistoryWriterV2`+`replayWithGuard`+
+> `splitModel`@commit; cursor-listener окремо; recovery-modal) **+ P6.4 §1-cluster delete** (reverse-import, tsc-gated).
 >
 > **Зворотна сумісність — НЕ потрібна** (єдиний користувач): чистий розрив. Жодних міграцій on-disk форматів
 > (`meta.json` / `history.jsonl` / autosave-сесії можна викидати), старий код представлення видаляємо повністю на
