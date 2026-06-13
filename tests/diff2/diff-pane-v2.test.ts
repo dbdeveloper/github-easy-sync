@@ -130,23 +130,46 @@ describe("diff-pane-v2 — mounts without error (happy-dom)", () => {
     }
   });
 
-  it("§2.2.9 cursor: resolve→undo→redo lands the caret at the group start (no 0,0 drift)", () => {
+  it("§2.2.9 POINTER: resolve→END; undo→group start (synthesized); redo→END", () => {
     const parent = document.createElement("div");
     document.body.appendChild(parent);
     const view = mountDiffPaneV2(parent, "a\nL\nc\n", "a\nR\nc\n"); // group ver1[2,5) ver2[5,8)
     try {
-      applyResolve(view, 0, "keep1"); // anchors caret at group start (2) before resolving
+      view.dispatch({ selection: { anchor: 0 } }); // button click → caret is wherever (irrelevant)
+      applyResolve(view, 0, "keep1", {}, "pointer"); // synthesizes caret at group start (2)
       expect(view.state.doc.toString()).toBe("a\nL\nc\n");
-      expect(view.state.selection.main.head).toBe(2); // live: resolved start
+      expect(view.state.selection.main.head).toBe(4); // FORWARD = END of "L\n" (copy-paste)
 
       undo(view); // ONE undo reverts the whole resolution (selection-tx is not a history step)
       expect(view.state.doc.toString()).toBe("a\nL\n\nR\n\nc\n"); // group back
       expect(readStructure(view.state)).toHaveLength(2); // structure restored
-      expect(view.state.selection.main.head).toBe(2); // caret at the group start
+      expect(view.state.selection.main.head).toBe(2); // BACKWARD = group start (synthesized before-sel)
 
       redo(view);
       expect(view.state.doc.toString()).toBe("a\nL\nc\n");
-      expect(view.state.selection.main.head).toBe(2); // caret at resolved start (NOT 0)
+      expect(view.state.selection.main.head).toBe(4); // FORWARD again = END (NOT 0)
+    } finally {
+      view.destroy();
+      parent.remove();
+    }
+  });
+
+  it("§2.2.9 KEYBOARD: resolve→END; undo→where the hotkey was pressed (NOT group start)", () => {
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const view = mountDiffPaneV2(parent, "a\nL\nc\n", "a\nR\nc\n"); // group [2,8)
+    try {
+      view.dispatch({ selection: { anchor: 3 } }); // caret INSIDE ver1-block, where user hits Ctrl+Enter
+      expect(resolveCurrentGroup(view, "keep1")).toBe(true); // keyboard path
+      expect(view.state.doc.toString()).toBe("a\nL\nc\n");
+      expect(view.state.selection.main.head).toBe(4); // FORWARD = END of resolution
+
+      undo(view);
+      expect(view.state.doc.toString()).toBe("a\nL\n\nR\n\nc\n"); // group back
+      expect(view.state.selection.main.head).toBe(3); // BACKWARD = where the hotkey fired (NOT 2)
+
+      redo(view);
+      expect(view.state.selection.main.head).toBe(4); // FORWARD = END again
     } finally {
       view.destroy();
       parent.remove();

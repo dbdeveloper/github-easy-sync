@@ -34,10 +34,10 @@ describe("diff-resolve — resolveGroup (pure, scenario-2)", () => {
       "L\n> Changes from `dev` at 2026-06-05 10:31:30:\n> R\n",
     );
   });
-  it("replaces the WHOLE group span and puts the caret at its start", () => {
+  it("replaces the WHOLE group span and puts the caret at the END of the insert (§2.2.9)", () => {
     const spec = resolveGroup(doc, ranges, 0, "keep1")!;
     expect(spec.changes).toMatchObject({ from: 2, to: 8, insert: "L\n" });
-    expect(spec.selection).toMatchObject({ anchor: 2 });
+    expect(spec.selection).toMatchObject({ anchor: 4 }); // groupFrom(2) + insert "L\n" length(2)
   });
   it("returns null for an unknown group", () => {
     expect(resolveGroup(doc, ranges, 99, "keep1")).toBeNull();
@@ -45,13 +45,13 @@ describe("diff-resolve — resolveGroup (pure, scenario-2)", () => {
 });
 
 describe("diff-resolve — dispatch-level (doc + structure resolve together)", () => {
-  it("keep1: group becomes ver1 normal text, structure emptied, caret at start", () => {
+  it("keep1: group becomes ver1 normal text, structure emptied, caret at END", () => {
     const s0 = createDiffPaneState("a\nL\nc\n", "a\nR\nc\n");
     const spec = resolveGroup(s0.doc, readStructure(s0), 0, "keep1")!;
     const s1 = s0.update(spec).state;
     expect(s1.doc.toString()).toBe("a\nL\nc\n");
     expect(readStructure(s1)).toEqual([]); // no more conflict
-    expect(s1.selection.main.head).toBe(2);
+    expect(s1.selection.main.head).toBe(4); // END of "L\n" (§2.2.9 copy-paste)
   });
 
   it("neither: group deleted; the resolved doc round-trips on split", () => {
@@ -122,7 +122,7 @@ describe("diff-resolve — undo/redo restore STRUCTURE + cursor (Mina 1: structu
     const groupStructure = readStructure(s); // [ver1[2,5), ver2[5,8)]
     s = s.update(resolveGroup(s.doc, readStructure(s), 0, "keep1")!).state;
     expect(readStructure(s)).toEqual([]); // resolved
-    expect(s.selection.main.head).toBe(2); // caret at resolved start (TODO #9)
+    expect(s.selection.main.head).toBe(4); // caret at END of "L\n" (§2.2.9 copy-paste)
 
     const undone = run(s, undo);
     expect(undone.doc.toString()).toBe("a\nL\n\nR\n\nc\n"); // raw group text back

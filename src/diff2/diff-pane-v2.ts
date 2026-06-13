@@ -20,6 +20,7 @@ import {
   EditorState,
   Prec,
   StateField,
+  Transaction,
   type Extension,
 } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
@@ -32,8 +33,10 @@ import {
 } from "@codemirror/view";
 import { buildModel } from "./diff-model";
 import {
+  cursorHistory,
   cursorVertTarget,
   readStructure,
+  resolveCaret,
   structureField,
   structureHistory,
   terminalProtectionFilter,
@@ -153,6 +156,28 @@ export const diffNavKeymap: Extension = Prec.highest(
   ]),
 );
 
+// ── §2.2.9 explicit resolution-caret restore ─────────────────────────────────
+// `resolveCaret` rides the forward resolution and (via cursorHistory) every undo/
+// redo hop. On undo restore `before`, on redo restore `after` — a selection-only
+// follow-up dispatch (NOT in history), since CM6's native selection mapping drifts
+// for a caret inside a replaced region. Re-entrancy (dispatch from updateListener)
+// validated on a real view in v2-cursor-history-view-probe.
+export const cursorRestoreListener: Extension = EditorView.updateListener.of((u) => {
+  for (const tr of u.transactions) {
+    const e = tr.effects.find((x) => x.is(resolveCaret));
+    if (!e) continue;
+    let pos: number | null = null;
+    if (tr.isUserEvent("undo")) pos = e.value.before;
+    else if (tr.isUserEvent("redo")) pos = e.value.after;
+    if (pos !== null) {
+      u.view.dispatch({
+        selection: { anchor: pos },
+        annotations: Transaction.addToHistory.of(false),
+      });
+    }
+  }
+});
+
 // ── assembly ─────────────────────────────────────────────────────────────────
 // Build the initial EditorState for a (base, sibling) pair. The structure field
 // is seeded via `.init()` from the model's ranges (no post-create dispatch).
@@ -165,6 +190,8 @@ export function createDiffPaneState(base: string, sibling: string): EditorState 
       history(),
       structureField.init(() => toRangeSet(m.ranges)),
       structureHistory, // version the structure field across undo/redo (resolution)
+      cursorHistory, // §2.2.9 carry the resolveCaret marker across undo/redo
+      cursorRestoreListener, // §2.2.9 apply before/after caret on undo/redo
       decorationsField,
       terminalProtectionFilter,
       externalGuardFilter, // §2.2.5(1) — changeFilter (runs before transactionFilters)

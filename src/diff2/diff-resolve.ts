@@ -2,9 +2,15 @@
 //
 // Resolving a diff-group is a single region-replace: swap the WHOLE group span
 // [ver1.from, ver2.to) for the chosen plain text, drop the group's two ranges
-// from the structure (it is now normal text), and drop the caret at the START of
-// the resolved content (§2.2.9 / TODO #9 — covers keep1/keep2/both/join: start of
-// the inserted text; neither: start of what follows the deleted group).
+// from the structure (it is now normal text), and drop the caret at the END of
+// the resolved content (§2.2.9 — copy-paste semantics: the caret lands right
+// after the inserted text, exactly as a select-then-paste would leave it).
+//
+// The UNDO landing point is device-dependent and handled by applyResolve, NOT
+// here (§2.2.9): a KEYBOARD hotkey leaves the caret where the user pressed it
+// (CM6 stores that as the transaction's before-selection); a POINTER/tap click
+// has no meaningful caret, so applyResolve first synthesizes one at ver1.from so
+// UNDO returns to the group start. Either way FORWARD (resolve/redo) = END.
 //
 // One transaction ⇒ one undo step (history newGroupDelay:0) and one history.jsonl
 // block on replay (scenario-2, validated by v2-resolution-paste-spike). The
@@ -17,7 +23,7 @@
 import { EditorView, keymap } from "@codemirror/view";
 import { Prec, type Extension, type Text, type TransactionSpec } from "@codemirror/state";
 import type { VerRange } from "./diff-model";
-import { readStructure, setStructure, toRangeSet } from "./diff-structure";
+import { readStructure, resolveCaret, setStructure, toRangeSet } from "./diff-structure";
 import { groupsOf } from "./diff-selection";
 
 export type ResolveChoice = "keep1" | "keep2" | "both" | "neither" | "join";
@@ -62,12 +68,17 @@ function resolvedInsert(
 }
 
 // Build the resolution transaction for one group, or null if the group is absent.
+// `before` = the caret to restore on UNDO (§2.2.9 — keyboard: where the hotkey was
+// pressed; pointer: the group start). FORWARD/REDO caret = the END of the insert.
+// Both ride the transaction as a `resolveCaret` effect; the view-level listener
+// applies them across undo/redo (CM6's native mapping can't — see diff-structure).
 export function resolveGroup(
   doc: Text,
   ranges: VerRange[],
   group: number,
   choice: ResolveChoice,
   opts: ResolveOpts = {},
+  before?: number,
 ): TransactionSpec | null {
   const v1 = ranges.find((r) => r.group === group && r.ver === 1);
   const v2 = ranges.find((r) => r.group === group && r.ver === 2);
@@ -89,32 +100,41 @@ export function resolveGroup(
     .filter((r) => r.group !== group)
     .map((r) => (r.from >= groupTo ? { ...r, from: r.from + delta, to: r.to + delta } : r));
 
+  const after = groupFrom + insert.length; // §2.2.9 — END of the resolved content
   return {
     changes: { from: groupFrom, to: groupTo, insert },
-    effects: setStructure.of(toRangeSet(remaining)),
-    selection: { anchor: groupFrom }, // §2.2.9 / TODO #9 — start of the resolved content
+    effects: [
+      setStructure.of(toRangeSet(remaining)),
+      resolveCaret.of({ before: before ?? after, after }),
+    ],
+    selection: { anchor: after }, // forward (live) caret = END (copy-paste)
     scrollIntoView: true,
   };
 }
+
+// Where a resolution origin comes from. `keyboard` (Ctrl+Enter — caret already in
+// the group) restores the user's caret on UNDO; `pointer` (button/tap — no
+// meaningful caret) restores the group start (§2.2.9).
+export type ResolveOrigin = "keyboard" | "pointer";
 
 export function applyResolve(
   view: EditorView,
   group: number,
   choice: ResolveChoice,
   opts: ResolveOpts = {},
+  origin: ResolveOrigin = "pointer",
 ): boolean {
   const ranges = readStructure(view.state);
   const v1 = ranges.find((r) => r.group === group && r.ver === 1);
   if (!v1) return false;
-  const spec = resolveGroup(view.state.doc, ranges, group, choice, opts);
+  // §2.2.9 — the UNDO caret (`before`): a KEYBOARD hotkey keeps the user's caret
+  // (where it was pressed); a POINTER click has no meaningful caret, so use the
+  // group start. The caret is carried as data (resolveCaret) and applied by the
+  // listener — NOT a pre-anchor dispatch, which corrupts CM6's redo selection.
+  const before = origin === "keyboard" ? view.state.selection.main.head : v1.from;
+  const spec = resolveGroup(view.state.doc, ranges, group, choice, opts, before);
   if (!spec) return false;
-  // §2.2.9 — imitate select-copy-paste cursor handling: FIRST anchor the caret at
-  // the group start (a selection-only transaction — NOT a history step), so CM6
-  // history records THIS as the resolution's before-selection. Then undo restores
-  // the caret to the group start (where the group reappears) and redo maps it
-  // forward to the resolved-content start — both sane, no 0,0 drift.
-  view.dispatch({ selection: { anchor: v1.from } });
-  view.dispatch(spec);
+  view.dispatch(spec); // single transaction — doc + structure + caret-marker together
   view.focus(); // keep keyboard focus after a button click (undo/redo reach CM6)
   return true;
 }
@@ -132,7 +152,8 @@ export function resolveClickHandler(opts: ResolveOpts = {}): Extension {
       event.preventDefault();
       const group = Number(btn.getAttribute("data-diff2-group"));
       const choice = btn.getAttribute("data-diff2-resolve") as ResolveChoice;
-      return applyResolve(view, group, choice, opts);
+      return applyResolve(view, group, choice, opts, "pointer"); // §2.2.9 mouse/tap → synthesize caret
+
     },
   });
 }
@@ -154,7 +175,7 @@ export function resolveCurrentGroup(
 ): boolean {
   const group = currentGroupAt(readStructure(view.state), view.state.selection.main.head);
   if (group === null) return false;
-  return applyResolve(view, group, choice, opts);
+  return applyResolve(view, group, choice, opts, "keyboard"); // §2.2.9 hotkey → keep the caret
 }
 
 // Default hotkeys for the current group (configurable; Prec.highest so they win
@@ -192,7 +213,10 @@ export function resolveAll(
   });
   return {
     changes,
-    effects: setStructure.of(toRangeSet([])), // all groups resolved ⇒ no conflicts left
+    effects: [
+      setStructure.of(toRangeSet([])), // all groups resolved ⇒ no conflicts left
+      resolveCaret.of({ before: groups[0].from, after: groups[0].from }),
+    ],
     selection: { anchor: groups[0].from }, // caret at the first resolved group
     scrollIntoView: true,
   };
@@ -206,9 +230,7 @@ export function applyResolveAll(
   const ranges = readStructure(view.state);
   const spec = resolveAll(view.state.doc, ranges, choice, opts);
   if (!spec) return false;
-  const groups = groupsOf(ranges);
-  view.dispatch({ selection: { anchor: groups[0].from } }); // §2.2.9 before-selection anchor
-  view.dispatch(spec);
+  view.dispatch(spec); // single transaction — caret-marker rides it (resolveCaret)
   view.focus();
   return true;
 }

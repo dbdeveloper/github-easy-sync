@@ -106,6 +106,26 @@ export const structureHistory = invertedEffects.of((tr) => {
   return [];
 });
 
+// §2.2.9 explicit cursor handling. A resolution caret must land at the END of the
+// inserted text live/redo, and return to a SPECIFIC point on undo (keyboard: where
+// the hotkey was pressed; pointer: the group start). CM6's native history restores
+// selection by MAPPING through the change geometry, which is lossy for a caret
+// inside a replaced region — across an undo→redo round-trip it drifts to a boundary
+// (proven by the v2-cm6-paste-undo-probe). So we carry the exact positions as
+// immutable data and apply them ourselves.
+//
+// `resolveCaret` rides the forward resolution; `cursorHistory` propagates it onto
+// the undo AND redo transactions (so the marker survives every hop — exactly like
+// `structureHistory`). The VIEW-level `cursorRestoreListener` (diff-pane.ts) reads
+// it and dispatches the right caret (before on undo, after on redo). Validated on a
+// real view in v2-cursor-history-view-probe.
+export const resolveCaret = StateEffect.define<{ before: number; after: number }>();
+
+export const cursorHistory = invertedEffects.of((tr) => {
+  for (const e of tr.effects) if (e.is(resolveCaret)) return [resolveCaret.of(e.value)];
+  return [];
+});
+
 // §2.2.4(1,3) terminal protection: the terminal `\n` (the char at index
 // `range.to-1`) must never be deleted, so a ver-block never collapses below
 // width-1. Returns false (reject the transaction) if any change would delete a
