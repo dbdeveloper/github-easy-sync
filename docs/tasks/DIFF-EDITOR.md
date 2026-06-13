@@ -185,13 +185,26 @@ main). **Наслідок:** усе на main, але ядро ЧИСТЕ → un
 #### §0.5.6 Next-steps (sequenced)
 - ✅ **Усі gate-спайки закриті** (§0.5.4): курсор (`ba76415`), command-log per-tx (`v2-mixed-recovery-spike`),
   1b-coalescing (`v2-1b-coalescing-spike`). Продакшн розблоковано.
-1. **Продакшн-екстракція**: V2 `history-log`/`history-replay` паралельними файлами (як `diff-pane-v2`), TDD:
-   writer §0.5.2 (per-tx блок + `newGroup` з `undoDepth`-дельти + `setStructure`/`resolveCaret`→structure/caret,
-   skip non-docChanged+`replayDispatch`) + replay §0.5.3 (re-run commands, `isolateHistory` на `newGroup`) +
-   bloat-stats §0.5.5. §1-`history-log.ts`/`history-replay.ts` помирають на Phase 6.
-2. **Wiring**: writer ← DiffPane updateListener; `startSession` з V2-`joinedDocSha`; recovery-flow
-   (`classifyReopen`→`reopenAction`→`ResumeRecoveryModal`→replay); `cursor.json` restore.
-3. **Карусель** (§0.5.5) — окремий пізніший інкремент (worker + atomic-swap + тригери).
+1. ✅ **Продакшн-екстракція — ЗРОБЛЕНО (2026-06-13).** `src/diff2/history-log-v2.ts` + `history-replay-v2.ts`
+   (паралельні, як `diff-pane-v2`; §1-`history-log.ts`/`history-replay.ts` помирають на Phase 6). Чисте ядро
+   (§0.5.5.1, тестовне без vault/CM6): `buildEditBlock`/`buildCommandBlock` (newGroup з `undoDepth`-дельти +
+   `setStructure`→structure / `resolveCaret`→caret), `serializeBlock`/`parseBlock`/`verifyBlock` (FNV-1a-32; **sum
+   покриває kind/change/newGroup/structure/caret** — §1-стиль {change,structure} пропустив би тихий злам recovery),
+   `accrueStats`/`shouldCompact` (bloat-stats), `replayStep`, `scanHistoryV2`/`assessHistoryV2`. Краї: тонкий
+   `HistoryWriterV2` (vault append, serialized tail, **БЕЗ `truncateLastBlock`** — undo/redo тепер command-блоки) +
+   `replayHistoryV2(view, jsonl)` на MOUNTED view (re-run commands; **annotation = 1b-стратегія**: `userEvent:
+   "input.type"` на КОЖЕН edit + `isolateHistory` ЛИШЕ на `newGroup` — superset, що відтворює coalesced burst'и;
+   change як `ChangeSet.toJSON()`→`fromJSON` на replay). `replayDispatch` визначено. Тести (`history-log-v2.test.ts`
+   13 / `history-replay-v2.test.ts` 15): pure-core + **обидва gate-спайки (mixed-recovery + 1b) портовані через
+   РЕАЛЬНИЙ serialize→jsonl→parse→replay**. ⚠️ **Gotcha для тесту/wiring:** у синхронному тесті ops зливаються
+   (нема паузи > `newGroupDelay`); `isolateHistory` — стенд-ін паузи; у проді межі дає реальна пауза → undoDepth+1.
+   **Step-2 gap:** `replayDispatch` НЕ покриває `undo(view)`/`redo(view)` (вони будують власні неанотовні tx) → wiring
+   мусить мати `replaying`-прапор, що глушить запис на ВЕСЬ replay.
+2. **Wiring**: writer ← DiffPane updateListener (undoDepth before/after → delta; `replaying`-прапор навколо replay);
+   `startSession` з V2-`joinedDocSha`; recovery-flow (`classifyReopen`→`reopenAction`→`ResumeRecoveryModal`→replay);
+   `cursor.json` restore.
+3. **Карусель** (§0.5.5) — окремий пізніший інкремент (worker-офлоуд відмінено; `compact()` на main + atomic-swap +
+   тригери з `shouldCompact`).
 
 ---
 
