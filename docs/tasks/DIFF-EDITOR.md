@@ -67,7 +67,7 @@
 | ~~«derive structure on replay» (spanning-resolve detector / re-paste фільтр)~~ | **SUPERSEDED 2026-06-13** (landmine #2): реальний `applyResolve` несе `setStructure` ЯВНО, не через фільтр → derive-only ламався. Замінено storing structure у resolution-блоках (proven). НЕ реалізовувати spanning-resolve | ❌ superseded |
 | резолюція як doc-edit (§1.6) | **scenario-2**: region-replace однією транзакцією (`userEvent:"input.paste"`) — CM6-рекогносцировка ANALYSIS §3.5 (spike A–E) | контракт ✔ |
 | `structureHistory` (`invertedEffects`, Segment[]-field) | той самий патерн над RangeSet-полем + його ефектом | контракт ✔ (precedent у коді) |
-| §3.3.a synthetic-caret **trim** | trim існував через full-doc-replace chunk-action; scenario-2 = мінімальний region-replace → каретка природно лягає в resolved-зону → **trim імовірно стає moot** | **спростити — verify** |
+| §3.3.a synthetic-caret **trim** | trim існував через full-doc-replace chunk-action; V2 = явний `resolveCaret {before,after}` (§0.5.1) → trim не потрібен зовсім | **ВИДАЛЕНО** (§3.3.a deleted 2026-06-13) |
 | fail-closed: `\0/\1` collision + tiling-assert (§1.3) | сентинелів у doc немає; натомість guard-и цілісності RangeSet (термінал не видаляється; ranges не перетинаються) | контракт ✔ |
 
 ### §0.3 Інваріанти, які міграція НЕ сміє зламати
@@ -2306,42 +2306,8 @@ vault-файли змінились під сесією (`SHA(side) ≠ meta`):
 undoable step у CM6 historyField. Після replay історія undo така ж, як перед
 crash — `Ctrl+Z` йде назад послідовно.
 
-#### §3.3.a Synthetic caret per replayed block (TODO #10)
-
-> ⚠️ **ПОВНІСТЮ SUPERSEDED §0.5.1 (2026-06-13) — це #10-throwaway.** `syntheticCaret`-trim (common-prefix/suffix над
-> full-doc-replace) — корінь самого бага #10 (undo після recovery дрейфував на межу). **V2-рішення:** резолюція несе
-> курсор як ЯВНІ дані — `resolveCaret {before,after}` (StateEffect), `cursorHistory` (invertedEffects) пропагує на
-> undo/redo, `cursorRestoreListener` ставить. Typing-курсор — native plain-text. Доведено `v2-cm6-paste-undo-probe` +
-> fuzz 60/60. Уся §3.3.a — мертва (читати лише як історію кореня #10).
-
-Блоки `history.jsonl` НЕ зберігають позицію курсора (формат §2.6 + checksum
-свідомо лишаються лише про `change`+`structure` — косметичне значення курсора
-не сміє труїти crash-recovery довіру, яку гартує §5; битий/відсутній курсор
-має деградувати до 0, ніколи не зупиняти replay). Тому кожен replayed-блок
-дістає **синтетичний** курсор, деривований з самого `change`:
-
-- **`syntheticCaret(cs, oldDoc, newDoc)`** = позиція одразу ПІСЛЯ **реальної**
-  зміненої ділянки; якщо там `\n` → 0-та позиція наступного рядка. Порожній
-  change → 0. **Trim:** chunk-action (резолюція) записується як full-doc-replace
-  (`[0,oldLen)→[0,newLen)`), тож наївний `toB` = кінець doc. Тому обрізаємо
-  common prefix/suffix між видаленим зрізом (`oldDoc[fromA,toA]`) і вставленим —
-  відновлюємо справжню зону конфлікту, беремо її кінець. Free-edit уже мінімальний
-  → обрізати нічого (no-op). Усе replay-only: блок/формат/checksum недоторкані
-  (→ #5 trustworthy-prefix і #9-live незмінні).
-- Курсор кладеться у `selection` тієї ж replay-транзакції → потрапляє у CM6-undo-
-  стек (кожен `state.update` = крок). Тож після recovery: **REDO** → синтетична
-  позиція, **UNDO** → selection попереднього кроку. Більше нема «безладного 0,0».
-- **Фінальний** курсор: `cursor.json` (primary, крок 7 / §2.9) перекриває
-  синтетичний останнього блоку; якщо `cursor.json` нема/невалідний — лишається
-  синтетичний (fallback: «курсор зупиняється після останньої зміни, де б вона не
-  була»).
-- Резолюція приземляє курсор у **кінець реальної зміненої зони** (після trim),
-  тобто в місці конфлікту — навіть якщо це перший конфлікт на початку файлу й
-  далі є купа спільного тексту. (Це КІНЕЦЬ зони; живий #9 ставить на ПОЧАТОК
-  resolved-group — свідома різниця: replay-rule єдиний «після зміни», як free-edit.)
-
-Oracle (`history-replay.test.ts`): undo-after-replay перевіряє doc+structure+
-**`selection.main.head`** через всю траєкторію (`replay N → undo k == replay N−k`).
+> §3.3.a (synthetic-caret #10) **ВИДАЛЕНО 2026-06-13** — це був #10-throwaway (корінь бага). V2-курсор резолюції
+> несе явні дані `resolveCaret {before,after}` (§0.5.1); typing-курсор native plain-text.
 
 ### §3.4 Start over — wipe + fresh
 
