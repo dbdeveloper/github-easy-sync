@@ -158,3 +158,12 @@ data.json
 benchmark_result.json
 
 .claude
+
+# Temporary files
+*.tmp
+*.old
+*.my
+*.orig
+*~
+*.swp
+
